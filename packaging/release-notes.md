@@ -1,3 +1,5 @@
+**0.2.5:** Virgil has a logo: Virgil's laurel wreath around an Inferno flame made of audio meter bars. It appears on the Windows programs and installer, the macOS app, the Linux menu entry and the control panel.
+
 **0.2.4:** fixes from the second real-network log.
 - Automatic interface choice no longer picks a Hyper-V/WSL, VPN or other virtual adapter; it prefers wired over Wi-Fi. The control panel marks virtual adapters.
 - Clock: uses the least-delayed of every 4 Sync messages, so late receive timestamps on Windows no longer cause the ±1 ms clock jumps.

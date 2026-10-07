@@ -1,0 +1,78 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs>
+  <radialGradient id="bg" cx="50%" cy="38%" r="75%">
+    <stop offset="0" stop-color="#3a1410"/><stop offset="0.6" stop-color="#1c0b0a"/><stop offset="1" stop-color="#0b0606"/>
+  </radialGradient>
+  <radialGradient id="glow" cx="50%" cy="60%" r="50%">
+    <stop offset="0" stop-color="#ff6a1a" stop-opacity="0.35"/><stop offset="1" stop-color="#ff6a1a" stop-opacity="0"/>
+  </radialGradient>
+  <linearGradient id="fire" x1="0" y1="1" x2="0" y2="0">
+    <stop offset="0" stop-color="#9c1c12"/><stop offset="0.35" stop-color="#e2401b"/>
+    <stop offset="0.7" stop-color="#ff8a1f"/><stop offset="1" stop-color="#ffd76a"/>
+  </linearGradient>
+  <linearGradient id="gold" x1="0" y1="0" x2="1" y2="1">
+    <stop offset="0" stop-color="#f6d98a"/><stop offset="0.5" stop-color="#d4a23f"/><stop offset="1" stop-color="#9a6a1f"/>
+  </linearGradient>
+  <linearGradient id="gold2" x1="1" y1="0" x2="0" y2="1">
+    <stop offset="0" stop-color="#e7c06a"/><stop offset="1" stop-color="#8a5c1a"/>
+  </linearGradient>
+  <linearGradient id="corefire" x1="0" y1="1" x2="0" y2="0">
+    <stop offset="0" stop-color="#ffb341"/><stop offset="1" stop-color="#fff2b8"/>
+  </linearGradient>
+  <clipPath id="flame"><path d="M262,74 C266,118 300,140 318,176 C326,160 326,146 322,132 C350,168 356,224 342,268 C330,308 300,336 256,340 C212,336 182,308 170,268 C158,224 170,186 196,160 C196,184 204,200 216,208 C212,160 236,120 262,74 Z"/></clipPath>
+  <clipPath id="core"><path d="M256,170 C262,204 294,224 298,262 C302,298 282,322 256,324 C230,322 210,298 214,262 C218,232 238,214 244,190 C248,204 252,212 258,216 C254,202 252,188 256,170 Z"/></clipPath>
+</defs>
+<rect width="512" height="512" rx="112" fill="url(#bg)"/><circle cx="256" cy="268" r="200" fill="url(#glow)"/>
+<g><path d="M237.4,439.0 L291.0,436.5 L341.4,418.2 L384.0,385.6 L415.1,341.9 L431.6,290.9 L432.3,237.2 L416.9,185.8 L386.9,141.4 L345.0,107.8" fill="none" stroke="url(#gold)" stroke-width="7" stroke-linecap="round"/>
+<path d="M341.4,418.2 Q361.4,437.2 386.4,425.6 Q366.4,406.6 341.4,418.2Z" fill="url(#gold)"/>
+<path d="M341.4,418.2 Q361.5,403.5 355.0,379.5 Q334.8,394.1 341.4,418.2Z" fill="url(#gold2)"/>
+<path d="M384.0,385.6 Q407.6,397.2 427.0,379.6 Q403.5,368.0 384.0,385.6Z" fill="url(#gold)"/>
+<path d="M384.0,385.6 Q398.2,366.6 385.4,346.6 Q371.3,365.7 384.0,385.6Z" fill="url(#gold2)"/>
+<path d="M415.1,341.9 Q439.7,345.7 452.3,324.3 Q427.7,320.4 415.1,341.9Z" fill="url(#gold)"/>
+<path d="M415.1,341.9 Q422.5,320.6 405.3,306.1 Q397.8,327.4 415.1,341.9Z" fill="url(#gold2)"/>
+<path d="M431.6,290.9 Q455.0,287.4 460.3,264.4 Q437.0,267.9 431.6,290.9Z" fill="url(#gold)"/>
+<path d="M431.6,290.9 Q432.3,269.6 412.7,261.3 Q412.0,282.6 431.6,290.9Z" fill="url(#gold2)"/>
+<path d="M432.3,237.2 Q452.3,227.5 450.7,205.4 Q430.6,215.0 432.3,237.2Z" fill="url(#gold)"/>
+<path d="M432.3,237.2 Q426.9,217.8 406.9,215.9 Q412.2,235.3 432.3,237.2Z" fill="url(#gold2)"/>
+<path d="M416.9,185.8 Q432.2,171.5 424.5,152.1 Q409.2,166.4 416.9,185.8Z" fill="url(#gold)"/>
+<path d="M416.9,185.8 Q406.6,169.9 388.1,173.8 Q398.4,189.7 416.9,185.8Z" fill="url(#gold2)"/>
+<path d="M386.9,141.4 Q396.5,124.3 384.2,109.1 Q374.6,126.1 386.9,141.4Z" fill="url(#gold)"/>
+<path d="M386.9,141.4 Q373.3,130.0 357.9,138.7 Q371.4,150.0 386.9,141.4Z" fill="url(#gold2)"/>
+<path d="M345.0,107.8 Q348.9,90.0 333.7,79.8 Q329.8,97.7 345.0,107.8Z" fill="url(#gold)"/>
+<path d="M345.0,107.8 Q329.8,101.5 318.4,113.5 Q333.7,119.8 345.0,107.8Z" fill="url(#gold2)"/>
+<path d="M345.0,107.8 Q332.9,84.7 306.9,85.8 Q318.9,109.0 345.0,107.8Z" fill="url(#gold)"/></g>
+<g><path d="M274.6,439.0 L221.0,436.5 L170.6,418.2 L128.0,385.6 L96.9,341.9 L80.4,290.9 L79.7,237.2 L95.1,185.8 L125.1,141.4 L167.0,107.8" fill="none" stroke="url(#gold)" stroke-width="7" stroke-linecap="round"/>
+<path d="M170.6,418.2 Q145.6,406.6 125.6,425.6 Q150.6,437.2 170.6,418.2Z" fill="url(#gold)"/>
+<path d="M170.6,418.2 Q177.2,394.1 157.0,379.5 Q150.5,403.5 170.6,418.2Z" fill="url(#gold2)"/>
+<path d="M128.0,385.6 Q108.5,368.0 85.0,379.6 Q104.4,397.2 128.0,385.6Z" fill="url(#gold)"/>
+<path d="M128.0,385.6 Q140.7,365.7 126.6,346.6 Q113.8,366.6 128.0,385.6Z" fill="url(#gold2)"/>
+<path d="M96.9,341.9 Q84.3,320.4 59.7,324.3 Q72.3,345.7 96.9,341.9Z" fill="url(#gold)"/>
+<path d="M96.9,341.9 Q114.2,327.4 106.7,306.1 Q89.5,320.6 96.9,341.9Z" fill="url(#gold2)"/>
+<path d="M80.4,290.9 Q75.0,267.9 51.7,264.4 Q57.0,287.4 80.4,290.9Z" fill="url(#gold)"/>
+<path d="M80.4,290.9 Q100.0,282.6 99.3,261.3 Q79.7,269.6 80.4,290.9Z" fill="url(#gold2)"/>
+<path d="M79.7,237.2 Q81.4,215.0 61.3,205.4 Q59.7,227.5 79.7,237.2Z" fill="url(#gold)"/>
+<path d="M79.7,237.2 Q99.8,235.3 105.1,215.9 Q85.1,217.8 79.7,237.2Z" fill="url(#gold2)"/>
+<path d="M95.1,185.8 Q102.8,166.4 87.5,152.1 Q79.8,171.5 95.1,185.8Z" fill="url(#gold)"/>
+<path d="M95.1,185.8 Q113.6,189.7 123.9,173.8 Q105.4,169.9 95.1,185.8Z" fill="url(#gold2)"/>
+<path d="M125.1,141.4 Q137.4,126.1 127.8,109.1 Q115.5,124.3 125.1,141.4Z" fill="url(#gold)"/>
+<path d="M125.1,141.4 Q140.6,150.0 154.1,138.7 Q138.7,130.0 125.1,141.4Z" fill="url(#gold2)"/>
+<path d="M167.0,107.8 Q182.2,97.7 178.3,79.8 Q163.1,90.0 167.0,107.8Z" fill="url(#gold)"/>
+<path d="M167.0,107.8 Q178.3,119.8 193.6,113.5 Q182.2,101.5 167.0,107.8Z" fill="url(#gold2)"/>
+<path d="M167.0,107.8 Q193.1,109.0 205.1,85.8 Q179.1,84.7 167.0,107.8Z" fill="url(#gold)"/></g>
+<path d="M246,440 L232,470 L246,464 L252,474 L256,446 Z M266,440 L280,470 L266,464 L260,474 L256,446 Z" fill="#b3261e"/>
+<circle cx="256" cy="440" r="10" fill="url(#gold)"/>
+<g clip-path="url(#flame)" fill="url(#fire)"><rect x="164.5" y="234" width="21" height="110" rx="4"/>
+<rect x="191.5" y="169" width="21" height="175" rx="4"/>
+<rect x="218.5" y="99" width="21" height="245" rx="4"/>
+<rect x="245.5" y="74" width="21" height="270" rx="4"/>
+<rect x="272.5" y="114" width="21" height="230" rx="4"/>
+<rect x="299.5" y="184" width="21" height="160" rx="4"/>
+<rect x="326.5" y="239" width="21" height="105" rx="4"/></g>
+<g clip-path="url(#core)" fill="url(#corefire)"><rect x="164.5" y="234" width="21" height="110" rx="4"/>
+<rect x="191.5" y="169" width="21" height="175" rx="4"/>
+<rect x="218.5" y="99" width="21" height="245" rx="4"/>
+<rect x="245.5" y="74" width="21" height="270" rx="4"/>
+<rect x="272.5" y="114" width="21" height="230" rx="4"/>
+<rect x="299.5" y="184" width="21" height="160" rx="4"/>
+<rect x="326.5" y="239" width="21" height="105" rx="4"/></g>
+</svg>

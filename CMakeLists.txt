@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(virgil VERSION 0.2.4 LANGUAGES C CXX)
+project(virgil VERSION 0.2.5 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -67,8 +67,18 @@ add_custom_command(
   DEPENDS ${CMAKE_SOURCE_DIR}/src/daemon/ui/index.html ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
   COMMENT "Embedding control panel UI")
 
+# App icon (branding/make_logo.py generates the files).
+set(VIRGIL_ICON_SOURCES "")
+if(WIN32)
+  enable_language(RC)
+  # Forward slashes work for both windres and rc.exe.
+  file(WRITE ${CMAKE_BINARY_DIR}/generated/virgil_icon.rc
+       "1 ICON \"${CMAKE_SOURCE_DIR}/branding/virgil.ico\"\n")
+  set(VIRGIL_ICON_SOURCES ${CMAKE_BINARY_DIR}/generated/virgil_icon.rc)
+endif()
+
 add_executable(virgild src/daemon/main.cpp src/daemon/control.cpp src/daemon/http_server.cpp
-                    ${VIRGIL_UI_HEADER})
+                    ${VIRGIL_UI_HEADER} ${VIRGIL_ICON_SOURCES})
 target_include_directories(virgild PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(virgild PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
 target_link_libraries(virgild PRIVATE virgil_net)
@@ -78,19 +88,24 @@ target_link_libraries(virgil-latency-probe PRIVATE virgil_client)
 
 # Virgil Control: opens the control panel (starts a portable virgild if needed).
 if(APPLE)
-  add_executable(virgil-control MACOSX_BUNDLE tools/virgil_control.cpp)
+  set_source_files_properties(branding/virgil.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
+  add_executable(virgil-control MACOSX_BUNDLE tools/virgil_control.cpp branding/virgil.icns)
   set_target_properties(virgil-control PROPERTIES
+    MACOSX_BUNDLE_ICON_FILE virgil.icns
     OUTPUT_NAME "Virgil Control"
     MACOSX_BUNDLE_BUNDLE_NAME "Virgil Control"
     MACOSX_BUNDLE_GUI_IDENTIFIER org.virgil.control
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 elseif(WIN32)
-  add_executable(virgil-control WIN32 tools/virgil_control.cpp)
+  add_executable(virgil-control WIN32 tools/virgil_control.cpp ${VIRGIL_ICON_SOURCES})
   target_link_libraries(virgil-control PRIVATE ws2_32 shell32 user32)
 else()
   add_executable(virgil-control tools/virgil_control.cpp)
   install(FILES packaging/linux/virgil-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+  install(FILES branding/virgil.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
+  install(FILES branding/virgil-256.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
+          RENAME virgil.png)
 endif()
 target_link_libraries(virgil-control PRIVATE virgil_client)
 

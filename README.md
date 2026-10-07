@@ -1,3 +1,5 @@
+<p align="center"><img src="branding/virgil-256.png" width="160" alt="Virgil logo: a flame of audio meter bars inside a laurel wreath"></p>
+
 # Virgil: a low-latency Dante virtual soundcard
 
 Virgil turns a computer into a **Dante device**. In Dante Controller it shows up
