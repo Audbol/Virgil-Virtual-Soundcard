@@ -252,4 +252,21 @@ TEST(config_parse) {
   CHECK(!validate_config(&mtu, &err));  // 64ch L24 @1ms > MTU
 }
 
+TEST(config_format_roundtrip) {
+  Config a;
+  std::string err;
+  parse_config("[device]\nname = Studio ; A\ninterface = 10.0.0.2\ntx_channels = 16\n"
+               "control_port = 0\n[tx]\naddress=239.1.1.1\nchannels=8\n"
+               "[rx]\nsap_name = \"Ri8 : 32 # x\"\nchannels = 2\nfirst_channel = 3\n",
+               &a, &err);
+  CHECK(a.device_name == "Studio");
+  Config b;
+  CHECK(parse_config(format_config(a), &b, &err));
+  CHECK(b.device_name == a.device_name && b.interface == "10.0.0.2");
+  CHECK(b.tx_channels == 16 && b.control_port == 0);
+  CHECK(b.tx.size() == 1 && b.tx[0].address == "239.1.1.1" && b.tx[0].channels == 8);
+  CHECK(b.rx.size() == 1 && b.rx[0].sap_name == "Ri8 : 32 # x" && b.rx[0].first_channel == 3);
+  CHECK(format_config(a) == format_config(b));
+}
+
 TEST_MAIN()

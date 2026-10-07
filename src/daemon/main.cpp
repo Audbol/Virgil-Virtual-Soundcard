@@ -12,6 +12,9 @@
 #include "dsv/net.h"
 #include "dsv/platform.h"
 #include "dsv/sap.h"
+#include "dsv/shm.h"
+#include "dsv/shm_layout.h"
+#include "control.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -24,18 +27,6 @@ namespace {
 
 std::atomic<bool> g_quit{false};
 void on_signal(int) { g_quit = true; }
-
-// Where installers put the configuration.
-std::string default_config_path() {
-#if defined(_WIN32)
-  const char* pd = std::getenv("ProgramData");
-  return std::string(pd ? pd : "C:\\ProgramData") + "\\DSV\\dsv.conf";
-#elif defined(__APPLE__)
-  return "/Library/Application Support/DSV/dsv.conf";
-#else
-  return "/etc/dsv/dsv.conf";
-#endif
-}
 
 bool file_exists(const std::string& p) {
   if (FILE* f = std::fopen(p.c_str(), "r")) {
@@ -56,6 +47,7 @@ void usage() {
       "      --packet-time US  AES67 packet time in microseconds (125/250/333/1000)\n"
       "      --latency US      receive latency in microseconds\n"
       "      --tx-lead US      playback safety margin in microseconds\n"
+      "      --control-port N  web control panel port on 127.0.0.1 (0 = off; default 8480)\n"
       "      --discover        list SAP-announced AES67/Dante streams and exit\n"
       "      --status          print statistics of a running daemon and exit\n"
       "      --log FILE        append log output to FILE\n"
@@ -118,32 +110,137 @@ int status() {
   return 0;
 }
 
-// Runs until g_quit. `on_started` is called once the engine is up.
-int run_daemon(dsv::Config cfg, void (*on_started)()) {
-  // Started at boot we may be up before the NIC has an address (DHCP, link
-  // negotiation). Wait for it rather than failing.
+// Runs until g_quit. `on_started` is called once, right away (services must
+// report RUNNING quickly). The control panel can ask for a reload: the
+// engine is then stopped, the configuration re-read and the engine started
+// again, while the process (and the panel) stay up.
+int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
   if (on_started) on_started();
-  uint32_t addr;
-  bool warned = false;
-  while (!g_quit && !dsv::resolve_interface(cfg.interface, &addr)) {
-    if (!warned)
-      DSV_LOG_WARN("waiting for network interface '%s' to come up...",
-                   cfg.interface.empty() ? "(any)" : cfg.interface.c_str());
-    warned = true;
-    dsv::sleep_until_ns(dsv::mono_ns() + 2000000000LL);
-  }
-  if (g_quit) return 0;
-  if (warned) DSV_LOG_INFO("network interface %s is up", dsv::ipv4_to_string(addr).c_str());
 
-  dsv::Engine engine(cfg);
-  if (!engine.start()) return 1;
-  while (!g_quit) dsv::sleep_until_ns(dsv::mono_ns() + 100000000LL);
-  DSV_LOG_INFO("shutting down");
-  engine.stop();
-  return 0;
+  dsv::ControlServer control(&ctx);
+  const uint16_t control_port = uint16_t(ctx.cfg.control_port);
+  if (control_port) {
+    if (control.start(control_port))
+      DSV_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
+    else
+      DSV_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
+  }
+
+  auto set_status = [&](const char* st, const std::string& err = std::string()) {
+    std::lock_guard<std::mutex> l(ctx.mutex);
+    ctx.status = st;
+    ctx.error = err;
+  };
+  auto wait_reload = [&](int64_t max_ns) {
+    const int64_t end = dsv::mono_ns() + max_ns;
+    while (!g_quit && !ctx.reload && dsv::mono_ns() < end)
+      dsv::sleep_until_ns(dsv::mono_ns() + 100000000LL);
+  };
+
+  // Discovery outlives engine restarts: devices re-announce only every ~30 s.
+  std::unique_ptr<dsv::SapService> sap;
+  uint32_t sap_iface = 0;
+  // The soundcard apps attach to also outlives engine restarts.
+  dsv::SharedMemory soundcard;
+
+  int rc = 0;
+  while (!g_quit) {
+    dsv::Config cfg;
+    {
+      std::lock_guard<std::mutex> l(ctx.mutex);
+      cfg = ctx.cfg;
+    }
+
+    // At boot the NIC may not have an address yet (DHCP, link): wait for it.
+    uint32_t addr = 0;
+    bool warned = false;
+    while (!g_quit && !ctx.reload && !dsv::resolve_interface(cfg.interface, &addr)) {
+      if (!warned) {
+        DSV_LOG_WARN("waiting for network interface '%s' to come up...",
+                     cfg.interface.empty() ? "(any)" : cfg.interface.c_str());
+        set_status("waiting-for-network");
+      }
+      warned = true;
+      wait_reload(2000000000LL);
+    }
+    if (warned && !g_quit && !ctx.reload)
+      DSV_LOG_INFO("network interface %s is up", dsv::ipv4_to_string(addr).c_str());
+
+    std::unique_ptr<dsv::Engine> engine;
+    if (!g_quit && !ctx.reload) {
+      dsv::clear_last_error();
+      engine = std::make_unique<dsv::Engine>(cfg);
+      engine->set_shared_memory(&soundcard);
+      if (cfg.sap) {
+        if (!sap || sap_iface != addr) {
+          sap.reset();
+          auto s = std::make_unique<dsv::SapService>();
+          if (s->start(addr)) {
+            sap = std::move(s);
+            sap_iface = addr;
+          }
+        }
+        engine->set_shared_sap(sap.get());
+      } else {
+        sap.reset();
+      }
+      if (engine->start()) {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        ctx.engine = engine.get();
+        ctx.cfg = engine->config();  // with defaults filled in by validation
+        ctx.status = "running";
+        ctx.error.clear();
+        rc = 0;
+      } else {
+        const std::string err = dsv::last_error_message();
+        engine.reset();
+        rc = 1;
+        // Without the panel nobody can fix it from here: exit (the service
+        // manager restarts us). With it, stay up and show the error.
+        if (!control_port) break;
+        set_status("error", err.empty() ? "engine failed to start" : err);
+      }
+    }
+
+    while (!g_quit && !ctx.reload) wait_reload(1000000000LL);
+
+    if (engine) {
+      {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        ctx.engine = nullptr;
+      }
+      DSV_LOG_INFO(g_quit ? "shutting down" : "stopping engine for reload");
+      engine->stop();
+      engine.reset();
+    }
+
+    if (ctx.reload.exchange(false)) {
+      std::string path;
+      {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        path = ctx.config_path;
+      }
+      dsv::Config fresh;
+      std::string err;
+      if (!path.empty() && dsv::load_config(path, &fresh, &err)) {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        fresh.control_port = ctx.cfg.control_port;  // the panel stays where it is
+        ctx.cfg = fresh;
+        DSV_LOG_INFO("reloaded configuration %s", path.c_str());
+      } else if (!path.empty()) {
+        DSV_LOG_ERROR("reload of %s failed: %s", path.c_str(), err.c_str());
+      }
+      set_status("starting");
+    }
+  }
+  control.stop();
+  sap.reset();  // sends deletions for anything still announced
+  if (soundcard.is_open())
+    static_cast<dsv::ShmHeader*>(soundcard.data())->state.store(dsv::kStateStopped);
+  return g_quit ? 0 : rc;
 }
 
-dsv::Config g_cfg;
+dsv::DaemonContext g_ctx;
 
 #if defined(_WIN32)
 SERVICE_STATUS_HANDLE g_svc = nullptr;
@@ -172,7 +269,7 @@ void WINAPI service_main(DWORD, LPSTR*) {
   if (!g_svc) return;
   report_service(SERVICE_START_PENDING);
   DSV_LOG_INFO("service: starting (pid %lu)", GetCurrentProcessId());
-  const int rc = run_daemon(g_cfg, [] { report_service(SERVICE_RUNNING); });
+  const int rc = run_daemon(g_ctx, [] { report_service(SERVICE_RUNNING); });
   DSV_LOG_INFO("service: exiting (status %d)", rc);
   report_service(SERVICE_STOPPED, rc ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR);
 }
@@ -181,11 +278,12 @@ void WINAPI service_main(DWORD, LPSTR*) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  dsv::Config& cfg = g_cfg;
+  dsv::Config& cfg = g_ctx.cfg;
   std::string config_path, iface_override, name_override, log_path;
   bool free_run = false, do_discover = false, do_status = false, loaded = false;
   bool service = false;
   uint32_t ptime = 0, latency = 0, tx_lead = 0;
+  long control_port = -1;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -205,6 +303,7 @@ int main(int argc, char** argv) {
     else if (a == "--tx-lead") tx_lead = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
     else if (a == "--discover") do_discover = true;
     else if (a == "--log") log_path = next();
+    else if (a == "--control-port") control_port = std::strtol(next().c_str(), nullptr, 10);
     else if (a == "--service") service = true;
     else if (a == "--status") do_status = true;
     else if (a == "-v" || a == "--verbose") dsv::g_log_level = dsv::kLogDebug;
@@ -226,7 +325,8 @@ int main(int argc, char** argv) {
     std::setvbuf(stderr, nullptr, _IOLBF, 1024);
   }
 
-  if (config_path.empty() && file_exists(default_config_path())) config_path = default_config_path();
+  if (config_path.empty() && file_exists(dsv::default_config_path()))
+    config_path = dsv::default_config_path();
   if (!config_path.empty()) {
     DSV_LOG_INFO("using configuration %s", config_path.c_str());
     std::string err;
@@ -243,6 +343,8 @@ int main(int argc, char** argv) {
   if (ptime) cfg.packet_time_us = ptime;
   if (latency) cfg.rx_latency_us = latency;
   if (tx_lead) cfg.tx_lead_us = tx_lead;
+  if (control_port >= 0 && control_port <= 65535) cfg.control_port = uint32_t(control_port);
+  g_ctx.config_path = config_path;
 
   if (!loaded || (cfg.tx.empty() && cfg.rx.empty())) {
     // Default: one 8-channel AES67 flow each way, Dante-compatible format.
@@ -265,5 +367,5 @@ int main(int argc, char** argv) {
     return 2;
 #endif
   }
-  return run_daemon(cfg, nullptr);
+  return run_daemon(g_ctx, nullptr);
 }

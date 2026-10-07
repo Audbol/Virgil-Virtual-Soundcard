@@ -22,6 +22,7 @@ class SharedMemory {
   void* data() const { return data_; }
   size_t size() const { return size_; }
   bool is_open() const { return data_ != nullptr; }
+  const std::string& name() const { return name_; }
 
  private:
   std::string name_;

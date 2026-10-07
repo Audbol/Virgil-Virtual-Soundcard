@@ -1,0 +1,426 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>DSV Control</title>
+<style>
+:root {
+  --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f8f9fb; --line: #e2e5ea;
+  --text: #1b1f24; --muted: #69717d; --accent: #2f6fde; --accent-text: #ffffff;
+  --ok: #1f9d55; --warn: #c98a00; --bad: #d1435b; --info: #2f6fde;
+  --meter-bg: #e8ebf0; --meter-ok: #2bb673; --meter-hot: #e8b422; --meter-clip: #e5484d;
+  --shadow: 0 1px 2px rgba(16,24,40,.06), 0 1px 3px rgba(16,24,40,.08);
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #111317; --panel: #1a1d23; --panel-2: #20242b; --line: #2c313a;
+    --text: #e7e9ee; --muted: #9aa3b1; --accent: #5b8ff0; --accent-text: #0b0d10;
+    --ok: #3cc27a; --warn: #e3a72f; --bad: #f0677c; --info: #6b9bf5;
+    --meter-bg: #262b33; --meter-ok: #34c17d; --meter-hot: #f0c13a; --meter-clip: #f15b60;
+    --shadow: none;
+  }
+}
+* { box-sizing: border-box; }
+html, body { margin: 0; background: var(--bg); color: var(--text);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px;
+  padding: 12px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
+.logo { width: 34px; height: 34px; border-radius: 8px; background: var(--accent); color: var(--accent-text);
+  display: grid; place-items: center; font-weight: 700; font-size: 13px; letter-spacing: .5px; flex: none; }
+header h1 { margin: 0; font-size: 16px; font-weight: 600; }
+header .sub { color: var(--muted); font-size: 12px; }
+.spacer { flex: 1; }
+.pill { display: inline-flex; align-items: center; gap: 7px; padding: 4px 11px; border-radius: 999px;
+  font-size: 12.5px; font-weight: 600; background: var(--panel-2); border: 1px solid var(--line); white-space: nowrap; }
+.dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); flex: none; }
+.ok .dot, .dot.ok { background: var(--ok); } .warn .dot, .dot.warn { background: var(--warn); }
+.bad .dot, .dot.bad { background: var(--bad); } .info .dot, .dot.info { background: var(--info); }
+main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; display: grid; gap: 18px; }
+.banner { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad);
+  background: color-mix(in srgb, var(--bad) 8%, var(--panel)); display: none; }
+.banner.show { display: block; }
+.cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
+.card, section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
+.card { padding: 14px 16px; min-width: 0; }
+.card h3, section h2 { margin: 0; font-size: 12px; font-weight: 600; color: var(--muted);
+  text-transform: uppercase; letter-spacing: .06em; }
+.card .big { font-size: 20px; font-weight: 600; margin: 6px 0 2px; overflow-wrap: anywhere; }
+.card .small { color: var(--muted); font-size: 12.5px; overflow-wrap: anywhere; }
+.num { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+section { padding: 16px; min-width: 0; }
+section .head { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+section .head .hint { color: var(--muted); font-size: 12.5px; }
+.two { display: grid; grid-template-columns: 1fr 1fr; gap: 18px; }
+.meters { display: flex; gap: 6px; align-items: flex-end; overflow-x: auto; padding-bottom: 4px; }
+.meter { flex: 1 0 22px; max-width: 36px; display: grid; gap: 4px; justify-items: center; }
+.meter .track { position: relative; width: 100%; height: 150px; border-radius: 4px; background: var(--meter-bg); overflow: hidden; }
+.meter .fill { position: absolute; left: 0; right: 0; bottom: 0; height: 0;
+  background: linear-gradient(to top, var(--meter-ok) 0%, var(--meter-ok) 70%, var(--meter-hot) 88%, var(--meter-clip) 100%);
+  background-size: 100% 150px; background-position: bottom; transition: height 120ms linear; }
+.meter .hold { position: absolute; left: 0; right: 0; height: 2px; background: var(--text); opacity: .55; bottom: 0; }
+.meter .lbl { font-size: 11px; color: var(--muted); font-family: var(--mono); }
+.scale { display: flex; justify-content: space-between; color: var(--muted); font-size: 11px; margin-top: 6px; font-family: var(--mono); }
+.tw { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+table { width: 100%; border-collapse: collapse; }
+th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--line); vertical-align: middle; }
+th { font-size: 12px; color: var(--muted); font-weight: 600; }
+tr:last-child td { border-bottom: none; }
+td .sub { color: var(--muted); font-size: 12px; }
+.empty { color: var(--muted); padding: 14px 10px; }
+button, select, input, textarea { font: inherit; color: inherit; }
+button { border: 1px solid var(--line); background: var(--panel-2); border-radius: 7px; padding: 6px 12px; cursor: pointer; }
+button:hover { border-color: var(--muted); }
+button.primary { background: var(--accent); border-color: var(--accent); color: var(--accent-text); font-weight: 600; }
+button.danger { color: var(--bad); }
+button:disabled { opacity: .5; cursor: default; }
+.form { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px 16px; }
+label { display: grid; gap: 4px; font-size: 12.5px; color: var(--muted); }
+input, select, textarea { width: 100%; background: var(--panel-2); border: 1px solid var(--line); border-radius: 7px; padding: 7px 9px; }
+input:focus, select:focus, textarea:focus, button:focus-visible { outline: 2px solid var(--accent); outline-offset: 1px; }
+textarea { font-family: var(--mono); font-size: 12.5px; min-height: 260px; resize: vertical; }
+.actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
+.msg { font-size: 13px; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
+details summary { cursor: pointer; color: var(--muted); margin-top: 14px; font-size: 13px; }
+.inline-num { width: 70px; display: inline-block; padding: 4px 6px; }
+footer { color: var(--muted); font-size: 12px; text-align: center; }
+.offline main > :not(#offline) { opacity: .45; pointer-events: none; }
+#offline { display: none; }
+.offline #offline { display: block; }
+@media (max-width: 900px) { .cards { grid-template-columns: 1fr 1fr; } .two { grid-template-columns: 1fr; } .form { grid-template-columns: 1fr 1fr; } }
+@media (max-width: 560px) { header { padding: 10px 16px; gap: 10px; } header .sub { display: none; }
+  main { padding: 16px; } .cards, .form { grid-template-columns: 1fr; }
+  section .head { flex-wrap: wrap; } .pill { font-size: 12px; padding: 3px 9px; }
+  th, td { padding: 7px 6px; } }
+</style>
+</head>
+<body>
+<header>
+  <div class="logo" aria-hidden="true">DSV</div>
+  <div>
+    <h1 id="devname">DSV Virtual Soundcard</h1>
+    <div class="sub">AES67 network soundcard · Dante AES67 mode compatible</div>
+  </div>
+  <div class="spacer"></div>
+  <span class="pill" id="statepill" role="status" aria-live="polite"><span class="dot"></span><span id="statetext">Connecting…</span></span>
+</header>
+
+<main>
+  <div class="banner" id="offline">The DSV service is not reachable. Start it (Windows: Start menu › DSV › Restart DSV service; macOS/Linux: see README), this page reconnects automatically.</div>
+  <div class="banner" id="errbanner"></div>
+
+  <div class="cards">
+    <div class="card"><h3>Clock</h3><div class="big" id="c-clock">—</div><div class="small" id="c-clock2">&nbsp;</div></div>
+    <div class="card"><h3>Format</h3><div class="big" id="c-format">—</div><div class="small" id="c-format2">&nbsp;</div></div>
+    <div class="card"><h3>Network</h3><div class="big num" id="c-net">—</div><div class="small" id="c-net2">&nbsp;</div></div>
+    <div class="card"><h3>Apps connected</h3><div class="big" id="c-apps">—</div><div class="small" id="c-apps2">&nbsp;</div></div>
+  </div>
+
+  <div class="two">
+    <section aria-labelledby="h-txm">
+      <div class="head"><h2 id="h-txm">Playback → network</h2><span class="hint">what apps send out</span></div>
+      <div class="meters" id="m-tx"></div>
+      <div class="scale"><span>-60 dB</span><span>-30</span><span>-12</span><span>0 dBFS</span></div>
+    </section>
+    <section aria-labelledby="h-rxm">
+      <div class="head"><h2 id="h-rxm">Network → capture</h2><span class="hint">what apps record</span></div>
+      <div class="meters" id="m-rx"></div>
+      <div class="scale"><span>-60 dB</span><span>-30</span><span>-12</span><span>0 dBFS</span></div>
+    </section>
+  </div>
+
+  <div class="two">
+    <section aria-labelledby="h-tx">
+      <div class="head"><h2 id="h-tx">Transmit flows</h2><span class="hint">announced to Dante Controller via SAP</span></div>
+      <div class="tw"><table><thead><tr><th>Name</th><th>Channels</th><th>Destination</th></tr></thead><tbody id="t-tx"></tbody></table></div>
+    </section>
+    <section aria-labelledby="h-rx">
+      <div class="head"><h2 id="h-rx">Receive flows</h2></div>
+      <div class="tw"><table><thead><tr><th>Source</th><th>Channels</th><th>Status</th><th></th></tr></thead><tbody id="t-rx"></tbody></table></div>
+    </section>
+  </div>
+
+  <section aria-labelledby="h-disc">
+    <div class="head"><h2 id="h-disc">Streams on the network</h2><span class="hint">AES67 flows announced via SAP — Dante devices show up here once their AES67 mode and a multicast AES67 flow are enabled</span></div>
+    <div class="tw"><table><thead><tr><th>Name</th><th>Format</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="t-disc"></tbody></table></div>
+  </section>
+
+  <section aria-labelledby="h-set" id="settings">
+    <div class="head"><h2 id="h-set">Settings</h2><span class="hint" id="cfgpath"></span></div>
+    <div class="form">
+      <label>Device name<input id="f-name" data-key="name"></label>
+      <label>Network interface<select id="f-interface" data-key="interface"></select></label>
+      <label>Sample rate<select id="f-rate" data-key="sample_rate">
+        <option>44100</option><option>48000</option><option>88200</option><option>96000</option><option>176400</option><option>192000</option></select></label>
+      <label>Playback channels (to network)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="64"></label>
+      <label>Capture channels (from network)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="64"></label>
+      <label>Packet time<select id="f-ptime" data-key="packet_time_us">
+        <option value="125">125 µs (lowest latency)</option><option value="250">250 µs</option><option value="333">333 µs</option>
+        <option value="1000">1 ms (AES67 default, Dante AES67)</option><option value="4000">4 ms</option></select></label>
+      <label>Receive latency (µs)<input id="f-lat" data-key="latency_us" type="number" min="250" max="40000" step="250"></label>
+      <label>Clock<select id="f-clock" data-key="clock">
+        <option value="ptp">PTP (follow the network grandmaster)</option><option value="free">Local clock only (testing)</option></select></label>
+      <label>Announce flows (SAP)<select id="f-sap" data-key="sap"><option value="true">On</option><option value="false">Off</option></select></label>
+    </div>
+    <details id="adv"><summary>Advanced: edit configuration file</summary>
+      <p class="sub" style="color:var(--muted);font-size:12.5px">The form above edits this text. Transmit and receive flows are <code>[tx]</code> / <code>[rx]</code> sections — see <code>dsv.conf.example</code> for every option.</p>
+      <textarea id="cfgtext" spellcheck="false" aria-label="Configuration file"></textarea>
+    </details>
+    <div class="actions">
+      <button class="primary" id="apply" disabled>Apply &amp; restart audio</button>
+      <button id="revert" disabled>Discard changes</button>
+      <button id="restart">Restart audio engine</button>
+      <span class="msg" id="msg" role="status" aria-live="polite"></span>
+    </div>
+  </section>
+
+  <footer id="footer">DSV</footer>
+</main>
+
+<script>
+"use strict";
+const $ = id => document.getElementById(id);
+const S = { status: null, cfg: "", savedCfg: "", ifaces: [], sessions: [], prev: null, holds: { tx: [], rx: [] } };
+
+// ---------- helpers ----------
+function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
+function fmtRate(r) { return (r % 1000 === 0 ? r / 1000 : (r / 1000).toFixed(1)) + " kHz"; }
+function fmtUs(us) { return us >= 1000 ? (us / 1000).toLocaleString(undefined, { maximumFractionDigits: 3 }) + " ms" : us + " µs"; }
+function fmtCount(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(0) + "k" : String(n); }
+async function api(path, opts = {}) {
+  const r = await fetch(path, { cache: "no-store", ...opts,
+    headers: { ...(opts.headers || {}), ...(opts.method === "POST" ? { "X-DSV-Request": "1" } : {}) } });
+  const type = r.headers.get("content-type") || "";
+  const body = type.includes("json") ? await r.json() : await r.text();
+  if (!r.ok) throw new Error((body && body.error) || ("HTTP " + r.status));
+  return body;
+}
+
+// ---------- INI editing that preserves comments and layout ----------
+function sections(text) {
+  const lines = text.split("\n"); const out = []; let cur = { name: "", start: 0, lines: [] };
+  lines.forEach((l, i) => {
+    const m = l.match(/^\s*\[([^\]]+)\]\s*$/);
+    if (m) { cur.end = i; out.push(cur); cur = { name: m[1].trim().toLowerCase(), start: i, lines: [] }; }
+  });
+  cur.end = lines.length; out.push(cur);
+  return { lines, list: out };
+}
+function getKey(text, section, key) {
+  const { lines, list } = sections(text);
+  const s = list.find(x => x.name === section); if (!s) return null;
+  for (let i = s.start; i < s.end; i++) {
+    const m = lines[i].match(/^\s*([A-Za-z_]+)\s*=\s*(.*)$/);
+    if (m && m[1].toLowerCase() === key) {
+      let v = m[2]; let q = false; let out = "";
+      for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }
+      return out.trim();
+    }
+  }
+  return null;
+}
+function quoteVal(v) { v = String(v); return /[;#]|^\s|\s$/.test(v) ? '"' + v + '"' : v; }
+function setKey(text, section, key, value) {
+  const { lines, list } = sections(text);
+  let s = list.find(x => x.name === section);
+  const line = key + " = " + quoteVal(value);
+  if (!s) { return text.replace(/\s*$/, "") + "\n\n[" + section + "]\n" + line + "\n"; }
+  for (let i = s.start; i < s.end; i++) {
+    const m = lines[i].match(/^(\s*)([A-Za-z_]+)(\s*=\s*)(.*)$/);
+    if (m && m[2].toLowerCase() === key) { lines[i] = m[1] + key + m[3] + quoteVal(value); return lines.join("\n"); }
+  }
+  let at = s.end; while (at > s.start + 1 && lines[at - 1].trim() === "") at--;
+  lines.splice(at, 0, line); return lines.join("\n");
+}
+function removeSection(text, section, index) {
+  const { lines, list } = sections(text);
+  const matches = list.filter(x => x.name === section); const s = matches[index]; if (!s) return text;
+  lines.splice(s.start, s.end - s.start); return lines.join("\n").replace(/\n{3,}/g, "\n\n");
+}
+
+// ---------- rendering ----------
+function setPill(cls, text) {
+  const p = $("statepill"); p.className = "pill " + cls; $("statetext").textContent = text;
+}
+function meterDom(el, n, prefix) {
+  if (el.childElementCount === n) return;
+  el.innerHTML = Array.from({ length: n }, (_, i) =>
+    `<div class="meter" title="${prefix} ${i + 1}"><div class="track"><div class="fill"></div><div class="hold"></div></div><div class="lbl">${i + 1}</div></div>`).join("");
+}
+function meterPos(lin) { if (!(lin > 0)) return 0; const db = 20 * Math.log10(lin); return Math.max(0, Math.min(1, (db + 60) / 60)); }
+function renderMeters(el, vals, holds, n, prefix) {
+  meterDom(el, n, prefix);
+  const now = performance.now();
+  [...el.children].forEach((m, i) => {
+    const p = meterPos(vals[i] || 0);
+    m.querySelector(".fill").style.height = (p * 100).toFixed(1) + "%";
+    const h = holds[i] || { p: 0, t: 0 };
+    if (p >= h.p || now - h.t > 1500) { holds[i] = { p, t: now }; }
+    m.querySelector(".hold").style.bottom = "calc(" + (holds[i].p * 100).toFixed(1) + "% - 2px)";
+    m.querySelector(".hold").style.display = holds[i].p > 0.01 ? "" : "none";
+    m.title = prefix + " " + (i + 1) + (vals[i] > 0 ? ": " + (20 * Math.log10(vals[i])).toFixed(1) + " dBFS" : ": silent");
+  });
+}
+
+function render(st) {
+  const d = st.device, c = st.clock, k = st.counters || {};
+  $("devname").textContent = d.name || "DSV Virtual Soundcard";
+  document.title = (d.name || "DSV") + " · DSV Control";
+  // status pill
+  if (st.status === "error") setPill("bad", "Error");
+  else if (st.status === "waiting-for-network") setPill("warn", "Waiting for network");
+  else if (st.status !== "running") setPill("warn", "Starting…");
+  else if (c.state === "ptp-locked") setPill("ok", "PTP locked");
+  else if (c.state === "ptp-master") setPill("info", "Clock master");
+  else setPill("warn", "Free-running clock");
+  const eb = $("errbanner"); eb.textContent = st.error ? "Audio engine error: " + st.error : ""; eb.classList.toggle("show", !!st.error);
+
+  const clockNames = { "ptp-locked": "Locked to PTP", "ptp-master": "Grandmaster", "free-run": "Free-running", "stopped": "Stopped" };
+  $("c-clock").textContent = clockNames[c.state] || c.state;
+  $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · GM ${c.grandmaster}`
+    : c.state === "ptp-master" ? "no other PTP master on the network"
+    : c.state === "free-run" ? (c.grandmaster ? "acquiring " + c.grandmaster : "no PTP grandmaster found yet") : "";
+  $("c-format").textContent = `${fmtRate(d.sample_rate)} · ${d.tx_channels}×${d.rx_channels} ch`;
+  $("c-format2").textContent = `packet ${fmtUs(d.packet_time_us)} · rx latency ${fmtUs(d.latency_us)} · tx lead ${fmtUs(d.tx_lead_us)}`;
+
+  // packet rates from successive polls
+  const now = performance.now(); let txps = 0, rxps = 0;
+  if (S.prev && k.tx_packets !== undefined) {
+    const dt = (now - S.prev.t) / 1000;
+    if (dt > 0) { txps = Math.max(0, (k.tx_packets - S.prev.tx) / dt); rxps = Math.max(0, (k.rx_packets - S.prev.rx) / dt); }
+  }
+  if (k.tx_packets !== undefined) S.prev = { t: now, tx: k.tx_packets, rx: k.rx_packets };
+  $("c-net").textContent = d.address || (d.interface || "—");
+  $("c-net2").textContent = k.tx_packets === undefined ? "engine not running"
+    : `out ${Math.round(txps)}/s · in ${Math.round(rxps)}/s · lost ${fmtCount(k.rx_lost)} · late ${fmtCount(k.rx_late)}`;
+
+  const playing = st.clients.filter(x => x.active);
+  $("c-apps").textContent = st.clients.length ? `${st.clients.length} connected` : "None";
+  $("c-apps2").textContent = st.clients.length ? st.clients.map(x => x.name + (x.active ? " ▶" : "")).join(", ")
+    : "ASIO, Core Audio and ALSA clients appear here";
+  if (playing.length) $("c-apps").textContent = `${playing.length} playing`;
+
+  renderMeters($("m-tx"), st.meters.tx, S.holds.tx, d.tx_channels, "Playback channel");
+  renderMeters($("m-rx"), st.meters.rx, S.holds.rx, d.rx_channels, "Capture channel");
+
+  $("t-tx").innerHTML = st.tx_flows.length ? st.tx_flows.map(f =>
+    `<tr><td>${esc(f.name)}</td><td class="num">${f.first_channel}–${f.first_channel + f.channels - 1}</td>
+     <td class="num">${esc(f.address)}:${f.port}<div class="sub">${esc(f.encoding)}</div></td></tr>`).join("")
+    : `<tr><td colspan="3" class="empty">No transmit flows. Add a [tx] section in Settings › Advanced.</td></tr>`;
+
+  $("t-rx").innerHTML = st.rx_flows.length ? st.rx_flows.map((f, i) => {
+    const stCls = f.receiving ? "ok" : f.resolved ? "warn" : "";
+    const stTxt = f.receiving ? "Receiving" : f.resolved ? "No packets" : (f.sap_name ? "Not found on network" : "Waiting");
+    const src = f.sap_name ? esc(f.sap_name) : esc(f.address) + ":" + f.port;
+    const sub = f.sap_name && f.address ? `<div class="sub num">${esc(f.address)}:${f.port}</div>` : "";
+    return `<tr><td>${src}${sub}</td><td class="num">${f.first_channel}–${f.first_channel + f.channels - 1}</td>
+      <td><span class="pill ${stCls}"><span class="dot"></span>${stTxt}</span></td>
+      <td><button class="danger" data-rm="${i}" title="Remove this flow">Remove</button></td></tr>`;
+  }).join("") : `<tr><td colspan="4" class="empty">Nothing subscribed. Pick a stream under “Streams on the network”.</td></tr>`;
+
+  $("cfgpath").textContent = st.config_path ? "Saved to " + st.config_path : "";
+  $("footer").textContent = `DSV ${st.version} · control panel on this computer only (127.0.0.1)`;
+}
+
+function renderSessions() {
+  const st = S.status; const subscribed = new Set((st?.rx_flows || []).map(f => f.sap_name));
+  const rxch = st?.device?.rx_channels || 0;
+  $("t-disc").innerHTML = S.sessions.length ? S.sessions.map((s, i) => {
+    const own = st && st.tx_flows.some(f => f.name === s.name);
+    const action = own ? `<span class="sub">this computer</span>`
+      : subscribed.has(s.name) ? `<span class="pill ok"><span class="dot"></span>Subscribed</span>`
+      : `<span style="white-space:nowrap">to ch <input class="inline-num" type="number" min="1" max="${rxch}" value="1" id="fc${i}" aria-label="First capture channel">
+         <button data-sub="${i}" ${rxch ? "" : "disabled"}>Receive</button></span>`;
+    return `<tr><td>${esc(s.name)}${s.info ? `<div class="sub">${esc(s.info)}</div>` : ""}</td>
+      <td class="num">${esc(s.encoding)} · ${fmtRate(s.sample_rate)} · ${s.channels} ch<div class="sub">${fmtUs(s.ptime_us)} packets</div></td>
+      <td class="num">${esc(s.address)}:${s.port}</td><td class="num">${esc(s.origin)}</td><td>${action}</td></tr>`;
+  }).join("") : `<tr><td colspan="5" class="empty">No AES67 streams announced yet. Announcements repeat about every 30 s.</td></tr>`;
+}
+
+// ---------- settings form <-> config text ----------
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-ptime", "f-lat", "f-clock", "f-sap"];
+function fillForm() {
+  const t = S.cfg;
+  const ifSel = $("f-interface"); const cur = getKey(t, "device", "interface") || "";
+  const opts = [`<option value="">Automatic (first active interface)</option>`].concat(
+    S.ifaces.filter(i => !i.loopback).map(i => `<option value="${esc(i.name)}">${esc(i.name)} — ${esc(i.address)}</option>`));
+  if (cur && !S.ifaces.some(i => i.name === cur || i.address === cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not found)</option>`);
+  ifSel.innerHTML = opts.join("");
+  for (const id of FIELDS) {
+    const el = $(id); const v = getKey(t, "device", el.dataset.key);
+    if (id === "f-interface") { el.value = S.ifaces.find(i => i.address === cur)?.name ?? cur; continue; }
+    if (v !== null) el.value = v;
+    else if (id === "f-rate") el.value = "48000"; else if (id === "f-clock") el.value = "ptp";
+    else if (id === "f-sap") el.value = "true"; else if (id === "f-ptime") el.value = "1000";
+  }
+  $("cfgtext").value = t;
+}
+function markDirty() {
+  const dirty = S.cfg !== S.savedCfg;
+  $("apply").disabled = !dirty; $("revert").disabled = !dirty;
+  if (dirty) { $("msg").className = "msg"; $("msg").textContent = "Unsaved changes."; }
+}
+FIELDS.forEach(id => $(id).addEventListener("input", e => {
+  S.cfg = setKey(S.cfg, "device", e.target.dataset.key, e.target.value);
+  $("cfgtext").value = S.cfg; markDirty();
+}));
+$("cfgtext").addEventListener("input", e => { S.cfg = e.target.value; fillFormFromText(); markDirty(); });
+function fillFormFromText() { const keep = $("cfgtext").value; fillForm(); $("cfgtext").value = keep; }
+
+$("apply").addEventListener("click", async () => {
+  $("apply").disabled = true; $("msg").className = "msg"; $("msg").textContent = "Saving…";
+  try {
+    const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "text/plain" }, body: S.cfg });
+    S.savedCfg = S.cfg; markDirty();
+    $("msg").className = "msg ok"; $("msg").textContent = "Saved to " + r.path + ". Audio engine restarting…";
+  } catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; $("apply").disabled = false; }
+});
+$("revert").addEventListener("click", () => { S.cfg = S.savedCfg; fillForm(); markDirty(); $("msg").textContent = ""; });
+$("restart").addEventListener("click", async () => {
+  try { await api("/api/restart", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Audio engine restarting…"; }
+  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+});
+document.addEventListener("click", e => {
+  const sub = e.target.closest("[data-sub]"); const rm = e.target.closest("[data-rm]");
+  if (sub) {
+    const s = S.sessions[+sub.dataset.sub]; const rxch = S.status.device.rx_channels;
+    const first = Math.max(1, Math.min(rxch, parseInt($("fc" + sub.dataset.sub).value, 10) || 1));
+    const n = Math.min(s.channels, rxch - first + 1);
+    S.cfg = S.cfg.replace(/\s*$/, "") + `\n\n[rx]\nsap_name = ${quoteVal(s.name)}\nfirst_channel = ${first}\nchannels = ${n}\n`;
+    fillForm(); markDirty(); $("adv").open = true;
+    $("msg").textContent = `Added “${s.name}” → capture ${first}–${first + n - 1}. Apply to start receiving.`;
+    $("settings").scrollIntoView({ behavior: "smooth" });
+  } else if (rm) {
+    S.cfg = removeSection(S.cfg, "rx", +rm.dataset.rm); fillForm(); markDirty();
+    $("msg").textContent = "Flow removed from the configuration. Apply to stop receiving it.";
+    $("settings").scrollIntoView({ behavior: "smooth" });
+  }
+});
+
+// ---------- polling ----------
+let failures = 0;
+async function pollStatus() {
+  try {
+    S.status = await api("/api/status"); failures = 0;
+    document.body.classList.remove("offline"); render(S.status);
+  } catch (e) {
+    if (++failures >= 2) { document.body.classList.add("offline"); setPill("bad", "Service not running"); }
+  }
+  setTimeout(pollStatus, document.hidden ? 1000 : 200);
+}
+async function pollSessions() {
+  try { S.sessions = await api("/api/sessions"); renderSessions(); } catch (e) {}
+  setTimeout(pollSessions, 3000);
+}
+async function loadConfig() {
+  try {
+    const [cfg, ifs] = await Promise.all([api("/api/config"), api("/api/interfaces")]);
+    S.ifaces = ifs;
+    if (S.cfg === S.savedCfg) { S.cfg = S.savedCfg = cfg; fillForm(); markDirty(); }
+  } catch (e) { setTimeout(loadConfig, 2000); }
+}
+pollStatus(); pollSessions(); loadConfig();
+</script>
+</body>
+</html>

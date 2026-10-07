@@ -32,7 +32,8 @@ class SapService {
   bool start(uint32_t interface_addr);
   void stop();
 
-  // Replace the set of sessions this host announces.
+  // Replace the set of sessions this host announces. Sessions that drop out
+  // are withdrawn with SAP deletion packets so receivers forget them now.
   void set_announcements(const std::vector<SdpInfo>& sessions);
 
   // Discovered remote sessions.
@@ -53,6 +54,7 @@ class SapService {
   std::atomic<bool> running_{false};
   mutable std::mutex mutex_;
   std::vector<SdpInfo> local_;
+  std::vector<SdpInfo> withdrawn_;  // to send deletion packets for
   bool local_dirty_ = false;
   std::map<std::string, Remote> remote_;  // keyed by origin + session id
 };

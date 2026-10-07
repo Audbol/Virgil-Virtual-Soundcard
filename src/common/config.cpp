@@ -48,8 +48,15 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
   };
   while (std::getline(in, line)) {
     ++lineno;
-    const size_t comment = line.find_first_of(";#");
-    if (comment != std::string::npos) line.resize(comment);
+    // Strip comments, but not ';' / '#' inside a quoted value.
+    bool in_quotes = false;
+    for (size_t i = 0; i < line.size(); ++i) {
+      if (line[i] == '"') in_quotes = !in_quotes;
+      else if (!in_quotes && (line[i] == ';' || line[i] == '#')) {
+        line.resize(i);
+        break;
+      }
+    }
     line = trim(line);
     if (line.empty()) continue;
     if (line.front() == '[') {
@@ -96,6 +103,7 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "spin_us") { if (!need_u32(&c->spin_us)) return false; }
       else if (key == "lock_memory") { if (!need_bool(&c->lock_memory)) return false; }
       else if (key == "sap") { if (!need_bool(&c->sap)) return false; }
+      else if (key == "control_port") { if (!to_u32(val, &u) || u > 65535) return fail("bad control_port"); c->control_port = u; }
       else if (key == "clock") c->clock = lower(val);
       else return fail("unknown key '" + key + "'");
     } else if (section == "ptp") {
@@ -189,6 +197,56 @@ bool validate_config(Config* c, std::string* error) {
       c->tx[i].name = c->device_name + " " + std::to_string(c->tx[i].first_channel) + "-" +
                       std::to_string(c->tx[i].first_channel + c->tx[i].channels - 1);
   return true;
+}
+
+std::string format_config(const Config& c) {
+  std::ostringstream o;
+  auto quoted = [](const std::string& v) {
+    // Values with comment characters or edge spaces need quotes to survive.
+    const bool q = v.find_first_of(";#") != std::string::npos ||
+                   (!v.empty() && (v.front() == ' ' || v.back() == ' '));
+    return q ? "\"" + v + "\"" : v;
+  };
+  o << "# DSV virtual soundcard configuration\n\n[device]\n";
+  o << "name = " << quoted(c.device_name) << "\n";
+  o << "interface = " << quoted(c.interface) << "\n";
+  if (!c.shm_name.empty()) o << "shm_name = " << c.shm_name << "\n";
+  o << "sample_rate = " << c.sample_rate << "\n";
+  o << "tx_channels = " << c.tx_channels << "\n";
+  o << "rx_channels = " << c.rx_channels << "\n";
+  o << "packet_time_us = " << c.packet_time_us << "\n";
+  o << "latency_us = " << c.rx_latency_us << "\n";
+  if (c.tx_lead_us) o << "tx_lead_us = " << c.tx_lead_us << "\n";
+  o << "clock = " << c.clock << "\n";
+  o << "sap = " << (c.sap ? "true" : "false") << "\n";
+  o << "control_port = " << c.control_port << "\n";
+  o << "rt_priority = " << c.rt_priority << "\n";
+  o << "spin_us = " << c.spin_us << "\n";
+  o << "lock_memory = " << (c.lock_memory ? "true" : "false") << "\n";
+  o << "\n[ptp]\ndomain = " << c.ptp_domain << "\n";
+  o << "master_capable = " << (c.ptp_master_capable ? "true" : "false") << "\n";
+  o << "priority1 = " << c.ptp_priority1 << "\n";
+  for (const auto& s : c.tx) {
+    o << "\n[tx]\n";
+    if (!s.name.empty()) o << "name = " << quoted(s.name) << "\n";
+    o << "address = " << s.address << "\nport = " << s.port << "\n";
+    o << "first_channel = " << s.first_channel << "\nchannels = " << s.channels << "\n";
+    if (s.encoding != "L24") o << "encoding = " << s.encoding << "\n";
+    if (s.payload_type != 97) o << "payload_type = " << unsigned(s.payload_type) << "\n";
+    if (s.ttl != 32) o << "ttl = " << s.ttl << "\n";
+  }
+  for (const auto& s : c.rx) {
+    o << "\n[rx]\n";
+    if (!s.sap_name.empty()) o << "sap_name = " << quoted(s.sap_name) << "\n";
+    if (!s.address.empty()) o << "address = " << s.address << "\n";
+    if (s.sap_name.empty() || s.port != 5004) o << "port = " << s.port << "\n";
+    o << "first_channel = " << s.first_channel << "\nchannels = " << s.channels << "\n";
+    if (s.encoding != "L24") o << "encoding = " << s.encoding << "\n";
+    if (s.payload_type != 97) o << "payload_type = " << unsigned(s.payload_type) << "\n";
+    if (!s.source.empty()) o << "source = " << s.source << "\n";
+    if (s.ts_offset) o << "ts_offset = " << s.ts_offset << "\n";
+  }
+  return o.str();
 }
 
 }  // namespace dsv

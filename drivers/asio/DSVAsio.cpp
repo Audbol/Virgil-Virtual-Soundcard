@@ -271,8 +271,18 @@ class DsvAsio : public IASIO {
     uint64_t k = 0;
     ASIOTime time_info{};
     uint64_t steps = client_.header()->clock_steps.load();
+    bool reset_requested = false;
 
     while (running_) {
+      // dsvd gone for >2 s (settings changed the soundcard layout, or it was
+      // restarted): ask the host to re-initialise us so init() reconnects.
+      // Shorter gaps (settings applied with the same layout) ride through on
+      // the extrapolated clock.
+      if (!reset_requested && !client_.daemon_alive(2000000000LL) && callbacks_->asioMessage &&
+          callbacks_->asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr)) {
+        callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
+        reset_requested = true;
+      }
       dsv::ClockAnchor a;
       if (!client_.anchor(&a)) break;
       const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_relaxed);

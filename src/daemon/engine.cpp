@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -14,6 +15,18 @@
 #include "dsv/sample_convert.h"
 
 namespace dsv {
+
+namespace {
+// Lock-free running maximum of a non-negative float stored as its bits
+// (IEEE-754 ordering of non-negative floats matches unsigned ordering).
+inline void peak_max(std::atomic<uint32_t>& a, float v) {
+  uint32_t b;
+  std::memcpy(&b, &v, sizeof b);
+  uint32_t cur = a.load(std::memory_order_relaxed);
+  while (b > cur && !a.compare_exchange_weak(cur, b, std::memory_order_relaxed)) {
+  }
+}
+}  // namespace
 
 Engine::Engine(Config cfg) : cfg_(std::move(cfg)) {}
 Engine::~Engine() { stop(); }
@@ -34,7 +47,32 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   // --- shared memory soundcard ---
   std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
   const size_t bytes = shm_total_bytes(cfg_.ring_frames, cfg_.tx_channels, cfg_.rx_channels);
-  bool created = shm_.create(shm_name, bytes);
+  SharedMemory& shm_ = shm();
+  bool reused = false;
+  if (shm_ext_ && shm_.is_open() && shm_.size() >= bytes) {
+    const auto* old = static_cast<const ShmHeader*>(shm_.data());
+    const bool same_name = shm_.name() == shm_name
+#if defined(_WIN32)
+                           || (cfg_.shm_name.empty() && shm_.name() == kFallbackShmName)
+#endif
+        ;
+    reused = same_name && old->magic == kShmMagic && old->version == kShmVersion &&
+             old->total_bytes == bytes && old->sample_rate == cfg_.sample_rate &&
+             old->tx_channels == cfg_.tx_channels && old->rx_channels == cfg_.rx_channels &&
+             old->ring_frames == cfg_.ring_frames;
+  }
+  bool created = reused;
+  if (reused) {
+    DSV_LOG_INFO("reusing soundcard '%s'; connected apps stay attached", shm_.name().c_str());
+  } else {
+    if (shm_.is_open()) {
+      // Layout changed: drivers holding the old segment see it stopped and
+      // reconnect to the new one.
+      static_cast<ShmHeader*>(shm_.data())->state.store(kStateStopped);
+      shm_.close();
+    }
+    created = shm_.create(shm_name, bytes);
+  }
 #if defined(_WIN32)
   if (!created && cfg_.shm_name.empty() && !std::getenv("DSV_SHM_NAME")) {
     // Global\ needs SeCreateGlobalPrivilege (services, elevated consoles).
@@ -50,6 +88,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     return false;
   }
   hdr_ = static_cast<ShmHeader*>(shm_.data());
+  if (reused) clear_rings();  // keep client slots, drop stale audio
   hdr_->magic = kShmMagic;
   hdr_->version = kShmVersion;
   hdr_->total_bytes = bytes;
@@ -60,6 +99,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   hdr_->period_frames = cfg_.period_frames();
   hdr_->rx_latency_frames = cfg_.rx_latency_frames();
   hdr_->tx_lead_frames = cfg_.tx_lead_frames();
+  std::memset(hdr_->device_name, 0, sizeof hdr_->device_name);
   std::strncpy(hdr_->device_name, cfg_.device_name.c_str(), sizeof hdr_->device_name - 1);
   mix_.assign(size_t(hdr_->period_frames) * std::max(1u, cfg_.tx_channels), 0.f);
 
@@ -115,14 +155,15 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
 
   // --- discovery ---
   if (cfg_.sap) {
-    sap_ = std::make_unique<SapService>();
-    if (!sap_->start(iface_)) {
-      sap_.reset();
-    } else {
+    if (!sap_shared_) {
+      sap_ = std::make_unique<SapService>();
+      if (!sap_->start(iface_)) sap_.reset();
+    }
+    if (sap()) {
       std::vector<SdpInfo> ann;
       for (auto& t : tx_)
         if (is_multicast(t->dst.addr)) ann.push_back(t->sdp);
-      sap_->set_announcements(ann);
+      sap()->set_announcements(ann);
     }
   }
 
@@ -163,7 +204,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
 
 void Engine::stop() {
   if (!running_.exchange(false)) {
-    shm_.close();
+    if (!shm_ext_) shm_own_.close();
     return;
   }
   if (tick_thread_.joinable()) tick_thread_.join();
@@ -171,12 +212,13 @@ void Engine::stop() {
     if (r->thread.joinable()) r->thread.join();
   if (hk_thread_.joinable()) hk_thread_.join();
   if (sap_) sap_->stop();
+  else if (sap_shared_) sap_shared_->set_announcements({});  // withdraw our flows
   if (hdr_) hdr_->state.store(kStateStopped, std::memory_order_release);
   clock_.reset();
   tx_.clear();
   rx_.clear();
   hdr_ = nullptr;
-  shm_.close();
+  if (!shm_ext_) shm_own_.close();  // a shared segment stays for the next engine
 }
 
 SdpInfo Engine::make_sdp(const TxStream& t) const {
@@ -291,6 +333,15 @@ void Engine::mix_and_send(uint64_t start) {
       std::memset(src, 0, sizeof(float) * ch);  // consumed
     }
   }
+
+  // Meters: per-channel peak of what goes onto the wire.
+  float peaks[kMaxChannels] = {};
+  for (uint32_t f = 0; f < P; ++f) {
+    const float* m = mix_.data() + size_t(f) * ch;
+    for (uint32_t c = 0; c < ch; ++c) peaks[c] = std::max(peaks[c], std::fabs(m[c]));
+  }
+  for (uint32_t c = 0; c < ch; ++c)
+    if (peaks[c] > 0) peak_max(tx_peak_[c], peaks[c]);
 
   for (auto& tp : tx_) {
     TxStream& t = *tp;
@@ -419,6 +470,7 @@ void Engine::rx_loop(RxStream* s) {
     }
 
     const uint32_t nch = first < rxch ? std::min(t.channels, rxch - first) : 0;
+    float peaks[kMaxChannels] = {};
     for (uint32_t f = 0; f < frames; ++f) {
       float* dst = rx + size_t((start + f) & mask) * rxch + first;
       const uint8_t* src = payload + size_t(f) * frame_bytes;
@@ -427,7 +479,11 @@ void Engine::rx_loop(RxStream* s) {
       } else {
         for (uint32_t c = 0; c < nch; ++c) dst[c] = l16_to_float(src + c * 2);
       }
+      for (uint32_t c = 0; c < nch; ++c) peaks[c] = std::max(peaks[c], std::fabs(dst[c]));
     }
+    for (uint32_t c = 0; c < nch; ++c)
+      if (peaks[c] > 0) peak_max(rx_peak_[first + c], peaks[c]);
+    s->last_rx_ns.store(mono_ns(), std::memory_order_relaxed);
   }
   if (group) sock.leave_multicast(group, iface_);
 }
@@ -438,11 +494,11 @@ void Engine::housekeeping_loop() {
   while (running_) {
     sleep_until_ns(mono_ns() + 250000000LL);
     // Follow SAP-announced sessions (e.g. a Dante device's AES67 flow).
-    if (sap_) {
+    if (SapService* sap = this->sap()) {
       for (auto& r : rx_) {
         if (r->cfg.sap_name.empty()) continue;
         SdpInfo s;
-        if (!sap_->find(r->cfg.sap_name, &s)) continue;
+        if (!sap->find(r->cfg.sap_name, &s)) continue;
         std::lock_guard<std::mutex> l(r->mutex);
         const bool changed = !r->have_target ||
                              s.connection_address != r->target.connection_address ||
@@ -464,7 +520,7 @@ void Engine::housekeeping_loop() {
           t->sdp = make_sdp(*t);
           if (is_multicast(t->dst.addr)) ann.push_back(t->sdp);
         }
-        sap_->set_announcements(ann);
+        sap->set_announcements(ann);
       }
     }
     if (g_log_level >= kLogInfo && mono_ns() >= next_status) {
@@ -472,6 +528,42 @@ void Engine::housekeeping_loop() {
       next_status = mono_ns() + 10000000000LL;
     }
   }
+}
+
+std::vector<Engine::RxFlowStatus> Engine::rx_status() const {
+  std::vector<RxFlowStatus> out;
+  const int64_t now = mono_ns();
+  for (const auto& r : rx_) {
+    RxFlowStatus st;
+    st.cfg = r->cfg;
+    {
+      std::lock_guard<std::mutex> l(r->mutex);
+      st.resolved = r->have_target;
+      st.address = r->target.connection_address;
+      st.port = r->target.port;
+    }
+    st.receiving = now - r->last_rx_ns.load(std::memory_order_relaxed) < 1000000000LL;
+    out.push_back(std::move(st));
+  }
+  return out;
+}
+
+std::vector<SdpInfo> Engine::discovered() const {
+  SapService* s = sap();
+  return s ? s->sessions() : std::vector<SdpInfo>();
+}
+
+void Engine::take_peaks(std::vector<float>* tx, std::vector<float>* rx) {
+  auto drain = [](std::array<std::atomic<uint32_t>, kMaxChannels>& a, uint32_t n,
+                  std::vector<float>* out) {
+    out->assign(n, 0.f);
+    for (uint32_t c = 0; c < n; ++c) {
+      const uint32_t b = a[c].exchange(0, std::memory_order_relaxed);
+      std::memcpy(&(*out)[c], &b, sizeof b);
+    }
+  };
+  drain(tx_peak_, cfg_.tx_channels, tx);
+  drain(rx_peak_, cfg_.rx_channels, rx);
 }
 
 std::string Engine::status_line() const {

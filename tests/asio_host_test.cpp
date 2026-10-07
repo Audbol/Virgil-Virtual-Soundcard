@@ -13,6 +13,8 @@
 #include "asio.h"
 #include "iasiodrv.h"
 
+static const double kPi = 3.14159265358979323846;
+
 static const CLSID kClsid = {0x6b1e4f2a, 0x9c3d, 0x4e8b,
                              {0xa1, 0xf5, 0x2d, 0x7c, 0x9e, 0x0b, 0x3a, 0x64}};
 
@@ -27,7 +29,7 @@ static ASIOTime* on_switch_ti(ASIOTime* t, long idx, ASIOBool) {
   auto* in = static_cast<int32_t*>(g_bufs[1].buffers[idx]);
   for (long i = 0; i < g_size; ++i) {
     out[i] = int32_t(0.5 * 2147483647.0 * std::sin(g_phase));
-    g_phase += 2 * M_PI * 1000.0 / 48000.0;
+    g_phase += 2 * kPi * 1000.0 / 48000.0;
   }
   g_rec.insert(g_rec.end(), in, in + g_size);
   ++g_switches;
@@ -80,7 +82,7 @@ int main(int argc, char** argv) {
   // Find the sine in the recording and check it is continuous.
   size_t first = 0;
   while (first < g_rec.size() && std::abs(g_rec[first]) < (1 << 24)) ++first;
-  const double c = 2 * std::cos(2 * M_PI * 1000.0 / 48000.0);
+  const double c = 2 * std::cos(2 * kPi * 1000.0 / 48000.0);
   long bad = 0;
   size_t n = 0;
   for (size_t i = first + 8; i + 8 < g_rec.size(); ++i, ++n) {

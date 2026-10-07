@@ -20,7 +20,7 @@ set(ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK (contains common/
 find_package(Threads REQUIRED)
 
 if(MSVC)
-  add_compile_options(/W4 /permissive-)
+  add_compile_options(/W4 /permissive- /wd4324)  # C4324: intentional alignas padding
   add_compile_definitions(_CRT_SECURE_NO_WARNINGS NOMINMAX)
 else()
   add_compile_options(-Wall -Wextra -Wno-unused-parameter)
@@ -59,7 +59,19 @@ endif()
 
 include(GNUInstallDirs)
 
-add_executable(dsvd src/daemon/main.cpp)
+# Control panel page, embedded into dsvd.
+set(DSV_UI_HEADER ${CMAKE_BINARY_DIR}/generated/ui_html.h)
+add_custom_command(
+  OUTPUT ${DSV_UI_HEADER}
+  COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/src/daemon/ui/index.html
+          -DOUT=${DSV_UI_HEADER} -DNAME=kUiHtml -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+  DEPENDS ${CMAKE_SOURCE_DIR}/src/daemon/ui/index.html ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+  COMMENT "Embedding control panel UI")
+
+add_executable(dsvd src/daemon/main.cpp src/daemon/control.cpp src/daemon/http_server.cpp
+                    ${DSV_UI_HEADER})
+target_include_directories(dsvd PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_compile_definitions(dsvd PRIVATE DSV_VERSION="${PROJECT_VERSION}")
 target_link_libraries(dsvd PRIVATE dsv_net)
 
 add_executable(dsv-latency-probe tools/dsv_latency_probe.cpp)

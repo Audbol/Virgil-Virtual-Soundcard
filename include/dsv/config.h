@@ -42,6 +42,7 @@ struct Config {
   uint32_t ptp_priority1 = 250;
 
   bool sap = true;
+  uint32_t control_port = 8480;    // local web control panel; 0 = off
   std::vector<StreamConfig> tx;
   std::vector<StreamConfig> rx;
 
@@ -62,5 +63,7 @@ bool load_config(const std::string& path, Config* out, std::string* error);
 // Range checks and defaults (e.g. a tx/rx stream covering all channels when
 // none were given). Returns false with a message if the config is unusable.
 bool validate_config(Config* c, std::string* error);
+// Serialise back to INI text that parse_config() reads.
+std::string format_config(const Config& c);
 
 }  // namespace dsv

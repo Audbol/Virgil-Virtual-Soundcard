@@ -92,6 +92,18 @@ TEST(loopback_unicast) {
               e.status_line().c_str());
   CHECK(max_err < 1e-6);
 
+  // Meters saw the same signal: ch1 = sine(0.25) + DC 0.125 from client b.
+  std::vector<float> tx_peak, rx_peak;
+  e.take_peaks(&tx_peak, &rx_peak);
+  CHECK(tx_peak.size() == 4 && rx_peak.size() == 4);
+  CHECK_NEAR(tx_peak[0], 0.375, 0.01);
+  CHECK_NEAR(rx_peak[0], 0.375, 0.01);
+  CHECK_NEAR(rx_peak[3], 0.25, 0.01);
+  e.take_peaks(&tx_peak, &rx_peak);  // drained: silence since
+  CHECK(tx_peak[0] < 1e-6);
+  auto rs = e.rx_status();
+  CHECK(rs.size() == 1 && rs[0].resolved);
+
   // Frames before the block must be silent (nothing leaked from the past).
   std::vector<float> pre(48 * 4);
   a.read_rx(start - 48, pre.data(), 48, 4);

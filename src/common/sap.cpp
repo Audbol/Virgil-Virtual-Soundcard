@@ -89,6 +89,12 @@ void SapService::stop() {
 
 void SapService::set_announcements(const std::vector<SdpInfo>& sessions) {
   std::lock_guard<std::mutex> l(mutex_);
+  for (const auto& old : local_) {
+    bool kept = false;
+    for (const auto& s : sessions)
+      kept |= s.session_id == old.session_id && s.session_name == old.session_name;
+    if (!kept) withdrawn_.push_back(old);
+  }
   local_ = sessions;
   local_dirty_ = true;
 }
@@ -112,10 +118,15 @@ std::vector<SdpInfo> SapService::sessions() const {
 }
 
 void SapService::announce_all(bool deletion) {
-  std::vector<SdpInfo> local;
+  std::vector<SdpInfo> local, withdrawn;
   {
     std::lock_guard<std::mutex> l(mutex_);
     local = local_;
+    withdrawn.swap(withdrawn_);
+  }
+  for (const auto& s : withdrawn) {
+    auto pkt = sap::build_packet(build_sdp(s), iface_, session_hash(s), true);
+    sock_.send_to(pkt.data(), pkt.size(), {sap::kAdminScopeGroup, sap::kPort});
   }
   for (const auto& s : local) {
     auto pkt = sap::build_packet(build_sdp(s), iface_, session_hash(s), deletion);

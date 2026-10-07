@@ -4,6 +4,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <vector>
 
 namespace dsv {
 
@@ -19,6 +20,14 @@ bool is_multicast(uint32_t addr);
 // Pick the IPv4 address of a named interface ("eth0"), or validate a literal
 // address. Empty input picks the first non-loopback interface.
 bool resolve_interface(const std::string& name_or_ip, uint32_t* out);
+
+struct InterfaceInfo {
+  std::string name;  // OS name ("eth0", "en0", "Ethernet 2")
+  uint32_t addr = 0;
+  bool loopback = false;
+};
+// Active IPv4 interfaces.
+std::vector<InterfaceInfo> list_interfaces();
 
 // DSCP values recommended by AES67 (section 6.2).
 constexpr int kDscpPtp = 46;    // EF

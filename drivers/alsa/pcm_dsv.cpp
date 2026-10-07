@@ -11,6 +11,7 @@
 #include <alsa/pcm_external.h>
 #include <poll.h>
 #include <sys/timerfd.h>
+#include <time.h>
 #include <unistd.h>
 
 #include <cerrno>
@@ -39,12 +40,30 @@ struct DsvPcm {
   std::vector<float> scratch;  // one frame, device channel count
 };
 
-bool ensure_client(DsvPcm* p) {
-  if (p->client.is_open() && p->client.daemon_alive()) return true;
-  p->client.close();
-  if (!p->client.open(p->shm_name) || !p->client.daemon_alive()) return false;
-  if (p->io.stream == SND_PCM_STREAM_PLAYBACK && !p->client.acquire_tx_slot("alsa")) return false;
-  return true;
+// (Re)attach to dsvd. `wait_ms` rides out an engine restart (settings applied
+// from the control panel), so applications only see an xrun, not an error.
+bool ensure_client(DsvPcm* p, int wait_ms = 0) {
+  for (int waited = 0;; waited += 50) {
+    if (p->client.is_open() && p->client.daemon_alive()) {
+      if (p->io.stream != SND_PCM_STREAM_PLAYBACK || p->client.has_tx_slot()) return true;
+      return p->client.acquire_tx_slot("alsa");
+    }
+    // Not alive. If a live soundcard exists under our name (daemon restarted
+    // with a new layout, or after a crash) switch to it; if it is the same
+    // segment coming back (settings applied) we simply keep waiting on it.
+    if (p->client.is_open()) {
+      dsv::Client fresh;
+      if (fresh.open(p->shm_name) && fresh.daemon_alive()) {
+        p->client.close();
+        continue;
+      }
+    } else if (p->client.open(p->shm_name)) {
+      continue;
+    }
+    if (waited >= wait_ms) return false;
+    timespec ts{0, 50 * 1000000L};
+    nanosleep(&ts, nullptr);
+  }
 }
 
 uint32_t device_channels(const DsvPcm* p) {
@@ -180,7 +199,7 @@ snd_pcm_sframes_t dsv_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_area_
 
 int dsv_prepare(snd_pcm_ioplug_t* io) {
   auto* p = static_cast<DsvPcm*>(io->private_data);
-  if (!ensure_client(p)) return -ENODEV;
+  if (!ensure_client(p, 3000)) return -ENODEV;
   p->running = false;
   p->xrun = false;
   p->hw = p->appl = 0;
@@ -229,8 +248,12 @@ int dsv_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
     uint64_t expirations;
     if (read(p->timer_fd, &expirations, sizeof expirations) < 0) { /* spurious */ }
   }
+  const unsigned short ready = io->stream == SND_PCM_STREAM_PLAYBACK ? POLLOUT : POLLIN;
   if (!update_hw(p)) {
-    *revents = POLLERR;
+    // Wake the app so its next read/write reaches pointer(), which reports
+    // -EPIPE (xrun). POLLERR here would surface as a fatal -EIO instead of
+    // the recoverable xrun that lets it re-prepare after an engine restart.
+    *revents = ready;
     return 0;
   }
   uint64_t avail;
@@ -238,7 +261,6 @@ int dsv_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
     avail = io->buffer_size - std::min<uint64_t>(io->buffer_size, p->appl - std::min(p->appl, p->hw));
   else
     avail = p->running ? p->hw - p->appl : 0;
-  const unsigned short ready = io->stream == SND_PCM_STREAM_PLAYBACK ? POLLOUT : POLLIN;
   *revents = avail >= io->period_size ? ready : 0;
   return 0;
 }

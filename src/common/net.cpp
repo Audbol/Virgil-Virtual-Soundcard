@@ -100,6 +100,49 @@ bool resolve_interface(const std::string& name, uint32_t* out) {
 #endif
 }
 
+std::vector<InterfaceInfo> list_interfaces() {
+  ensure_wsa();
+  std::vector<InterfaceInfo> out;
+#if defined(_WIN32)
+  ULONG size = 16 * 1024;
+  std::vector<unsigned char> buf;
+  ULONG rc = ERROR_BUFFER_OVERFLOW;
+  IP_ADAPTER_ADDRESSES* aa = nullptr;
+  for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; ++tries) {
+    buf.assign(size, 0);
+    aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
+    rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr,
+                              aa, &size);
+  }
+  if (rc != NO_ERROR) return out;
+  for (auto* a = aa; a; a = a->Next) {
+    if (a->OperStatus != IfOperStatusUp) continue;
+    char fname[256];
+    WideCharToMultiByte(CP_UTF8, 0, a->FriendlyName, -1, fname, sizeof fname, nullptr, nullptr);
+    for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
+      InterfaceInfo i;
+      i.name = fname;
+      i.addr = ntohl(reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr)->sin_addr.s_addr);
+      i.loopback = a->IfType == IF_TYPE_SOFTWARE_LOOPBACK;
+      out.push_back(i);
+    }
+  }
+#else
+  ifaddrs* ifs = nullptr;
+  if (getifaddrs(&ifs) != 0) return out;
+  for (ifaddrs* i = ifs; i; i = i->ifa_next) {
+    if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP)) continue;
+    InterfaceInfo info;
+    info.name = i->ifa_name;
+    info.addr = ntohl(reinterpret_cast<sockaddr_in*>(i->ifa_addr)->sin_addr.s_addr);
+    info.loopback = (i->ifa_flags & IFF_LOOPBACK) != 0;
+    out.push_back(info);
+  }
+  freeifaddrs(ifs);
+#endif
+  return out;
+}
+
 bool UdpSocket::open(uint16_t port, bool reuse) {
   ensure_wsa();
   close();
