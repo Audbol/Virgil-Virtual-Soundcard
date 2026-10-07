@@ -1,10 +1,10 @@
 <html><body style="font-family: -apple-system, sans-serif; font-size: 13px">
-<h3>DSV is installed</h3>
-<p>Select <b>DSV Virtual Soundcard</b> in System Settings &gt; Sound or in your audio app.</p>
+<h3>Virgil is installed</h3>
+<p>Select <b>Virgil Virtual Soundcard</b> in System Settings &gt; Sound or in your audio app.</p>
 <p>Set the network interface and flows in<br>
-<code>/Library/Application Support/DSV/dsv.conf</code><br>
+<code>/Library/Application Support/Virgil/virgil.conf</code><br>
 then restart the service:<br>
-<code>sudo launchctl kickstart -k system/org.dsv.dsvd</code></p>
-<p>Status: <code>dsvd --status</code> &nbsp; Log: <code>/Library/Logs/DSV/dsvd.log</code><br>
-Uninstall: <code>sudo "/Library/Application Support/DSV/uninstall.sh"</code></p>
+<code>sudo launchctl kickstart -k system/org.virgil.virgild</code></p>
+<p>Status: <code>virgild --status</code> &nbsp; Log: <code>/Library/Logs/Virgil/virgild.log</code><br>
+Uninstall: <code>sudo "/Library/Application Support/Virgil/uninstall.sh"</code></p>
 </body></html>

@@ -1,4 +1,4 @@
-#include "dsv/ptp.h"
+#include "virgil/ptp.h"
 
 #include <algorithm>
 #include <cmath>
@@ -7,10 +7,10 @@
 #include <cstring>
 #include <random>
 
-#include "dsv/log.h"
-#include "dsv/platform.h"
+#include "virgil/log.h"
+#include "virgil/platform.h"
 
-namespace dsv {
+namespace virgil {
 
 FreeRunClock::FreeRunClock() {
   m_.base_local = mono_ns();
@@ -175,8 +175,14 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   const int64_t est = m_.ptp_at(local);
   const int64_t err = est - master;
   last_err_ = err;
+  if (first_local_ == 0 && std::llabs(err) <= step_threshold_ns) {
+    // First sample after reset_to: start the frequency measurement here.
+    last_local_ = first_local_ = local;
+    first_master_ = master;
+    return kTracking;
+  }
   const double dt = double(local - last_local_) * 1e-9;
-  if (dt <= 0) return kOutlier;
+  if (dt <= 0 && first_local_ != 0) return kOutlier;
 
   if (std::llabs(err) > step_threshold_ns) {
     m_.base_local = local;
@@ -204,7 +210,8 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
     drift_ppb_ -= ki * double(err) / dt;
   }
   drift_ppb_ = std::clamp(drift_ppb_, -1e6, 1e6);
-  const double adj = std::clamp(drift_ppb_ - kp * double(err) / dt, -1e6, 1e6);
+  const double adj =
+      std::clamp(drift_ppb_ - kp * double(err) / dt, -1e6, 1e6);
 
   m_.base_local = local;
   m_.base_ptp = est;  // keep phase continuous; frequency does the steering
@@ -225,7 +232,7 @@ bool PtpClock::start(const Options& o) {
   stop();
   opt_ = o;
   if (!event_.open(ptp1::kEventPort) || !general_.open(ptp1::kGeneralPort)) {
-    DSV_LOG_ERROR("ptp: cannot bind UDP 319/320 (needs administrator/root, or another PTP "
+    VIRGIL_LOG_ERROR("ptp: cannot bind UDP 319/320 (needs administrator/root, or another PTP "
                   "program uses them)");
     event_.close();
     general_.close();
@@ -262,7 +269,7 @@ bool PtpClock::start(const Options& o) {
   master_seen_ns_ = start_ns_;
   running_ = true;
   thread_ = std::thread([this] { run(); });
-  DSV_LOG_INFO("ptp: PTPv1 on %s subdomain %s, clock id %s%s",
+  VIRGIL_LOG_INFO("ptp: PTPv1 on %s subdomain %s, clock id %s%s",
                ipv4_to_string(o.interface_addr).c_str(), o.subdomain.c_str(),
                ptp1::format_uuid(self_.uuid).c_str(),
                o.master_capable ? " (may act as master)" : "");
@@ -304,7 +311,7 @@ void PtpClock::run() {
     const int64_t now = mono_ns();
 
     if (have_master_ && !is_master_ && now - master_seen_ns_ > 4000000000LL) {
-      DSV_LOG_WARN("ptp: lost master %s, holding over", ptp1::format_uuid(master_.uuid).c_str());
+      VIRGIL_LOG_WARN("ptp: lost master %s, holding over", ptp1::format_uuid(master_.uuid).c_str());
       have_master_ = false;
       state_ = kStateFreeRun;
       master_seen_ns_ = now;
@@ -312,7 +319,7 @@ void PtpClock::run() {
       gm_string_.clear();
     }
     if (!have_master_ && !is_master_ && opt_.master_capable && now - master_seen_ns_ > 4000000000LL) {
-      DSV_LOG_INFO("ptp: no master found, acting as PTPv1 master (stratum %u)", opt_.stratum);
+      VIRGIL_LOG_INFO("ptp: no master found, acting as PTPv1 master (stratum %u)", opt_.stratum);
       is_master_ = true;
       state_ = kStatePtpMaster;
       next_sync_ns_ = now;
@@ -339,7 +346,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     mine.gm_uuid = self_.uuid;
     mine.stratum = opt_.stratum;
     if (ptp1::compare_masters(props, src, mine, self_) >= 0) return;
-    DSV_LOG_INFO("ptp: better master %s appeared, leaving master role",
+    VIRGIL_LOG_INFO("ptp: better master %s appeared, leaving master role",
                  ptp1::format_uuid(src.uuid).c_str());
     is_master_ = false;
     servo_.reset_to(cell_.load());
@@ -349,7 +356,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
       ptp1::compare_masters(props, src, master_props_, master_) >= 0)
     return;  // keep the current, better master
   if (!same) {
-    DSV_LOG_INFO("ptp: following master %s (stratum %u%s)", ptp1::format_uuid(src.uuid).c_str(),
+    VIRGIL_LOG_INFO("ptp: following master %s (stratum %u%s)", ptp1::format_uuid(src.uuid).c_str(),
                  props.stratum, props.preferred ? ", preferred" : "");
     master_ = src;
     sync_pending_ = false;
@@ -439,8 +446,10 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   const auto r = servo_.sample(t2, t1 + mean_path_delay_);
   if (r == PiServo::kOutlier) return;
   if (r == PiServo::kStep)
-    DSV_LOG_WARN("ptp: stepped clock by %.3f ms", double(servo_.last_error_ns()) / 1e6);
+    VIRGIL_LOG_WARN("ptp: stepped clock by %.3f ms", double(servo_.last_error_ns()) / 1e6);
   publish(servo_.model());
+  VIRGIL_LOG_DEBUG("ptp: offset %lld ns, delay %lld ns, ratio %.9f", (long long)servo_.last_error_ns(),
+                   (long long)mean_path_delay_, servo_.model().ratio);
   offset_ns_ = servo_.last_error_ns();
   state_ = servo_.locked() ? kStatePtpLocked : kStateFreeRun;
 }
@@ -494,4 +503,4 @@ void PtpClock::master_duties(int64_t now) {
   next_sync_ns_ = now + 250000000LL;
 }
 
-}  // namespace dsv
+}  // namespace virgil

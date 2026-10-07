@@ -6,10 +6,10 @@
 #include <string>
 #include <vector>
 
-#include "dsv/config.h"
+#include "virgil/config.h"
 #include "http_server.h"
 
-namespace dsv {
+namespace virgil {
 
 class Engine;
 
@@ -49,4 +49,4 @@ class ControlServer {
 // The configuration file location used by installers on this OS.
 std::string default_config_path();
 
-}  // namespace dsv
+}  // namespace virgil

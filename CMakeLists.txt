@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dsv VERSION 0.1.0 LANGUAGES C CXX)
+project(virgil VERSION 0.2.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -11,10 +11,10 @@ set(_alsa_default OFF)
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(_alsa_default ON)
 endif()
-option(DSV_BUILD_ALSA "Build the ALSA pcm plugin (Linux)" ${_alsa_default})
-option(DSV_BUILD_COREAUDIO "Build the CoreAudio AudioServerPlugIn (macOS)" ${APPLE})
-option(DSV_BUILD_ASIO "Build the ASIO driver (Windows; needs ASIO_SDK_DIR)" ${WIN32})
-option(DSV_BUILD_TESTS "Build unit and loopback tests" ON)
+option(VIRGIL_BUILD_ALSA "Build the ALSA pcm plugin (Linux)" ${_alsa_default})
+option(VIRGIL_BUILD_COREAUDIO "Build the CoreAudio AudioServerPlugIn (macOS)" ${APPLE})
+option(VIRGIL_BUILD_ASIO "Build the ASIO driver (Windows; needs ASIO_SDK_DIR)" ${WIN32})
+option(VIRGIL_BUILD_TESTS "Build unit and loopback tests" ON)
 set(ASIO_SDK_DIR "" CACHE PATH "Path to the Steinberg ASIO SDK (contains common/asio.h)")
 
 find_package(Threads REQUIRED)
@@ -29,110 +29,110 @@ if(WIN32)
   add_compile_definitions(NOMINMAX _WIN32_WINNT=0x0A00)
 endif()
 
-# ---- client library: everything a driver needs to attach to dsvd ----------
-add_library(dsv_client STATIC
+# ---- client library: everything a driver needs to attach to virgild ----------
+add_library(virgil_client STATIC
   src/common/platform.cpp
   src/common/shm.cpp
   src/common/client.cpp)
-target_include_directories(dsv_client PUBLIC include)
-set_target_properties(dsv_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
-target_link_libraries(dsv_client PUBLIC Threads::Threads)
+target_include_directories(virgil_client PUBLIC include)
+set_target_properties(virgil_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
+target_link_libraries(virgil_client PUBLIC Threads::Threads)
 if(WIN32)
-  target_link_libraries(dsv_client PUBLIC avrt winmm advapi32)
+  target_link_libraries(virgil_client PUBLIC avrt winmm advapi32)
 elseif(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  target_link_libraries(dsv_client PUBLIC rt)
+  target_link_libraries(virgil_client PUBLIC rt)
 endif()
 
-# ---- network library: AES67 / PTP / SAP --------------------------------------
-add_library(dsv_net STATIC
+# ---- network library: PTP + Dante (Inferno) --------------------------------------
+add_library(virgil_net STATIC
   src/common/log.cpp
   src/common/net.cpp
   src/common/ptp.cpp
   src/common/config.cpp
   src/daemon/engine.cpp)
 include(cmake/rust_bridge.cmake)
-target_link_libraries(dsv_net PUBLIC dsv_client virgil_dante)
+target_link_libraries(virgil_net PUBLIC virgil_client virgil_dante)
 if(WIN32)
-  target_link_libraries(dsv_net PUBLIC ws2_32 iphlpapi)
+  target_link_libraries(virgil_net PUBLIC ws2_32 iphlpapi)
 endif()
 
 include(GNUInstallDirs)
 
-# Control panel page, embedded into dsvd.
-set(DSV_UI_HEADER ${CMAKE_BINARY_DIR}/generated/ui_html.h)
+# Control panel page, embedded into virgild.
+set(VIRGIL_UI_HEADER ${CMAKE_BINARY_DIR}/generated/ui_html.h)
 add_custom_command(
-  OUTPUT ${DSV_UI_HEADER}
+  OUTPUT ${VIRGIL_UI_HEADER}
   COMMAND ${CMAKE_COMMAND} -DIN=${CMAKE_SOURCE_DIR}/src/daemon/ui/index.html
-          -DOUT=${DSV_UI_HEADER} -DNAME=kUiHtml -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
+          -DOUT=${VIRGIL_UI_HEADER} -DNAME=kUiHtml -P ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
   DEPENDS ${CMAKE_SOURCE_DIR}/src/daemon/ui/index.html ${CMAKE_SOURCE_DIR}/cmake/embed.cmake
   COMMENT "Embedding control panel UI")
 
-add_executable(dsvd src/daemon/main.cpp src/daemon/control.cpp src/daemon/http_server.cpp
-                    ${DSV_UI_HEADER})
-target_include_directories(dsvd PRIVATE ${CMAKE_BINARY_DIR}/generated)
-target_compile_definitions(dsvd PRIVATE DSV_VERSION="${PROJECT_VERSION}")
-target_link_libraries(dsvd PRIVATE dsv_net)
+add_executable(virgild src/daemon/main.cpp src/daemon/control.cpp src/daemon/http_server.cpp
+                    ${VIRGIL_UI_HEADER})
+target_include_directories(virgild PRIVATE ${CMAKE_BINARY_DIR}/generated)
+target_compile_definitions(virgild PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
+target_link_libraries(virgild PRIVATE virgil_net)
 
-add_executable(dsv-latency-probe tools/dsv_latency_probe.cpp)
-target_link_libraries(dsv-latency-probe PRIVATE dsv_client)
+add_executable(virgil-latency-probe tools/virgil_latency_probe.cpp)
+target_link_libraries(virgil-latency-probe PRIVATE virgil_client)
 
-# DSV Control: opens the control panel (starts a portable dsvd if needed).
+# Virgil Control: opens the control panel (starts a portable virgild if needed).
 if(APPLE)
-  add_executable(dsv-control MACOSX_BUNDLE tools/dsv_control.cpp)
-  set_target_properties(dsv-control PROPERTIES
-    OUTPUT_NAME "DSV Control"
-    MACOSX_BUNDLE_BUNDLE_NAME "DSV Control"
-    MACOSX_BUNDLE_GUI_IDENTIFIER org.dsv.control
+  add_executable(virgil-control MACOSX_BUNDLE tools/virgil_control.cpp)
+  set_target_properties(virgil-control PROPERTIES
+    OUTPUT_NAME "Virgil Control"
+    MACOSX_BUNDLE_BUNDLE_NAME "Virgil Control"
+    MACOSX_BUNDLE_GUI_IDENTIFIER org.virgil.control
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 elseif(WIN32)
-  add_executable(dsv-control WIN32 tools/dsv_control.cpp)
-  target_link_libraries(dsv-control PRIVATE ws2_32 shell32 user32)
+  add_executable(virgil-control WIN32 tools/virgil_control.cpp)
+  target_link_libraries(virgil-control PRIVATE ws2_32 shell32 user32)
 else()
-  add_executable(dsv-control tools/dsv_control.cpp)
-  install(FILES packaging/linux/dsv-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+  add_executable(virgil-control tools/virgil_control.cpp)
+  install(FILES packaging/linux/virgil-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
 endif()
-target_link_libraries(dsv-control PRIVATE dsv_client)
+target_link_libraries(virgil-control PRIVATE virgil_client)
 
-install(TARGETS dsvd dsv-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
-install(TARGETS dsv-control RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)
-install(FILES README.md config/dsv.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(TARGETS virgild virgil-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS virgil-control RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)
+install(FILES README.md LICENSE config/virgil.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  configure_file(packaging/linux/dsvd.service.in ${CMAKE_BINARY_DIR}/dsvd.service @ONLY)
-  install(FILES ${CMAKE_BINARY_DIR}/dsvd.service DESTINATION lib/systemd/system)
-  install(FILES packaging/dsv.conf DESTINATION /etc/dsv)
+  configure_file(packaging/linux/virgild.service.in ${CMAKE_BINARY_DIR}/virgild.service @ONLY)
+  install(FILES ${CMAKE_BINARY_DIR}/virgild.service DESTINATION lib/systemd/system)
+  install(FILES packaging/virgil.conf DESTINATION /etc/virgil)
 endif()
 
 # ---- drivers -----------------------------------------------------------------
-if(DSV_BUILD_ALSA)
+if(VIRGIL_BUILD_ALSA)
   add_subdirectory(drivers/alsa)
 endif()
-if(DSV_BUILD_COREAUDIO AND APPLE)
+if(VIRGIL_BUILD_COREAUDIO AND APPLE)
   add_subdirectory(drivers/coreaudio)
 endif()
-if(DSV_BUILD_ASIO AND WIN32)
+if(VIRGIL_BUILD_ASIO AND WIN32)
   add_subdirectory(drivers/asio)
 endif()
 
-if(DSV_BUILD_TESTS)
+if(VIRGIL_BUILD_TESTS)
   enable_testing()
   add_subdirectory(tests)
 endif()
 
 # ---- Linux packages (packaging/linux/build-packages.sh) ----------------------
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
-  set(DSV_PACKAGE_MAINTAINER "DSV maintainers <dsv@example.invalid>" CACHE STRING
+  set(VIRGIL_PACKAGE_MAINTAINER "Virgil maintainers <virgil@example.invalid>" CACHE STRING
       "Maintainer field of .deb/.rpm packages")
-  set(DSV_PACKAGE_LICENSE "Unspecified" CACHE STRING "License field of .rpm packages")
-  set(CPACK_PACKAGE_NAME dsv)
-  set(CPACK_PACKAGE_VENDOR "DSV Project")
-  set(CPACK_PACKAGE_CONTACT "${DSV_PACKAGE_MAINTAINER}")
+  set(VIRGIL_PACKAGE_LICENSE "GPL-3.0-or-later" CACHE STRING "License field of .rpm packages")
+  set(CPACK_PACKAGE_NAME virgil)
+  set(CPACK_PACKAGE_VENDOR "Virgil Project")
+  set(CPACK_PACKAGE_CONTACT "${VIRGIL_PACKAGE_MAINTAINER}")
   set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
-      "Low-latency AES67 virtual soundcard, compatible with Dante devices in AES67 mode")
+      "Low-latency Dante-compatible virtual soundcard (unofficial)")
   set(CPACK_PACKAGE_DESCRIPTION
-      "DSV exposes AES67 network audio as an ALSA device. The dsvd daemon follows the PTPv2 grandmaster, sends and receives AES67 RTP flows and announces them via SAP.")
-  set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/audbol/dsv-dante-soundcard-virtual")
+      "Virgil appears on the network as a Dante device and exposes its channels as an ALSA soundcard. Dante support comes from Inferno, an independent open-source implementation; Virgil is not affiliated with Audinate.")
+  set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/audbol/virgil-dante-soundcard-virtual")
 
   set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
   set(CPACK_DEBIAN_PACKAGE_SECTION sound)
@@ -148,12 +148,12 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CPACK_RPM_PACKAGE_RELOCATABLE OFF)
   set(CPACK_RPM_FILE_NAME RPM-DEFAULT)
   set(CPACK_RPM_PACKAGE_GROUP "Applications/Multimedia")
-  set(CPACK_RPM_PACKAGE_LICENSE "${DSV_PACKAGE_LICENSE}")
+  set(CPACK_RPM_PACKAGE_LICENSE "${VIRGIL_PACKAGE_LICENSE}")
   set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/post)
   set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/preun)
   set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/postun)
-  set(CPACK_RPM_USER_FILELIST "%config(noreplace) /etc/dsv/dsv.conf"
-                              "%config(noreplace) /etc/alsa/conf.d/50-dsv.conf")
+  set(CPACK_RPM_USER_FILELIST "%config(noreplace) /etc/virgil/virgil.conf"
+                              "%config(noreplace) /etc/alsa/conf.d/50-virgil.conf")
   set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
       /etc/alsa /etc/alsa/conf.d /usr/lib/systemd /usr/lib/systemd/system
       /usr/lib64/alsa-lib /usr/share/doc)

@@ -2,8 +2,8 @@
 set -e
 if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || true
-	systemctl enable dsvd.service >/dev/null 2>&1 || true
-	systemctl restart dsvd.service >/dev/null 2>&1 || \
-		echo "dsv: dsvd did not start; check 'journalctl -u dsvd' and /etc/dsv/dsv.conf"
+	systemctl enable virgild.service >/dev/null 2>&1 || true
+	systemctl restart virgild.service >/dev/null 2>&1 || \
+		echo "virgil: virgild did not start; check 'journalctl -u virgild' and /etc/virgil/virgil.conf"
 fi
 exit 0

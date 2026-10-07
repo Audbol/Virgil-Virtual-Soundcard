@@ -4,7 +4,7 @@
 #include <cstddef>
 #include <string>
 
-namespace dsv {
+namespace virgil {
 
 class SharedMemory {
  public:
@@ -34,4 +34,4 @@ class SharedMemory {
 #endif
 };
 
-}  // namespace dsv
+}  // namespace virgil

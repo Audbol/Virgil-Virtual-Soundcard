@@ -1,9 +1,9 @@
-#include "dsv/net.h"
+#include "virgil/net.h"
 
 #include <cerrno>
 #include <cstring>
 
-#include "dsv/platform.h"
+#include "virgil/platform.h"
 
 #if defined(_WIN32)
 #include <winsock2.h>
@@ -21,7 +21,7 @@
 #include <unistd.h>
 #endif
 
-namespace dsv {
+namespace virgil {
 
 #if defined(_WIN32)
 namespace {
@@ -34,10 +34,10 @@ struct WsaInit {
 };
 void ensure_wsa() { static WsaInit init; }
 }  // namespace
-#define DSV_CLOSESOCK closesocket
+#define VIRGIL_CLOSESOCK closesocket
 #else
 static void ensure_wsa() {}
-#define DSV_CLOSESOCK ::close
+#define VIRGIL_CLOSESOCK ::close
 #endif
 
 bool parse_ipv4(const std::string& s, uint32_t* out) {
@@ -168,7 +168,7 @@ bool UdpSocket::open(uint16_t port, bool reuse) {
 }
 
 void UdpSocket::close() {
-  if (fd_ != kInvalid) DSV_CLOSESOCK(fd_);
+  if (fd_ != kInvalid) VIRGIL_CLOSESOCK(fd_);
   fd_ = kInvalid;
   kernel_ts_ = false;
 }
@@ -333,4 +333,4 @@ int UdpSocket::wait_readable(UdpSocket& a, UdpSocket* b, int timeout_ms) {
   return mask;
 }
 
-}  // namespace dsv
+}  // namespace virgil

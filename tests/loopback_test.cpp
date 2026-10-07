@@ -9,14 +9,14 @@
 #include <thread>
 #include <vector>
 
-#include "dsv/client.h"
-#include "dsv/engine.h"
-#include "dsv/log.h"
-#include "dsv/media_clock.h"
-#include "dsv/platform.h"
+#include "virgil/client.h"
+#include "virgil/engine.h"
+#include "virgil/log.h"
+#include "virgil/media_clock.h"
+#include "virgil/platform.h"
 #include "test_main.h"
 
-using namespace dsv;
+using namespace virgil;
 
 static void wait_ms(int ms) { sleep_until_ns(mono_ns() + int64_t(ms) * 1000000); }
 
@@ -34,8 +34,8 @@ TEST(soundcard_loopback_through_dante_rings) {
   c.lock_memory = false;
   c.tx_channels = 4;
   c.rx_channels = 4;
-  c.latency_us = 2000;
-  c.tx_latency_us = 3000;
+  c.latency_us = 4000;  // a receiver uses at least the sender's tx latency
+  c.tx_latency_us = 4000;
   c.ring_frames = 16384;
 
   Engine e(c);
@@ -43,9 +43,10 @@ TEST(soundcard_loopback_through_dante_rings) {
   CHECK(e.start());
   if (!e.running()) return;
   wait_ms(50);  // first ticks publish the clock
-  const uint32_t rate = c.sample_rate;
-  const uint64_t L = c.us_to_frames(c.tx_latency_us), RL = c.us_to_frames(c.latency_us);
-  const uint64_t D = L + RL;
+  // Inferno sends frame f at media time f + send delay, labelled 0.5 ms
+  // early; the receiver writes it at label + its latency.
+  const uint64_t L = c.us_to_frames(c.tx_send_delay_us()), RL = c.us_to_frames(c.latency_us);
+  const uint64_t D = RL - c.us_to_frames(500);
   const uint64_t dmask = c.ring_frames - 1;
 
   // Network simulator: what Inferno + the wire + a receiving Inferno do.

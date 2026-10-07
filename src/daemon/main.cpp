@@ -1,4 +1,4 @@
-// dsvd - DSV virtual soundcard daemon.
+// virgild - Virgil virtual soundcard daemon.
 #include <atomic>
 #include <csignal>
 #include <cstdio>
@@ -6,13 +6,13 @@
 #include <cstring>
 #include <string>
 
-#include "dsv/client.h"
-#include "dsv/engine.h"
-#include "dsv/log.h"
-#include "dsv/net.h"
-#include "dsv/platform.h"
-#include "dsv/shm.h"
-#include "dsv/shm_layout.h"
+#include "virgil/client.h"
+#include "virgil/engine.h"
+#include "virgil/log.h"
+#include "virgil/net.h"
+#include "virgil/platform.h"
+#include "virgil/shm.h"
+#include "virgil/shm_layout.h"
 #include "control.h"
 
 #if defined(_WIN32)
@@ -37,9 +37,9 @@ bool file_exists(const std::string& p) {
 
 void usage() {
   std::printf(
-      "usage: dsvd [options]\n"
-      "  -c, --config FILE     configuration file (default: the installed dsv.conf if\n"
-      "                        present, else a built-in 8x8 flow on 239.69.83.67)\n"
+      "usage: virgild [options]\n"
+      "  -c, --config FILE     configuration file (default: the installed virgil.conf if\n"
+      "                        present, else built-in defaults: 8x8 channels named Virgil)\n"
       "  -i, --interface IF    network interface name or IPv4 address\n"
       "  -n, --name NAME       device name\n"
       "      --free-run        do not use PTP; run on the local clock\n"
@@ -56,12 +56,12 @@ void usage() {
 }
 
 int status() {
-  dsv::Client c;
+  virgil::Client c;
   if (!c.open()) {
-    std::fprintf(stderr, "dsvd is not running\n");
+    std::fprintf(stderr, "virgild is not running\n");
     return 1;
   }
-  const dsv::ShmHeader* h = c.header();
+  const virgil::ShmHeader* h = c.header();
   static const char* states[] = {"stopped", "free-run", "ptp-locked", "ptp-master"};
   const uint32_t st = h->state.load();
   std::printf("device       %s\n", h->device_name);
@@ -74,7 +74,7 @@ int status() {
               h->period_frames, h->rx_latency_frames, h->tx_lead_frames);
   std::printf("scheduling   late ticks %llu, clock steps %llu\n",
               (unsigned long long)h->late_ticks.load(), (unsigned long long)h->clock_steps.load());
-  for (uint32_t i = 0; i < dsv::kMaxTxClients; ++i) {
+  for (uint32_t i = 0; i < virgil::kMaxTxClients; ++i) {
     const auto& s = h->clients[i];
     if (s.pid.load())
       std::printf("client %u     pid %u %s%s\n", i, s.pid.load(), s.name,
@@ -87,16 +87,16 @@ int status() {
 // report RUNNING quickly). The control panel can ask for a reload: the
 // engine is then stopped, the configuration re-read and the engine started
 // again, while the process (and the panel) stay up.
-int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
+int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   if (on_started) on_started();
 
-  dsv::ControlServer control(&ctx);
+  virgil::ControlServer control(&ctx);
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);
   if (control_port) {
     if (control.start(control_port))
-      DSV_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
+      VIRGIL_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
     else
-      DSV_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
+      VIRGIL_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
   }
 
   auto set_status = [&](const char* st, const std::string& err = std::string()) {
@@ -105,17 +105,17 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
     ctx.error = err;
   };
   auto wait_reload = [&](int64_t max_ns) {
-    const int64_t end = dsv::mono_ns() + max_ns;
-    while (!g_quit && !ctx.reload && dsv::mono_ns() < end)
-      dsv::sleep_until_ns(dsv::mono_ns() + 100000000LL);
+    const int64_t end = virgil::mono_ns() + max_ns;
+    while (!g_quit && !ctx.reload && virgil::mono_ns() < end)
+      virgil::sleep_until_ns(virgil::mono_ns() + 100000000LL);
   };
 
   // The soundcard apps attach to also outlives engine restarts.
-  dsv::SharedMemory soundcard;
+  virgil::SharedMemory soundcard;
 
   int rc = 0;
   while (!g_quit) {
-    dsv::Config cfg;
+    virgil::Config cfg;
     {
       std::lock_guard<std::mutex> l(ctx.mutex);
       cfg = ctx.cfg;
@@ -124,9 +124,9 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
     // At boot the NIC may not have an address yet (DHCP, link): wait for it.
     uint32_t addr = 0;
     bool warned = false;
-    while (!g_quit && !ctx.reload && !dsv::resolve_interface(cfg.interface, &addr)) {
+    while (!g_quit && !ctx.reload && !virgil::resolve_interface(cfg.interface, &addr)) {
       if (!warned) {
-        DSV_LOG_WARN("waiting for network interface '%s' to come up...",
+        VIRGIL_LOG_WARN("waiting for network interface '%s' to come up...",
                      cfg.interface.empty() ? "(any)" : cfg.interface.c_str());
         set_status("waiting-for-network");
       }
@@ -134,12 +134,12 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
       wait_reload(2000000000LL);
     }
     if (warned && !g_quit && !ctx.reload)
-      DSV_LOG_INFO("network interface %s is up", dsv::ipv4_to_string(addr).c_str());
+      VIRGIL_LOG_INFO("network interface %s is up", virgil::ipv4_to_string(addr).c_str());
 
-    std::unique_ptr<dsv::Engine> engine;
+    std::unique_ptr<virgil::Engine> engine;
     if (!g_quit && !ctx.reload) {
-      dsv::clear_last_error();
-      engine = std::make_unique<dsv::Engine>(cfg);
+      virgil::clear_last_error();
+      engine = std::make_unique<virgil::Engine>(cfg);
       engine->set_shared_memory(&soundcard);
       if (engine->start()) {
         std::lock_guard<std::mutex> l(ctx.mutex);
@@ -149,7 +149,7 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
         ctx.error.clear();
         rc = 0;
       } else {
-        const std::string err = dsv::last_error_message();
+        const std::string err = virgil::last_error_message();
         engine.reset();
         rc = 1;
         // Without the panel nobody can fix it from here: exit (the service
@@ -166,7 +166,7 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
         std::lock_guard<std::mutex> l(ctx.mutex);
         ctx.engine = nullptr;
       }
-      DSV_LOG_INFO(g_quit ? "shutting down" : "stopping engine for reload");
+      VIRGIL_LOG_INFO(g_quit ? "shutting down" : "stopping engine for reload");
       engine->stop();
       engine.reset();
     }
@@ -177,26 +177,26 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
         std::lock_guard<std::mutex> l(ctx.mutex);
         path = ctx.config_path;
       }
-      dsv::Config fresh;
+      virgil::Config fresh;
       std::string err;
-      if (!path.empty() && dsv::load_config(path, &fresh, &err)) {
+      if (!path.empty() && virgil::load_config(path, &fresh, &err)) {
         std::lock_guard<std::mutex> l(ctx.mutex);
         fresh.control_port = ctx.cfg.control_port;  // the panel stays where it is
         ctx.cfg = fresh;
-        DSV_LOG_INFO("reloaded configuration %s", path.c_str());
+        VIRGIL_LOG_INFO("reloaded configuration %s", path.c_str());
       } else if (!path.empty()) {
-        DSV_LOG_ERROR("reload of %s failed: %s", path.c_str(), err.c_str());
+        VIRGIL_LOG_ERROR("reload of %s failed: %s", path.c_str(), err.c_str());
       }
       set_status("starting");
     }
   }
   control.stop();
   if (soundcard.is_open())
-    static_cast<dsv::ShmHeader*>(soundcard.data())->state.store(dsv::kStateStopped);
+    static_cast<virgil::ShmHeader*>(soundcard.data())->state.store(virgil::kStateStopped);
   return g_quit ? 0 : rc;
 }
 
-dsv::DaemonContext g_ctx;
+virgil::DaemonContext g_ctx;
 
 #if defined(_WIN32)
 SERVICE_STATUS_HANDLE g_svc = nullptr;
@@ -214,19 +214,19 @@ void report_service(DWORD state, DWORD exit_code = NO_ERROR) {
 
 void WINAPI service_ctrl(DWORD ctrl) {
   if (ctrl == SERVICE_CONTROL_STOP || ctrl == SERVICE_CONTROL_SHUTDOWN) {
-    DSV_LOG_INFO("service: %s requested", ctrl == SERVICE_CONTROL_STOP ? "stop" : "shutdown stop");
+    VIRGIL_LOG_INFO("service: %s requested", ctrl == SERVICE_CONTROL_STOP ? "stop" : "shutdown stop");
     report_service(SERVICE_STOP_PENDING);
     g_quit = true;
   }
 }
 
 void WINAPI service_main(DWORD, LPSTR*) {
-  g_svc = RegisterServiceCtrlHandlerA("DSV", service_ctrl);
+  g_svc = RegisterServiceCtrlHandlerA("Virgil", service_ctrl);
   if (!g_svc) return;
   report_service(SERVICE_START_PENDING);
-  DSV_LOG_INFO("service: starting (pid %lu)", GetCurrentProcessId());
+  VIRGIL_LOG_INFO("service: starting (pid %lu)", GetCurrentProcessId());
   const int rc = run_daemon(g_ctx, [] { report_service(SERVICE_RUNNING); });
-  DSV_LOG_INFO("service: exiting (status %d)", rc);
+  VIRGIL_LOG_INFO("service: exiting (status %d)", rc);
   report_service(SERVICE_STOPPED, rc ? ERROR_SERVICE_SPECIFIC_ERROR : NO_ERROR);
 }
 #endif
@@ -234,7 +234,7 @@ void WINAPI service_main(DWORD, LPSTR*) {
 }  // namespace
 
 int main(int argc, char** argv) {
-  dsv::Config& cfg = g_ctx.cfg;
+  virgil::Config& cfg = g_ctx.cfg;
   std::string config_path, iface_override, name_override, log_path;
   bool free_run = false, do_status = false;
   bool service = false;
@@ -260,8 +260,8 @@ int main(int argc, char** argv) {
     else if (a == "--control-port") control_port = std::strtol(next().c_str(), nullptr, 10);
     else if (a == "--service") service = true;
     else if (a == "--status") do_status = true;
-    else if (a == "-v" || a == "--verbose") dsv::g_log_level = dsv::kLogDebug;
-    else if (a == "-q" || a == "--quiet") dsv::g_log_level = dsv::kLogWarn;
+    else if (a == "-v" || a == "--verbose") virgil::g_log_level = virgil::kLogDebug;
+    else if (a == "-q" || a == "--quiet") virgil::g_log_level = virgil::kLogWarn;
     else if (a == "-h" || a == "--help") { usage(); return 0; }
     else { usage(); return 2; }
   }
@@ -279,12 +279,12 @@ int main(int argc, char** argv) {
     std::setvbuf(stderr, nullptr, _IOLBF, 1024);
   }
 
-  if (config_path.empty() && file_exists(dsv::default_config_path()))
-    config_path = dsv::default_config_path();
+  if (config_path.empty() && file_exists(virgil::default_config_path()))
+    config_path = virgil::default_config_path();
   if (!config_path.empty()) {
-    DSV_LOG_INFO("using configuration %s", config_path.c_str());
+    VIRGIL_LOG_INFO("using configuration %s", config_path.c_str());
     std::string err;
-    if (!dsv::load_config(config_path, &cfg, &err)) {
+    if (!virgil::load_config(config_path, &cfg, &err)) {
       std::fprintf(stderr, "%s: %s\n", config_path.c_str(), err.c_str());
       return 2;
     }
@@ -297,11 +297,11 @@ int main(int argc, char** argv) {
   if (control_port >= 0 && control_port <= 65535) cfg.control_port = uint32_t(control_port);
   g_ctx.config_path = config_path;
 
-  for (const auto& n : cfg.notes) DSV_LOG_WARN("config: %s", n.c_str());
+  for (const auto& n : cfg.notes) VIRGIL_LOG_WARN("config: %s", n.c_str());
 
   if (service) {
 #if defined(_WIN32)
-    SERVICE_TABLE_ENTRYA table[] = {{const_cast<char*>("DSV"), service_main}, {nullptr, nullptr}};
+    SERVICE_TABLE_ENTRYA table[] = {{const_cast<char*>("Virgil"), service_main}, {nullptr, nullptr}};
     if (!StartServiceCtrlDispatcherA(table)) {
       std::fprintf(stderr, "--service must be started by the service control manager\n");
       return 1;

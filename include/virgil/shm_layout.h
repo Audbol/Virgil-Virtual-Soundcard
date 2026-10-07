@@ -1,4 +1,4 @@
-// Shared-memory contract between the dsvd daemon and the host-side drivers
+// Shared-memory contract between the virgild daemon and the host-side drivers
 // (ALSA ioplug, CoreAudio AudioServerPlugIn, ASIO). Everything here must stay
 // binary compatible between processes built by different compilers, so it
 // only uses fixed-width integers and lock-free std::atomic of those.
@@ -14,21 +14,21 @@
 #include <cstdint>
 #include <cstring>
 
-namespace dsv {
+namespace virgil {
 
-constexpr uint32_t kShmMagic = 0x31565344;  // "DSV1"
+constexpr uint32_t kShmMagic = 0x314C4756;  // "VGL1"
 constexpr uint32_t kShmVersion = 1;
 constexpr uint32_t kMaxChannels = 64;
 constexpr uint32_t kMaxTxClients = 8;
 constexpr size_t kShmHeaderBytes = 4096;
 
 #if defined(_WIN32)
-// The service creates a Global section visible to every session; a dsvd
+// The service creates a Global section visible to every session; a virgild
 // started from an unprivileged console falls back to the Local namespace.
-constexpr const char* kDefaultShmName = "Global\\DSVSoundcard";
-constexpr const char* kFallbackShmName = "Local\\DSVSoundcard";
+constexpr const char* kDefaultShmName = "Global\\VirgilSoundcard";
+constexpr const char* kFallbackShmName = "Local\\VirgilSoundcard";
 #else
-constexpr const char* kDefaultShmName = "/dsv-soundcard";
+constexpr const char* kDefaultShmName = "/virgil-soundcard";
 #endif
 
 enum DaemonState : uint32_t {
@@ -57,7 +57,7 @@ struct alignas(64) ShmHeader {
   uint32_t tx_channels;        // apps -> network (playback)
   uint32_t rx_channels;        // network -> apps (capture)
   uint32_t ring_frames;        // power of two
-  uint32_t period_frames;      // daemon tick == AES67 packet time
+  uint32_t period_frames;      // daemon tick
   uint32_t rx_latency_frames;  // capture reads lag the media clock by this
   uint32_t tx_lead_frames;     // playback writes lead the media clock by this
   uint32_t reserved0;
@@ -157,4 +157,4 @@ inline bool read_anchor(const ShmHeader* h, ClockAnchor* out) {
   return false;
 }
 
-}  // namespace dsv
+}  // namespace virgil

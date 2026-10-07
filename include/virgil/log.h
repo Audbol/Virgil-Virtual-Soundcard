@@ -3,7 +3,7 @@
 #include <cstdio>
 #include <string>
 
-namespace dsv {
+namespace virgil {
 enum LogLevel { kLogError = 0, kLogWarn = 1, kLogInfo = 2, kLogDebug = 3 };
 extern int g_log_level;
 // Most recent error-level message (shown in the control panel).
@@ -14,9 +14,9 @@ void log_message(int level, const char* fmt, ...)
     __attribute__((format(printf, 2, 3)))
 #endif
     ;
-}  // namespace dsv
+}  // namespace virgil
 
-#define DSV_LOG_ERROR(...) ::dsv::log_message(::dsv::kLogError, __VA_ARGS__)
-#define DSV_LOG_WARN(...) ::dsv::log_message(::dsv::kLogWarn, __VA_ARGS__)
-#define DSV_LOG_INFO(...) ::dsv::log_message(::dsv::kLogInfo, __VA_ARGS__)
-#define DSV_LOG_DEBUG(...) ::dsv::log_message(::dsv::kLogDebug, __VA_ARGS__)
+#define VIRGIL_LOG_ERROR(...) ::virgil::log_message(::virgil::kLogError, __VA_ARGS__)
+#define VIRGIL_LOG_WARN(...) ::virgil::log_message(::virgil::kLogWarn, __VA_ARGS__)
+#define VIRGIL_LOG_INFO(...) ::virgil::log_message(::virgil::kLogInfo, __VA_ARGS__)
+#define VIRGIL_LOG_DEBUG(...) ::virgil::log_message(::virgil::kLogDebug, __VA_ARGS__)

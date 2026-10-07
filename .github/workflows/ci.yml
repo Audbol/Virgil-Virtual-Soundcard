@@ -23,14 +23,14 @@ jobs:
       - run: ctest --test-dir build --output-on-failure
       - uses: actions/upload-artifact@v4
         with:
-          name: DSVAudio.driver
-          path: build/drivers/coreaudio/DSVAudio.driver
+          name: VirgilAudio.driver
+          path: build/drivers/coreaudio/VirgilAudio.driver
 
   windows:
     runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
-      - name: Fetch ASIO SDK (not redistributed with DSV)
+      - name: Fetch ASIO SDK (not redistributed with Virgil)
         shell: pwsh
         continue-on-error: true
         run: |

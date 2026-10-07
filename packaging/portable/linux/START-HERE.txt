@@ -1,21 +1,21 @@
-DSV Virtual Soundcard - portable for Linux (x86_64, glibc 2.35+)
+Virgil Virtual Soundcard - portable for Linux (x86_64, glibc 2.35+)
 ===============================================================
 
 AES67 network soundcard with an ALSA device. Works with Dante devices in
 AES67 mode (enable it in Dante Controller > Device View > AES67 Config).
 
 1. ./setup-alsa.sh
-   Adds the "dsv" ALSA device to ~/.asoundrc, pointing at this folder.
+   Adds the "virgil" ALSA device to ~/.asoundrc, pointing at this folder.
 
-2. ./dsv-control
-   Starts dsvd from this folder and opens the control panel in your browser.
-   For PTP (ports 319/320) and real-time priority, run dsvd with
-   privileges instead:  sudo ./dsvd -c dsv.conf
+2. ./virgil-control
+   Starts virgild from this folder and opens the control panel in your browser.
+   For PTP (ports 319/320) and real-time priority, run virgild with
+   privileges instead:  sudo ./virgild -c virgil.conf
 
-3. Use ALSA device "dsv" (e.g. aplay -D dsv, jackd -d alsa -d dsv_hw -p 64).
+3. Use ALSA device "virgil" (e.g. aplay -D virgil, jackd -d alsa -d virgil_hw -p 64).
 
-Settings: dsv.conf in this folder. Log: dsvd.log.
+Settings: virgil.conf in this folder. Log: virgild.log.
 For a system service that starts at boot, install the .deb / .rpm instead.
 
-Not affiliated with Audinate. DSV does not implement the proprietary
+Not affiliated with Audinate. Virgil does not implement the proprietary
 Dante protocol; it talks to Dante gear through Dante's AES67 mode.

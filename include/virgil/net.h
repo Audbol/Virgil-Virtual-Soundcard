@@ -6,7 +6,7 @@
 #include <string>
 #include <vector>
 
-namespace dsv {
+namespace virgil {
 
 struct Endpoint {
   uint32_t addr = 0;  // host byte order
@@ -60,7 +60,7 @@ class UdpSocket {
 
   int send_to(const void* buf, size_t len, const Endpoint& to);
   // Returns bytes received, 0 on timeout, <0 on error. `rx_mono_ns` is the
-  // best available receive time on the dsv monotonic clock.
+  // best available receive time on the virgil monotonic clock.
   int recv_from(void* buf, size_t len, Endpoint* from, int64_t* rx_mono_ns = nullptr);
 
   // Wait up to timeout_ms for either socket (b may be null) to be readable.
@@ -79,4 +79,4 @@ class UdpSocket {
   bool kernel_ts_ = false;
 };
 
-}  // namespace dsv
+}  // namespace virgil

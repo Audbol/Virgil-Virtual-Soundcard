@@ -1,3 +1,3 @@
 if [ "$1" -eq 0 ] && [ -d /run/systemd/system ]; then
-	systemctl disable --now dsvd.service >/dev/null 2>&1 || :
+	systemctl disable --now virgild.service >/dev/null 2>&1 || :
 fi

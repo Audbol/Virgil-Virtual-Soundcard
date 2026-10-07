@@ -1,9 +1,9 @@
-// Float <-> AES67 wire formats (big-endian L16 / L24) and driver int formats.
+// Float <-> wire formats (big-endian L16 / L24) and driver int formats.
 #pragma once
 
 #include <cstdint>
 
-namespace dsv {
+namespace virgil {
 
 inline int32_t float_to_int(float x, int32_t full_scale) {
   // Clamp then round; full_scale is 2^(bits-1).
@@ -47,4 +47,4 @@ inline float s32_to_float(int32_t v) { return float(double(v) * (1.0 / 214748364
 inline int16_t float_to_s16(float x) { return int16_t(float_to_int(x, 1 << 15)); }
 inline float s16_to_float(int16_t v) { return float(v) * (1.0f / 32768.0f); }
 
-}  // namespace dsv
+}  // namespace virgil

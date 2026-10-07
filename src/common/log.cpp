@@ -1,10 +1,10 @@
-#include "dsv/log.h"
+#include "virgil/log.h"
 
 #include <cstdarg>
 #include <ctime>
 #include <mutex>
 
-namespace dsv {
+namespace virgil {
 
 int g_log_level = kLogInfo;
 
@@ -48,4 +48,4 @@ void log_message(int level, const char* fmt, ...) {
   std::fprintf(stderr, "%s [%s] %s\n", ts, tags[level < 0 ? 0 : level > 3 ? 3 : level], msg);
 }
 
-}  // namespace dsv
+}  // namespace virgil

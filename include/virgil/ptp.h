@@ -15,10 +15,10 @@
 #include <string>
 #include <thread>
 
-#include "dsv/media_clock.h"
-#include "dsv/net.h"
+#include "virgil/media_clock.h"
+#include "virgil/net.h"
 
-namespace dsv {
+namespace virgil {
 
 namespace ptp1 {
 
@@ -104,10 +104,16 @@ class PiServo {
   enum Result { kInit, kStep, kTracking, kOutlier };
   Result sample(int64_t local_ns, int64_t master_ns);
   ClockModel model() const { return m_; }
+  // Continue from model m (keeps phase); the first sample after this starts
+  // a fresh frequency measurement.
   void reset_to(const ClockModel& m) {
     m_ = m;
     init_ = true;
     count_ = 0;
+    good_ = 0;
+    locked_ = false;
+    rms_ = 0;
+    first_local_ = last_local_ = 0;
   }
   bool locked() const { return locked_; }
   int64_t last_error_ns() const { return last_err_; }
@@ -207,4 +213,4 @@ class PtpClock : public ClockSource {
   int64_t next_sync_ns_ = 0;
 };
 
-}  // namespace dsv
+}  // namespace virgil

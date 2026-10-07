@@ -15,12 +15,12 @@
 #include <thread>
 #include <vector>
 
-#include "dsv/config.h"
-#include "dsv/media_clock.h"
-#include "dsv/shm.h"
-#include "dsv/shm_layout.h"
+#include "virgil/config.h"
+#include "virgil/media_clock.h"
+#include "virgil/shm.h"
+#include "virgil/shm_layout.h"
 
-namespace dsv {
+namespace virgil {
 
 class Engine {
  public:
@@ -80,4 +80,4 @@ class Engine {
   std::array<std::atomic<uint32_t>, kMaxChannels> rx_peak_{};
 };
 
-}  // namespace dsv
+}  // namespace virgil

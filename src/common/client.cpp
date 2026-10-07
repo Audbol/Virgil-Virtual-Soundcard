@@ -1,15 +1,15 @@
-#include "dsv/client.h"
+#include "virgil/client.h"
 
 #include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
-#include "dsv/platform.h"
+#include "virgil/platform.h"
 
-namespace dsv {
+namespace virgil {
 
 std::string default_shm_name() {
-  if (const char* e = std::getenv("DSV_SHM_NAME"); e && *e) return e;
+  if (const char* e = std::getenv("VIRGIL_SHM_NAME"); e && *e) return e;
   return kDefaultShmName;
 }
 
@@ -125,4 +125,4 @@ void Client::read_rx(uint64_t frame, float* dst, uint32_t frames, uint32_t dst_c
   }
 }
 
-}  // namespace dsv
+}  // namespace virgil

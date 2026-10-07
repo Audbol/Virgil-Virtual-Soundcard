@@ -1,5 +1,5 @@
 # cmake -DIN=<file> -DOUT=<header> -DNAME=<symbol> -P embed.cmake
-# Turns a file into a C array so the control panel ships inside dsvd.
+# Turns a file into a C array so the control panel ships inside virgild.
 file(READ "${IN}" hex HEX)
 string(LENGTH "${hex}" len)
 math(EXPR bytes "${len} / 2")

@@ -3,7 +3,7 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>DSV Control</title>
+<title>Virgil Control</title>
 <style>
 :root {
   --bg: #f4f5f7; --panel: #ffffff; --panel-2: #f8f9fb; --line: #e2e5ea;
@@ -97,17 +97,17 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
 </head>
 <body>
 <header>
-  <div class="logo" aria-hidden="true">DSV</div>
+  <div class="logo" aria-hidden="true">VG</div>
   <div>
-    <h1 id="devname">DSV Virtual Soundcard</h1>
-    <div class="sub">AES67 network soundcard · Dante AES67 mode compatible</div>
+    <h1 id="devname">Virgil</h1>
+    <div class="sub">Dante-compatible virtual soundcard</div>
   </div>
   <div class="spacer"></div>
   <span class="pill" id="statepill" role="status" aria-live="polite"><span class="dot"></span><span id="statetext">Connecting…</span></span>
 </header>
 
 <main>
-  <div class="banner" id="offline">The DSV service is not reachable. Start it (Windows: Start menu › DSV › Restart DSV service; macOS/Linux: see README), this page reconnects automatically.</div>
+  <div class="banner" id="offline">The Virgil service is not reachable. Start it (Windows: Start menu › Virgil › Restart Virgil service; macOS/Linux: see README); this page reconnects automatically.</div>
   <div class="banner" id="errbanner"></div>
 
   <div class="cards">
@@ -130,20 +130,11 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
     </section>
   </div>
 
-  <div class="two">
-    <section aria-labelledby="h-tx">
-      <div class="head"><h2 id="h-tx">Transmit flows</h2><span class="hint">announced to Dante Controller via SAP</span></div>
-      <div class="tw"><table><thead><tr><th>Name</th><th>Channels</th><th>Destination</th></tr></thead><tbody id="t-tx"></tbody></table></div>
-    </section>
-    <section aria-labelledby="h-rx">
-      <div class="head"><h2 id="h-rx">Receive flows</h2></div>
-      <div class="tw"><table><thead><tr><th>Source</th><th>Channels</th><th>Status</th><th></th></tr></thead><tbody id="t-rx"></tbody></table></div>
-    </section>
-  </div>
-
-  <section aria-labelledby="h-disc">
-    <div class="head"><h2 id="h-disc">Streams on the network</h2><span class="hint">AES67 flows announced via SAP — Dante devices show up here once their AES67 mode and a multicast AES67 flow are enabled</span></div>
-    <div class="tw"><table><thead><tr><th>Name</th><th>Format</th><th>Address</th><th>From</th><th></th></tr></thead><tbody id="t-disc"></tbody></table></div>
+  <section aria-labelledby="h-route">
+    <div class="head"><h2 id="h-route">Routing</h2></div>
+    <p id="routing" style="margin:0">Open <b>Dante Controller</b>: this computer appears as <b id="r-name">Virgil</b> with
+      <span id="r-tx">8</span> transmit and <span id="r-rx">8</span> receive channels. Subscribe its receive channels to any
+      Dante transmitter (and other devices to its transmit channels) there. Subscriptions are kept by this computer across restarts.</p>
   </section>
 
   <section aria-labelledby="h-set" id="settings">
@@ -152,19 +143,16 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
       <label>Device name<input id="f-name" data-key="name"></label>
       <label>Network interface<select id="f-interface" data-key="interface"></select></label>
       <label>Sample rate<select id="f-rate" data-key="sample_rate">
-        <option>44100</option><option>48000</option><option>88200</option><option>96000</option><option>176400</option><option>192000</option></select></label>
-      <label>Playback channels (to network)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="64"></label>
-      <label>Capture channels (from network)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="64"></label>
-      <label>Packet time<select id="f-ptime" data-key="packet_time_us">
-        <option value="125">125 µs (lowest latency)</option><option value="250">250 µs</option><option value="333">333 µs</option>
-        <option value="1000">1 ms (AES67 default, Dante AES67)</option><option value="4000">4 ms</option></select></label>
-      <label>Receive latency (µs)<input id="f-lat" data-key="latency_us" type="number" min="250" max="40000" step="250"></label>
+        <option>44100</option><option>48000</option><option>88200</option><option>96000</option></select></label>
+      <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="64"></label>
+      <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="64"></label>
+      <label>Receive latency (µs)<input id="f-lat" data-key="latency_us" type="number" min="500" max="40000" step="500"></label>
+      <label>Transmit latency (µs)<input id="f-txlat" data-key="tx_latency_us" type="number" min="500" max="40000" step="500"></label>
       <label>Clock<select id="f-clock" data-key="clock">
-        <option value="ptp">PTP (follow the network grandmaster)</option><option value="free">Local clock only (testing)</option></select></label>
-      <label>Announce flows (SAP)<select id="f-sap" data-key="sap"><option value="true">On</option><option value="false">Off</option></select></label>
+        <option value="ptp">PTP (follow the Dante clock master)</option><option value="free">Local clock only (testing)</option></select></label>
     </div>
     <details id="adv"><summary>Advanced: edit configuration file</summary>
-      <p class="sub" style="color:var(--muted);font-size:12.5px">The form above edits this text. Transmit and receive flows are <code>[tx]</code> / <code>[rx]</code> sections — see <code>dsv.conf.example</code> for every option.</p>
+      <p class="sub" style="color:var(--muted);font-size:12.5px">The form above edits this text. See <code>virgil.conf.example</code> for every option. Latency must match on both ends: Dante Controller shows the device latency it expects.</p>
       <textarea id="cfgtext" spellcheck="false" aria-label="Configuration file"></textarea>
     </details>
     <div class="actions">
@@ -175,13 +163,13 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
     </div>
   </section>
 
-  <footer id="footer">DSV</footer>
+  <footer id="footer">Virgil</footer>
 </main>
 
 <script>
 "use strict";
 const $ = id => document.getElementById(id);
-const S = { status: null, cfg: "", savedCfg: "", ifaces: [], sessions: [], prev: null, holds: { tx: [], rx: [] } };
+const S = { status: null, cfg: "", savedCfg: "", ifaces: [], holds: { tx: [], rx: [] } };
 
 // ---------- helpers ----------
 function esc(s) { return String(s ?? "").replace(/[&<>"']/g, c => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c])); }
@@ -190,7 +178,7 @@ function fmtUs(us) { return us >= 1000 ? (us / 1000).toLocaleString(undefined, {
 function fmtCount(n) { return n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : n >= 1e4 ? (n / 1e3).toFixed(0) + "k" : String(n); }
 async function api(path, opts = {}) {
   const r = await fetch(path, { cache: "no-store", ...opts,
-    headers: { ...(opts.headers || {}), ...(opts.method === "POST" ? { "X-DSV-Request": "1" } : {}) } });
+    headers: { ...(opts.headers || {}), ...(opts.method === "POST" ? { "X-Virgil-Request": "1" } : {}) } });
   const type = r.headers.get("content-type") || "";
   const body = type.includes("json") ? await r.json() : await r.text();
   if (!r.ok) throw new Error((body && body.error) || ("HTTP " + r.status));
@@ -233,11 +221,6 @@ function setKey(text, section, key, value) {
   let at = s.end; while (at > s.start + 1 && lines[at - 1].trim() === "") at--;
   lines.splice(at, 0, line); return lines.join("\n");
 }
-function removeSection(text, section, index) {
-  const { lines, list } = sections(text);
-  const matches = list.filter(x => x.name === section); const s = matches[index]; if (!s) return text;
-  lines.splice(s.start, s.end - s.start); return lines.join("\n").replace(/\n{3,}/g, "\n\n");
-}
 
 // ---------- rendering ----------
 function setPill(cls, text) {
@@ -265,35 +248,27 @@ function renderMeters(el, vals, holds, n, prefix) {
 
 function render(st) {
   const d = st.device, c = st.clock, k = st.counters || {};
-  $("devname").textContent = d.name || "DSV Virtual Soundcard";
-  document.title = (d.name || "DSV") + " · DSV Control";
-  // status pill
+  $("devname").textContent = d.name || "Virgil";
+  document.title = (d.name || "Virgil") + " · Virgil Control";
   if (st.status === "error") setPill("bad", "Error");
   else if (st.status === "waiting-for-network") setPill("warn", "Waiting for network");
   else if (st.status !== "running") setPill("warn", "Starting…");
-  else if (c.state === "ptp-locked") setPill("ok", "PTP locked");
+  else if (!d.dante) setPill("bad", "Dante stack not running");
+  else if (c.state === "ptp-locked") setPill("ok", "Clock locked");
   else if (c.state === "ptp-master") setPill("info", "Clock master");
   else setPill("warn", "Free-running clock");
   const eb = $("errbanner"); eb.textContent = st.error ? "Audio engine error: " + st.error : ""; eb.classList.toggle("show", !!st.error);
 
-  const clockNames = { "ptp-locked": "Locked to PTP", "ptp-master": "Grandmaster", "free-run": "Free-running", "stopped": "Stopped" };
+  const clockNames = { "ptp-locked": "Locked", "ptp-master": "Clock master", "free-run": "Free-running", "stopped": "Stopped" };
   $("c-clock").textContent = clockNames[c.state] || c.state;
-  $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · GM ${c.grandmaster}`
-    : c.state === "ptp-master" ? "no other PTP master on the network"
-    : c.state === "free-run" ? (c.grandmaster ? "acquiring " + c.grandmaster : "no PTP grandmaster found yet") : "";
+  $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · master ${c.grandmaster}`
+    : c.state === "ptp-master" ? "no other Dante clock master on the network"
+    : c.state === "free-run" ? (c.grandmaster ? "acquiring " + c.grandmaster : "no Dante clock master found yet") : "";
   $("c-format").textContent = `${fmtRate(d.sample_rate)} · ${d.tx_channels}×${d.rx_channels} ch`;
-  $("c-format2").textContent = `packet ${fmtUs(d.packet_time_us)} · rx latency ${fmtUs(d.latency_us)} · tx lead ${fmtUs(d.tx_lead_us)}`;
-
-  // packet rates from successive polls
-  const now = performance.now(); let txps = 0, rxps = 0;
-  if (S.prev && k.tx_packets !== undefined) {
-    const dt = (now - S.prev.t) / 1000;
-    if (dt > 0) { txps = Math.max(0, (k.tx_packets - S.prev.tx) / dt); rxps = Math.max(0, (k.rx_packets - S.prev.rx) / dt); }
-  }
-  if (k.tx_packets !== undefined) S.prev = { t: now, tx: k.tx_packets, rx: k.rx_packets };
+  $("c-format2").textContent = `rx latency ${fmtUs(d.latency_us)} · tx latency ${fmtUs(d.tx_latency_us)}`;
   $("c-net").textContent = d.address || (d.interface || "—");
-  $("c-net2").textContent = k.tx_packets === undefined ? "engine not running"
-    : `out ${Math.round(txps)}/s · in ${Math.round(rxps)}/s · lost ${fmtCount(k.rx_lost)} · late ${fmtCount(k.rx_late)}`;
+  $("c-net2").textContent = d.dante ? `Dante device online · late ticks ${fmtCount(k.late_ticks || 0)}` : "Dante stack not running";
+  $("r-name").textContent = d.name; $("r-tx").textContent = d.tx_channels; $("r-rx").textContent = d.rx_channels;
 
   const playing = st.clients.filter(x => x.active);
   $("c-apps").textContent = st.clients.length ? `${st.clients.length} connected` : "None";
@@ -304,42 +279,12 @@ function render(st) {
   renderMeters($("m-tx"), st.meters.tx, S.holds.tx, d.tx_channels, "Playback channel");
   renderMeters($("m-rx"), st.meters.rx, S.holds.rx, d.rx_channels, "Capture channel");
 
-  $("t-tx").innerHTML = st.tx_flows.length ? st.tx_flows.map(f =>
-    `<tr><td>${esc(f.name)}</td><td class="num">${f.first_channel}–${f.first_channel + f.channels - 1}</td>
-     <td class="num">${esc(f.address)}:${f.port}<div class="sub">${esc(f.encoding)}</div></td></tr>`).join("")
-    : `<tr><td colspan="3" class="empty">No transmit flows. Add a [tx] section in Settings › Advanced.</td></tr>`;
-
-  $("t-rx").innerHTML = st.rx_flows.length ? st.rx_flows.map((f, i) => {
-    const stCls = f.receiving ? "ok" : f.resolved ? "warn" : "";
-    const stTxt = f.receiving ? "Receiving" : f.resolved ? "No packets" : (f.sap_name ? "Not found on network" : "Waiting");
-    const src = f.sap_name ? esc(f.sap_name) : esc(f.address) + ":" + f.port;
-    const sub = f.sap_name && f.address ? `<div class="sub num">${esc(f.address)}:${f.port}</div>` : "";
-    return `<tr><td>${src}${sub}</td><td class="num">${f.first_channel}–${f.first_channel + f.channels - 1}</td>
-      <td><span class="pill ${stCls}"><span class="dot"></span>${stTxt}</span></td>
-      <td><button class="danger" data-rm="${i}" title="Remove this flow">Remove</button></td></tr>`;
-  }).join("") : `<tr><td colspan="4" class="empty">Nothing subscribed. Pick a stream under “Streams on the network”.</td></tr>`;
-
   $("cfgpath").textContent = st.config_path ? "Saved to " + st.config_path : "";
-  $("footer").textContent = `DSV ${st.version} · control panel on this computer only (127.0.0.1)`;
-}
-
-function renderSessions() {
-  const st = S.status; const subscribed = new Set((st?.rx_flows || []).map(f => f.sap_name));
-  const rxch = st?.device?.rx_channels || 0;
-  $("t-disc").innerHTML = S.sessions.length ? S.sessions.map((s, i) => {
-    const own = st && st.tx_flows.some(f => f.name === s.name);
-    const action = own ? `<span class="sub">this computer</span>`
-      : subscribed.has(s.name) ? `<span class="pill ok"><span class="dot"></span>Subscribed</span>`
-      : `<span style="white-space:nowrap">to ch <input class="inline-num" type="number" min="1" max="${rxch}" value="1" id="fc${i}" aria-label="First capture channel">
-         <button data-sub="${i}" ${rxch ? "" : "disabled"}>Receive</button></span>`;
-    return `<tr><td>${esc(s.name)}${s.info ? `<div class="sub">${esc(s.info)}</div>` : ""}</td>
-      <td class="num">${esc(s.encoding)} · ${fmtRate(s.sample_rate)} · ${s.channels} ch<div class="sub">${fmtUs(s.ptime_us)} packets</div></td>
-      <td class="num">${esc(s.address)}:${s.port}</td><td class="num">${esc(s.origin)}</td><td>${action}</td></tr>`;
-  }).join("") : `<tr><td colspan="5" class="empty">No AES67 streams announced yet. Announcements repeat about every 30 s.</td></tr>`;
+  $("footer").textContent = `Virgil ${st.version} · unofficial, not affiliated with Audinate · control panel on this computer only (127.0.0.1)`;
 }
 
 // ---------- settings form <-> config text ----------
-const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-ptime", "f-lat", "f-clock", "f-sap"];
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock"];
 function fillForm() {
   const t = S.cfg;
   const ifSel = $("f-interface"); const cur = getKey(t, "device", "interface") || "";
@@ -352,7 +297,7 @@ function fillForm() {
     if (id === "f-interface") { el.value = S.ifaces.find(i => i.address === cur)?.name ?? cur; continue; }
     if (v !== null) el.value = v;
     else if (id === "f-rate") el.value = "48000"; else if (id === "f-clock") el.value = "ptp";
-    else if (id === "f-sap") el.value = "true"; else if (id === "f-ptime") el.value = "1000";
+    else if (id === "f-lat" || id === "f-txlat") el.value = "4000";
   }
   $("cfgtext").value = t;
 }
@@ -381,23 +326,6 @@ $("restart").addEventListener("click", async () => {
   try { await api("/api/restart", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Audio engine restarting…"; }
   catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
 });
-document.addEventListener("click", e => {
-  const sub = e.target.closest("[data-sub]"); const rm = e.target.closest("[data-rm]");
-  if (sub) {
-    const s = S.sessions[+sub.dataset.sub]; const rxch = S.status.device.rx_channels;
-    const first = Math.max(1, Math.min(rxch, parseInt($("fc" + sub.dataset.sub).value, 10) || 1));
-    const n = Math.min(s.channels, rxch - first + 1);
-    S.cfg = S.cfg.replace(/\s*$/, "") + `\n\n[rx]\nsap_name = ${quoteVal(s.name)}\nfirst_channel = ${first}\nchannels = ${n}\n`;
-    fillForm(); markDirty(); $("adv").open = true;
-    $("msg").textContent = `Added “${s.name}” → capture ${first}–${first + n - 1}. Apply to start receiving.`;
-    $("settings").scrollIntoView({ behavior: "smooth" });
-  } else if (rm) {
-    S.cfg = removeSection(S.cfg, "rx", +rm.dataset.rm); fillForm(); markDirty();
-    $("msg").textContent = "Flow removed from the configuration. Apply to stop receiving it.";
-    $("settings").scrollIntoView({ behavior: "smooth" });
-  }
-});
-
 // ---------- polling ----------
 let failures = 0;
 async function pollStatus() {
@@ -409,10 +337,6 @@ async function pollStatus() {
   }
   setTimeout(pollStatus, document.hidden ? 1000 : 200);
 }
-async function pollSessions() {
-  try { S.sessions = await api("/api/sessions"); renderSessions(); } catch (e) {}
-  setTimeout(pollSessions, 3000);
-}
 async function loadConfig() {
   try {
     const [cfg, ifs] = await Promise.all([api("/api/config"), api("/api/interfaces")]);
@@ -420,7 +344,7 @@ async function loadConfig() {
     if (S.cfg === S.savedCfg) { S.cfg = S.savedCfg = cfg; fillForm(); markDirty(); }
   } catch (e) { setTimeout(loadConfig, 2000); }
 }
-pollStatus(); pollSessions(); loadConfig();
+pollStatus(); loadConfig();
 </script>
 </body>
 </html>

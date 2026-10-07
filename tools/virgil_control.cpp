@@ -1,8 +1,8 @@
-// DSV Control: opens the dsvd control panel in the default browser.
+// Virgil Control: opens the virgild control panel in the default browser.
 //
-// If no dsvd is answering and a dsvd binary sits next to this program (the
-// portable downloads), it is started first, using dsv.conf from the same
-// folder when present. Installed setups run dsvd as a service, so the panel
+// If no virgild is answering and a virgild binary sits next to this program (the
+// portable downloads), it is started first, using virgil.conf from the same
+// folder when present. Installed setups run virgild as a service, so the panel
 // is normally already up.
 #include <cstdio>
 #include <cstdlib>
@@ -10,7 +10,7 @@
 #include <string>
 #include <vector>
 
-#include "dsv/platform.h"
+#include "virgil/platform.h"
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -44,7 +44,7 @@ const Sock kBad = -1;
 void close_sock(Sock s) { ::close(s); }
 #endif
 
-// True if a dsvd control panel answers on 127.0.0.1:port.
+// True if a virgild control panel answers on 127.0.0.1:port.
 bool panel_up(unsigned port) {
   Sock s = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
   if (s == kBad) return false;
@@ -104,18 +104,18 @@ bool exists(const std::string& path) {
 
 #if defined(_WIN32)
 const char kSep = '\\';
-const char* kDaemon = "dsvd.exe";
+const char* kDaemon = "virgild.exe";
 #else
 const char kSep = '/';
-const char* kDaemon = "dsvd";
+const char* kDaemon = "virgild";
 #endif
 
-// Locate a portable dsvd: next to us, or next to the .app bundle on macOS.
+// Locate a portable virgild: next to us, or next to the .app bundle on macOS.
 std::string find_daemon_dir() {
   const std::string here = exe_dir();
   std::vector<std::string> dirs = {here};
 #if defined(__APPLE__)
-  dirs.push_back(here + "/../../..");  // DSV Control.app/Contents/MacOS -> folder
+  dirs.push_back(here + "/../../..");  // Virgil Control.app/Contents/MacOS -> folder
 #endif
   for (const auto& d : dirs)
     if (exists(d + kSep + kDaemon)) return d;
@@ -124,8 +124,8 @@ std::string find_daemon_dir() {
 
 bool start_daemon(const std::string& dir, unsigned port) {
   const std::string daemon = dir + kSep + kDaemon;
-  const std::string conf = dir + kSep + "dsv.conf";
-  const std::string log = dir + kSep + "dsvd.log";
+  const std::string conf = dir + kSep + "virgil.conf";
+  const std::string log = dir + kSep + "virgild.log";
   std::vector<std::string> args = {daemon, "--log", log, "--control-port", std::to_string(port)};
   if (exists(conf)) {
     args.push_back("-c");
@@ -185,7 +185,7 @@ void open_url(const std::string& url) {
 
 void message(const std::string& text) {
 #if defined(_WIN32)
-  MessageBoxA(nullptr, text.c_str(), "DSV Control", MB_OK | MB_ICONINFORMATION);
+  MessageBoxA(nullptr, text.c_str(), "Virgil Control", MB_OK | MB_ICONINFORMATION);
 #else
   std::fprintf(stderr, "%s\n", text.c_str());
 #if defined(__APPLE__)
@@ -193,7 +193,7 @@ void message(const std::string& text) {
   std::string esc;
   for (char c : text) esc += (c == '"' || c == '\\') ? std::string("\\") + c : std::string(1, c);
   const std::string cmd = "/usr/bin/osascript -e 'display dialog \"" + esc +
-                          "\" with title \"DSV Control\" buttons {\"OK\"}' >/dev/null 2>&1";
+                          "\" with title \"Virgil Control\" buttons {\"OK\"}' >/dev/null 2>&1";
   if (std::system(cmd.c_str()) != 0) { /* dialog unavailable: stderr already has it */ }
 #endif
 #endif
@@ -204,7 +204,7 @@ int run(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--port") && i + 1 < argc) port = unsigned(std::atoi(argv[++i]));
     else if (!std::strcmp(argv[i], "-h") || !std::strcmp(argv[i], "--help")) {
-      std::printf("usage: dsv-control [--port N]\nOpens the DSV control panel in your browser.\n");
+      std::printf("usage: virgil-control [--port N]\nOpens the Virgil control panel in your browser.\n");
       return 0;
     }
   }
@@ -217,9 +217,9 @@ int run(int argc, char** argv) {
   if (!panel_up(port)) {
     const std::string dir = find_daemon_dir();
     if (dir.empty()) {
-      message("The DSV service is not running.\n\nStart it (Windows: Start menu > DSV > Restart "
-              "DSV service; macOS: sudo launchctl kickstart -k system/org.dsv.dsvd; Linux: sudo "
-              "systemctl start dsvd) and open DSV Control again.");
+      message("The Virgil service is not running.\n\nStart it (Windows: Start menu > Virgil > Restart "
+              "Virgil service; macOS: sudo launchctl kickstart -k system/org.virgil.virgild; Linux: sudo "
+              "systemctl start virgild) and open Virgil Control again.");
       return 1;
     }
     if (!start_daemon(dir, port)) {
@@ -227,10 +227,10 @@ int run(int argc, char** argv) {
       return 1;
     }
     bool up = false;
-    for (int i = 0; i < 80 && !(up = panel_up(port)); ++i) dsv::sleep_until_ns(dsv::mono_ns() + 100000000LL);
+    for (int i = 0; i < 80 && !(up = panel_up(port)); ++i) virgil::sleep_until_ns(virgil::mono_ns() + 100000000LL);
     if (!up) {
-      message("dsvd was started but its control panel did not come up.\nSee " + dir + kSep +
-              "dsvd.log for details.");
+      message("virgild was started but its control panel did not come up.\nSee " + dir + kSep +
+              "virgild.log for details.");
       return 1;
     }
   }

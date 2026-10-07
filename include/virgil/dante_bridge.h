@@ -13,15 +13,16 @@ typedef struct VgDanteConfig {
   uint32_t sample_rate;  // 44100 / 48000 / 88200 / 96000
   uint32_t tx_channels;  // channels this computer sends to the network
   uint32_t rx_channels;  // channels this computer receives
-  uint32_t tx_latency_ns;
-  uint32_t rx_latency_ns;
+  uint32_t tx_latency_ns;     // latency demanded from receivers of our channels
+  uint32_t rx_latency_ns;     // our receive latency
+  uint32_t tx_send_delay_ns;  // frame f is read from tx_ring and sent at media time f + this
   // Interleaved 32-bit sample rings indexed by media frame (frame & (frames-1)),
   // owned by the caller and valid until vg_dante_stop() returns.
   int32_t* tx_ring;
   uint32_t tx_ring_frames;
   int32_t* rx_ring;
   uint32_t rx_ring_frames;
-  // Monotonic clock the PTP overlay refers to (dsv::mono_ns).
+  // Monotonic clock the PTP overlay refers to (virgil::mono_ns).
   int64_t (*mono_ns)(void);
   // Log sink (level 0 error .. 3 debug); may be NULL.
   void (*log)(int level, const char* message);

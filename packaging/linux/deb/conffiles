@@ -1,2 +1,2 @@
-/etc/dsv/dsv.conf
-/etc/alsa/conf.d/50-dsv.conf
+/etc/virgil/virgil.conf
+/etc/alsa/conf.d/50-virgil.conf

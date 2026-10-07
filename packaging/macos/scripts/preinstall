@@ -1,5 +1,5 @@
 #!/bin/sh
-# Stop a running dsvd before its files are replaced.
-launchctl bootout system/org.dsv.dsvd 2>/dev/null || \
-	launchctl unload /Library/LaunchDaemons/org.dsv.dsvd.plist 2>/dev/null || true
+# Stop a running virgild before its files are replaced.
+launchctl bootout system/org.virgil.virgild 2>/dev/null || \
+	launchctl unload /Library/LaunchDaemons/org.virgil.virgild.plist 2>/dev/null || true
 exit 0

@@ -2,16 +2,16 @@
 #include <cstring>
 #include <random>
 
-#include "dsv/client.h"
-#include "dsv/config.h"
-#include "dsv/media_clock.h"
-#include "dsv/platform.h"
-#include "dsv/ptp.h"
-#include "dsv/sample_convert.h"
-#include "dsv/shm_layout.h"
+#include "virgil/client.h"
+#include "virgil/config.h"
+#include "virgil/media_clock.h"
+#include "virgil/platform.h"
+#include "virgil/ptp.h"
+#include "virgil/sample_convert.h"
+#include "virgil/shm_layout.h"
 #include "test_main.h"
 
-using namespace dsv;
+using namespace virgil;
 
 TEST(l24_roundtrip) {
   const float values[] = {0.f, 0.5f, -0.5f, 0.999f, -1.f, 1.0f, 2.0f, -3.0f, 1e-6f};
@@ -174,6 +174,24 @@ TEST(servo_converges) {
   CHECK_NEAR(servo.model().ratio, 1.0 / (1.0 + drift), 5e-6);
 }
 
+TEST(servo_after_reset_to) {
+  // As PtpClock does: start from a realtime-based model, then follow a master
+  // whose time is close to it. The frequency estimate must be measured from
+  // the first real sample, not from the reset model.
+  PiServo servo;
+  ClockModel start;
+  start.base_local = 5000000000LL;
+  start.base_ptp = 1700000000000000000LL;
+  servo.reset_to(start);
+  const int64_t offset = 30000;  // master 30 us ahead of our start model
+  for (int i = 0; i < 4 * 60; ++i) {
+    const int64_t local = 6000000000LL + int64_t(i) * 250000000LL;
+    servo.sample(local, start.ptp_at(local) + offset);
+  }
+  CHECK(servo.locked());
+  CHECK_NEAR(servo.model().ratio, 1.0, 2e-6);
+}
+
 TEST(config_parse) {
   const char* text =
       "[device]\n"
@@ -182,7 +200,7 @@ TEST(config_parse) {
       "tx_channels = 16 ; comment\n"
       "rx_channels = 4\n"
       "latency_us = 2000\n"
-      "tx_latency_us = 3000\n"
+      "tx_latency_us = 4000\n"
       "clock = free\n"
       "[ptp]\n"
       "subdomain = _DFLT\n"
@@ -192,7 +210,7 @@ TEST(config_parse) {
   CHECK(parse_config(text, &c, &err));
   CHECK(validate_config(&c, &err));
   CHECK(c.device_name == "Studio Rack" && c.tx_channels == 16 && c.rx_channels == 4);
-  CHECK(c.latency_us == 2000 && c.tx_latency_us == 3000 && c.ptp_master_capable);
+  CHECK(c.latency_us == 2000 && c.tx_latency_us == 4000 && c.ptp_master_capable);
   CHECK(c.period_frames() == 48 && c.rx_latency_frames() == 144 && c.tx_lead_frames() == 96);
   CHECK((c.ring_frames & (c.ring_frames - 1)) == 0 && c.ring_frames >= 8192);
 
@@ -210,7 +228,7 @@ TEST(config_parse) {
 TEST(config_legacy_aes67_is_ignored) {
   // A config from the AES67 version still loads; flows are reported, not fatal.
   const char* old =
-      "[device]\nname = DSV\npacket_time_us = 1000\nsap = true\n"
+      "[device]\nname = Virgil\npacket_time_us = 1000\nsap = true\n"
       "[ptp]\ndomain = 0\n"
       "[tx]\naddress = 239.69.1.1\nchannels = 8\n"
       "[rx]\nsap_name = \"Ri8 : 32\"\n";
@@ -218,7 +236,7 @@ TEST(config_legacy_aes67_is_ignored) {
   std::string err;
   CHECK(parse_config(old, &c, &err));
   CHECK(validate_config(&c, &err));
-  CHECK(c.device_name == "DSV" && c.notes.size() >= 3);
+  CHECK(c.device_name == "Virgil" && c.notes.size() >= 3);
 }
 
 TEST(config_format_roundtrip) {

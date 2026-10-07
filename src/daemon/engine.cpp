@@ -1,4 +1,4 @@
-#include "dsv/engine.h"
+#include "virgil/engine.h"
 
 #include <algorithm>
 #include <cinttypes>
@@ -7,15 +7,15 @@
 #include <cstdlib>
 #include <cstring>
 
-#include "dsv/client.h"
-#include "dsv/dante_bridge.h"
-#include "dsv/log.h"
-#include "dsv/net.h"
-#include "dsv/platform.h"
-#include "dsv/ptp.h"
-#include "dsv/sample_convert.h"
+#include "virgil/client.h"
+#include "virgil/dante_bridge.h"
+#include "virgil/log.h"
+#include "virgil/net.h"
+#include "virgil/platform.h"
+#include "virgil/ptp.h"
+#include "virgil/sample_convert.h"
 
-namespace dsv {
+namespace virgil {
 
 namespace {
 // Lock-free running maximum of a non-negative float stored as its bits
@@ -46,15 +46,15 @@ void Engine::on_clock(const ClockModel& m, void*) {
 bool Engine::start(std::unique_ptr<ClockSource> clock) {
   std::string err;
   if (!validate_config(&cfg_, &err)) {
-    DSV_LOG_ERROR("config: %s", err.c_str());
+    VIRGIL_LOG_ERROR("config: %s", err.c_str());
     return false;
   }
   if (!resolve_interface(cfg_.interface, &iface_)) {
-    DSV_LOG_ERROR("cannot find network interface '%s'", cfg_.interface.c_str());
+    VIRGIL_LOG_ERROR("cannot find network interface '%s'", cfg_.interface.c_str());
     return false;
   }
   if (cfg_.lock_memory && !lock_memory())
-    DSV_LOG_WARN("mlockall failed; page faults may cause dropouts (raise RLIMIT_MEMLOCK)");
+    VIRGIL_LOG_WARN("mlockall failed; page faults may cause dropouts (raise RLIMIT_MEMLOCK)");
 
   // --- shared memory soundcard ---
   std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
@@ -75,7 +75,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   }
   bool created = reused;
   if (reused) {
-    DSV_LOG_INFO("reusing soundcard '%s'; connected apps stay attached", shm_.name().c_str());
+    VIRGIL_LOG_INFO("reusing soundcard '%s'; connected apps stay attached", shm_.name().c_str());
   } else {
     if (shm_.is_open()) {
       // Layout changed: drivers holding the old segment see it stopped and
@@ -86,16 +86,16 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     created = shm_.create(shm_name, bytes);
   }
 #if defined(_WIN32)
-  if (!created && cfg_.shm_name.empty() && !std::getenv("DSV_SHM_NAME")) {
+  if (!created && cfg_.shm_name.empty() && !std::getenv("VIRGIL_SHM_NAME")) {
     // Global\ needs SeCreateGlobalPrivilege (services, elevated consoles).
-    DSV_LOG_WARN("cannot create %s (not elevated?); using %s, visible to this session only",
+    VIRGIL_LOG_WARN("cannot create %s (not elevated?); using %s, visible to this session only",
                  shm_name.c_str(), kFallbackShmName);
     shm_name = kFallbackShmName;
     created = shm_.create(shm_name, bytes);
   }
 #endif
   if (!created) {
-    DSV_LOG_ERROR("cannot create shared memory '%s' (%llu bytes); is another dsvd running?",
+    VIRGIL_LOG_ERROR("cannot create shared memory '%s' (%llu bytes); is another virgild running?",
                   shm_name.c_str(), (unsigned long long)bytes);
     return false;
   }
@@ -131,7 +131,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     o.master_capable = cfg_.ptp_master_capable;
     p->set_listener(&Engine::on_clock, this);
     if (!p->start(o)) {
-      DSV_LOG_WARN("falling back to a free-running clock; Dante devices will not lock to it");
+      VIRGIL_LOG_WARN("falling back to a free-running clock; Dante devices will not lock to it");
       clock_ = std::make_unique<FreeRunClock>();
     } else {
       clock_ = std::move(p);
@@ -151,6 +151,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.tx_channels = cfg_.tx_channels;
     dc.rx_channels = cfg_.rx_channels;
     dc.tx_latency_ns = cfg_.tx_latency_us * 1000;
+    dc.tx_send_delay_ns = cfg_.tx_send_delay_us() * 1000;
     dc.rx_latency_ns = cfg_.latency_us * 1000;
     dc.tx_ring = dtx_.data();
     dc.tx_ring_frames = dring_;
@@ -160,7 +161,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.log = &bridge_log;
     dante_ = vg_dante_start(&dc);
     if (!dante_) {
-      DSV_LOG_ERROR("Dante device failed to start (is another Virgil or Inferno instance "
+      VIRGIL_LOG_ERROR("Dante device failed to start (is another Virgil or Inferno instance "
                     "running? Dante ports 4400/4455/8700/8800 must be free)");
       clock_.reset();
       return false;
@@ -171,7 +172,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   hdr_->state.store(clock_->state(), std::memory_order_release);
   tick_thread_ = std::thread([this] { tick_loop(); });
 
-  DSV_LOG_INFO("\"%s\" up on %s: %u Hz, %u transmit / %u receive channels, latency rx %.1f ms "
+  VIRGIL_LOG_INFO("\"%s\" up on %s: %u Hz, %u transmit / %u receive channels, latency rx %.1f ms "
                "tx %.1f ms",
                cfg_.device_name.c_str(), ipv4_to_string(iface_).c_str(), cfg_.sample_rate,
                cfg_.tx_channels, cfg_.rx_channels, cfg_.latency_us / 1000.0,
@@ -212,7 +213,7 @@ void Engine::tick_loop() {
   const uint32_t rate = cfg_.sample_rate;
   const int64_t period_ns = int64_t(P) * 1000000000LL / rate;
   if (!set_realtime_priority(cfg_.rt_priority, period_ns))
-    DSV_LOG_WARN("could not get real-time scheduling; expect higher jitter (see README)");
+    VIRGIL_LOG_WARN("could not get real-time scheduling; expect higher jitter (see README)");
 
   const uint32_t ring = hdr_->ring_frames;
   const uint64_t mask = ring - 1;
@@ -320,7 +321,7 @@ void Engine::reclaim_clients(int64_t now) {
     const uint32_t pid = s.pid.load(std::memory_order_acquire);
     if (pid == 0) continue;
     if (!process_alive(pid)) {
-      DSV_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, s.name, pid);
+      VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, s.name, pid);
       s.active.store(0, std::memory_order_release);
       s.pid.store(0, std::memory_order_release);
     } else if (now - s.heartbeat_ns.load(std::memory_order_relaxed) > 5000000000LL) {
@@ -357,4 +358,4 @@ std::string Engine::status_line() const {
   return buf;
 }
 
-}  // namespace dsv
+}  // namespace virgil

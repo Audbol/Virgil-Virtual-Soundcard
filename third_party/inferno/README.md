@@ -21,3 +21,12 @@ Changes for Virgil:
 2. `inferno_aoip/src/util/os.rs`: the non-Unix branch of
    `set_current_thread_realtime` had a type mismatch and a missing import,
    so it did not compile for Windows.
+3. `TX_SEND_DELAY_NS` setting (`settings.rs`, `mod.rs`, `flows_tx.rs`).
+   Upstream hardcodes the transmit send latency to 0, so frame T is read
+   from the external ring at media time T, before Virgil's mixer has
+   written it. With the patch, frame T is read and sent at T + delay and
+   its packet carries timestamp T, which is how Dante Virtual Soundcard
+   behaves (receivers must use a latency >= the advertised TX latency).
+   The default of 0 keeps the upstream behaviour.
+4. `flows_tx.rs`: the "clock unavailable" error is not logged for the first
+   clock check at startup, which misses normally.

@@ -1,4 +1,4 @@
-#include "dsv/platform.h"
+#include "virgil/platform.h"
 
 #include <chrono>
 #include <thread>
@@ -28,7 +28,7 @@
 #include <unistd.h>
 #endif
 
-namespace dsv {
+namespace virgil {
 
 #if defined(_WIN32)
 
@@ -192,4 +192,4 @@ bool process_alive(uint32_t pid) { return pid != 0 && (kill(pid_t(pid), 0) == 0 
 
 #endif
 
-}  // namespace dsv
+}  // namespace virgil

@@ -1,11 +1,11 @@
-#include "dsv/config.h"
+#include "virgil/config.h"
 
 #include <algorithm>
 #include <cctype>
 #include <fstream>
 #include <sstream>
 
-namespace dsv {
+namespace virgil {
 
 static std::string trim(const std::string& s) {
   size_t b = 0, e = s.size();
@@ -160,8 +160,9 @@ bool validate_config(Config* c, std::string* error) {
     return fail("latency_us must be between 500 and 40000");
   if (c->tx_latency_us < 500 || c->tx_latency_us > 40000)
     return fail("tx_latency_us must be between 500 and 40000");
-  if (c->tx_latency_us < 2 * c->tick_us)
-    return fail("tx_latency_us must be at least two ticks (" + std::to_string(2 * c->tick_us) + ")");
+  if (c->tx_latency_us < c->tx_send_delay_us() + 1000)
+    return fail("tx_latency_us must be at least two ticks + 1500 (" +
+                std::to_string(c->tx_send_delay_us() + 1000) + ")");
   if (c->clock != "ptp" && c->clock != "free") return fail("clock must be 'ptp' or 'free'");
   if (c->ptp_subdomain.empty() || c->ptp_subdomain.size() > 15)
     return fail("ptp subdomain must be 1 to 15 characters");
@@ -206,4 +207,4 @@ std::string format_config(const Config& c) {
   return o.str();
 }
 
-}  // namespace dsv
+}  // namespace virgil

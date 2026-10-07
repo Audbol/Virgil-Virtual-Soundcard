@@ -1,16 +1,16 @@
-// ASIO driver for the DSV virtual soundcard (Windows, x64).
+// ASIO driver for the Virgil virtual soundcard (Windows, x64).
 //
 // An in-process COM object implementing IASIO. The buffer-switch thread is
-// clocked directly by the dsvd media clock (PTP), so ASIO hosts run in lock
-// step with the AES67/Dante network: no resampling, no drift.
+// clocked directly by the virgild media clock (PTP), so ASIO hosts run in lock
+// step with the Dante network: no resampling, no drift.
 //
-// Latency per direction = ASIO buffer + dsvd receive latency (input) or
-// ASIO buffer + dsvd transmit lead + one packet (output), reported exactly
+// Latency per direction = ASIO buffer + virgild receive latency (input) or
+// ASIO buffer + virgild transmit lead + one packet (output), reported exactly
 // through getLatencies().
 //
 // Build needs the Steinberg ASIO SDK (common/asio.h, common/iasiodrv.h):
 //   cmake -DASIO_SDK_DIR=C:/path/to/asiosdk ...
-// Register:   regsvr32 DSVAsio.dll     (as administrator)
+// Register:   regsvr32 VirgilAsio.dll     (as administrator)
 #include <windows.h>
 #include <objbase.h>
 #include <olectl.h>
@@ -26,15 +26,15 @@
 #include "asio.h"
 #include "iasiodrv.h"
 
-#include "dsv/client.h"
-#include "dsv/platform.h"
-#include "dsv/sample_convert.h"
+#include "virgil/client.h"
+#include "virgil/platform.h"
+#include "virgil/sample_convert.h"
 
-// {6B1E4F2A-9C3D-4E8B-A1F5-2D7C9E0B3A64}
-static const CLSID CLSID_DsvAsio = {
-    0x6b1e4f2a, 0x9c3d, 0x4e8b, {0xa1, 0xf5, 0x2d, 0x7c, 0x9e, 0x0b, 0x3a, 0x64}};
-static const char kClsidString[] = "{6B1E4F2A-9C3D-4E8B-A1F5-2D7C9E0B3A64}";
-static const char kDriverName[] = "DSV Virtual Soundcard";
+// {ACDDF2EF-FA26-401C-9CA6-BA447CEA8D38}
+static const CLSID CLSID_VirgilAsio = {
+    0xacddf2ef, 0xfa26, 0x401c, {0x9c, 0xa6, 0xba, 0x44, 0x7c, 0xea, 0x8d, 0x38}};
+static const char kClsidString[] = "{ACDDF2EF-FA26-401C-9CA6-BA447CEA8D38}";
+static const char kDriverName[] = "Virgil";
 
 static HINSTANCE g_module = nullptr;
 static std::atomic<long> g_objects{0};
@@ -47,10 +47,10 @@ void to_asio64(int64_t v, unsigned long* hi, unsigned long* lo) {
   *lo = static_cast<unsigned long>(uint64_t(v) & 0xffffffffu);
 }
 
-class DsvAsio : public IASIO {
+class VirgilAsio : public IASIO {
  public:
-  DsvAsio() { ++g_objects; }
-  virtual ~DsvAsio() {
+  VirgilAsio() { ++g_objects; }
+  virtual ~VirgilAsio() {
     stop();
     disposeBuffers();
     --g_objects;
@@ -59,7 +59,7 @@ class DsvAsio : public IASIO {
   // IUnknown. ASIO hosts pass the driver CLSID as the IID.
   HRESULT STDMETHODCALLTYPE QueryInterface(REFIID riid, void** ppv) override {
     if (!ppv) return E_POINTER;
-    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, CLSID_DsvAsio)) {
+    if (IsEqualIID(riid, IID_IUnknown) || IsEqualIID(riid, CLSID_VirgilAsio)) {
       *ppv = static_cast<IASIO*>(this);
       AddRef();
       return S_OK;
@@ -77,12 +77,12 @@ class DsvAsio : public IASIO {
   // IASIO
   ASIOBool init(void*) override {
     if (!client_.open() || !client_.daemon_alive()) {
-      set_error("dsvd is not running. Start the DSV service and reopen the driver.");
+      set_error("virgild is not running. Start the Virgil service and reopen the driver.");
       client_.close();
       return ASIOFalse;
     }
     if (!client_.acquire_tx_slot("asio")) {
-      set_error("All DSV playback slots are in use.");
+      set_error("All Virgil playback slots are in use.");
       client_.close();
       return ASIOFalse;
     }
@@ -90,7 +90,7 @@ class DsvAsio : public IASIO {
     out_ch_ = long(client_.tx_channels());
     return ASIOTrue;
   }
-  void getDriverName(char* name) override { std::strcpy(name, "DSV ASIO"); }
+  void getDriverName(char* name) override { std::strcpy(name, "Virgil ASIO"); }
   long getDriverVersion() override { return 1; }
   void getErrorMessage(char* s) override { std::strcpy(s, error_); }
 
@@ -156,7 +156,7 @@ class DsvAsio : public IASIO {
     clocks->associatedChannel = -1;
     clocks->associatedGroup = -1;
     clocks->isCurrentSource = ASIOTrue;
-    std::strcpy(clocks->name, "PTP (AES67/Dante)");
+    std::strcpy(clocks->name, "Dante PTP");
     *num = 1;
     return ASE_OK;
   }
@@ -177,7 +177,7 @@ class DsvAsio : public IASIO {
     info->isActive = ASIOFalse;
     for (const auto& c : (in ? inputs_ : outputs_))
       if (c.channel == info->channel) info->isActive = ASIOTrue;
-    std::snprintf(info->name, sizeof info->name, "DSV %s %ld", in ? "In" : "Out", info->channel + 1);
+    std::snprintf(info->name, sizeof info->name, "Virgil %s %ld", in ? "In" : "Out", info->channel + 1);
     return ASE_OK;
   }
 
@@ -224,8 +224,8 @@ class DsvAsio : public IASIO {
 
   ASIOError controlPanel() override {
     MessageBoxA(nullptr,
-                "DSV is configured in dsv.conf (sample rate, channels, AES67 flows, latency).\n"
-                "Run 'dsvd --status' to see clock and network state.",
+                "Virgil is configured in virgil.conf (sample rate, channels, latency; routing in Dante Controller).\n"
+                "Run 'virgild --status' to see clock and network state.",
                 kDriverName, MB_OK | MB_ICONINFORMATION);
     return ASE_OK;
   }
@@ -260,7 +260,7 @@ class DsvAsio : public IASIO {
   // Buffer-switch thread: wakes on media-clock buffer boundaries.
   void run() {
     const uint32_t B = buffer_frames_;
-    dsv::set_realtime_priority(0, int64_t(B) * 1000000000LL / client_.sample_rate());
+    virgil::set_realtime_priority(0, int64_t(B) * 1000000000LL / client_.sample_rate());
     const uint32_t rx_lat = client_.rx_latency_frames();
     const uint32_t out_off = B + client_.tx_lead_frames();
     const uint32_t rxch = client_.rx_channels(), txch = client_.tx_channels();
@@ -274,7 +274,7 @@ class DsvAsio : public IASIO {
     bool reset_requested = false;
 
     while (running_) {
-      // dsvd gone for >2 s (settings changed the soundcard layout, or it was
+      // virgild gone for >2 s (settings changed the soundcard layout, or it was
       // restarted): ask the host to re-initialise us so init() reconnects.
       // Shorter gaps (settings applied with the same layout) ride through on
       // the extrapolated clock.
@@ -283,17 +283,17 @@ class DsvAsio : public IASIO {
         callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
         reset_requested = true;
       }
-      dsv::ClockAnchor a;
+      virgil::ClockAnchor a;
       if (!client_.anchor(&a)) break;
       const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_relaxed);
       if (cur_steps != steps) {
         // PTP relock moved the timeline: realign and tell the host.
         steps = cur_steps;
-        t = (uint64_t(a.frame_at(dsv::mono_ns())) / B + 1) * B;
+        t = (uint64_t(a.frame_at(virgil::mono_ns())) / B + 1) * B;
         if (callbacks_->asioMessage) callbacks_->asioMessage(kAsioResyncRequest, 0, nullptr, nullptr);
       }
       const int64_t deadline = a.host_ns_at(double(t));
-      dsv::sleep_until_ns(deadline, 50000);
+      virgil::sleep_until_ns(deadline, 50000);
       if (!running_) break;
 
       const long idx = long(k & 1);
@@ -303,7 +303,7 @@ class DsvAsio : public IASIO {
         int32_t* dst = c.data.data() + size_t(idx) * B;
         if (uint32_t(c.channel) >= rxch) continue;
         for (uint32_t f = 0; f < B; ++f)
-          dst[f] = dsv::float_to_s32(client_.rx_frame(in_start + f)[c.channel]);
+          dst[f] = virgil::float_to_s32(client_.rx_frame(in_start + f)[c.channel]);
       }
 
       position_ = int64_t(k) * B;
@@ -332,7 +332,7 @@ class DsvAsio : public IASIO {
         for (uint32_t c = 0; c < txch; ++c) dst[c] = 0.f;
         for (const auto& c : outputs_)
           if (uint32_t(c.channel) < txch)
-            dst[c.channel] = dsv::s32_to_float(c.data[size_t(idx) * B + f]);
+            dst[c.channel] = virgil::s32_to_float(c.data[size_t(idx) * B + f]);
       }
       client_.touch();
       t += B;
@@ -341,7 +341,7 @@ class DsvAsio : public IASIO {
   }
 
   std::atomic<long> refs_{1};
-  dsv::Client client_;
+  virgil::Client client_;
   char error_[128] = "";
   long in_ch_ = 0, out_ch_ = 0;
   std::vector<Channel> inputs_, outputs_;
@@ -369,7 +369,7 @@ class ClassFactory : public IClassFactory {
   ULONG STDMETHODCALLTYPE Release() override { return 1; }
   HRESULT STDMETHODCALLTYPE CreateInstance(IUnknown* outer, REFIID riid, void** ppv) override {
     if (outer) return CLASS_E_NOAGGREGATION;
-    auto* d = new (std::nothrow) DsvAsio;
+    auto* d = new (std::nothrow) VirgilAsio;
     if (!d) return E_OUTOFMEMORY;
     HRESULT hr = d->QueryInterface(riid, ppv);
     d->Release();
@@ -407,7 +407,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID) {
 }
 
 STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID* ppv) {
-  if (!IsEqualCLSID(clsid, CLSID_DsvAsio)) return CLASS_E_CLASSNOTAVAILABLE;
+  if (!IsEqualCLSID(clsid, CLSID_VirgilAsio)) return CLASS_E_CLASSNOTAVAILABLE;
   return g_factory.QueryInterface(riid, ppv);
 }
 

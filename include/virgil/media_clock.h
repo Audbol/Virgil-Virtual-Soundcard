@@ -1,4 +1,4 @@
-// Mapping between the local monotonic clock, PTP time and the AES67 media
+// Mapping between the local monotonic clock, PTP time and the Dante media
 // clock (RTP timestamp = sample count since the PTP epoch, plus offset).
 #pragma once
 
@@ -7,9 +7,9 @@
 #include <cstring>
 #include <string>
 
-#include "dsv/shm_layout.h"
+#include "virgil/shm_layout.h"
 
-namespace dsv {
+namespace virgil {
 
 // Seconds between the PTP (TAI) and Unix (UTC) epochs, as of 2017-01-01.
 constexpr int64_t kTaiUtcOffsetNs = 37LL * 1000000000LL;
@@ -94,4 +94,4 @@ class FreeRunClock : public ClockSource {
   ClockModel m_;
 };
 
-}  // namespace dsv
+}  // namespace virgil

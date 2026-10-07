@@ -3,10 +3,10 @@
 
 #include <cstdint>
 
-namespace dsv {
+namespace virgil {
 
 // Monotonic clock in nanoseconds. On macOS this is mach_absolute_time()
-// scaled to ns, so CoreAudio host time and dsv time share one timebase.
+// scaled to ns, so CoreAudio host time and virgil time share one timebase.
 int64_t mono_ns();
 
 // Wall clock, ns since the Unix epoch (UTC).
@@ -27,4 +27,4 @@ bool lock_memory();
 uint32_t process_id();
 bool process_alive(uint32_t pid);
 
-}  // namespace dsv
+}  // namespace virgil

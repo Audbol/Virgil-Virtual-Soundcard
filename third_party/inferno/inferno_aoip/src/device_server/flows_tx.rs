@@ -146,7 +146,12 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       pbuff[9..9 + stride * flow.fpp].fill(0);
       while wrapped_diff(now as Clock, flow.next_ts as Clock) >= 0 {
         pbuff[0] = 2u8; // ???
-        let packet_ts = flow.next_ts.wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
+        // Virgil patch: label packets with the media time of the samples they
+        // carry, i.e. now minus the send delay.
+        let packet_ts = flow
+          .next_ts
+          .wrapping_sub(self.send_latency_samples as LongClock)
+          .wrapping_add_signed(self.clock_offset_samples) /* .wrapping_sub(flow.fpp) */; // ???
         let seconds = packet_ts / (sample_rate as LongClock);
         let subsec_samples = packet_ts % (sample_rate as LongClock);
         pbuff[1..5].copy_from_slice(&(seconds as u32).to_be_bytes());
@@ -247,6 +252,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
     }
 
+    let mut clock_attempts = 0u32; // Virgil patch: the first miss is normal at startup
     let now = loop {
       self.clock_recv.update();
       if let Some(clkovl) = self.clock_recv.get() {
@@ -264,8 +270,11 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       if let Some(now) = now_opt {
         break now;
       } else {
-        error!("clock unavailable, can't transmit. is the PTP daemon running? (@init)");
-        tokio::time::sleep(Duration::from_secs(1)).await;
+        if clock_attempts > 0 {
+          error!("clock unavailable, can't transmit. is the PTP daemon running? (@init)");
+        }
+        clock_attempts += 1;
+        tokio::time::sleep(Duration::from_millis(if clock_attempts == 1 { 50 } else { 1000 })).await;
       }
     };
     let mut next_on_transfer = now as Clock;
@@ -499,6 +508,7 @@ impl FlowsTransmitter {
   pub fn start<P: ProxyToSamplesBuffer + Send + Sync + 'static>(
     self_info: Arc<DeviceInfo>,
     tx_latency_ns: usize,
+    tx_send_delay_ns: usize,
     tx_source_bit_depth: u8,
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     channels_outputs: Vec<RBOutput<Sample, P>>,
@@ -516,7 +526,7 @@ impl FlowsTransmitter {
         tx_source_bit_depth,
         clock_recv,
         srate,
-        0, /*LATENCY TODO*/
+        tx_send_delay_ns, // Virgil patch: was hardcoded 0
         // we set max_lag_samples to tx latency because it doesn't make sense to send samples older than that
         (tx_latency_ns as u64 * srate as u64 / 1_000_000_000u64).try_into().unwrap(),
         channels_outputs,

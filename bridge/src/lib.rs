@@ -1,4 +1,4 @@
-//! Virgil <-> Inferno bridge (C ABI). See include/dsv/dante_bridge.h.
+//! Virgil <-> Inferno bridge (C ABI). See include/virgil/dante_bridge.h.
 //!
 //! Inferno runs on its own thread with a tokio runtime. It reads transmit
 //! samples from, and writes received samples to, rings owned by the daemon,
@@ -26,6 +26,7 @@ pub struct VgDanteConfig {
     rx_channels: u32,
     tx_latency_ns: u32,
     rx_latency_ns: u32,
+    tx_send_delay_ns: u32,
     tx_ring: *mut i32,
     tx_ring_frames: u32,
     rx_ring: *mut i32,
@@ -151,6 +152,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     cfg.insert("RX_CHANNELS".to_owned(), c.rx_channels.to_string());
     cfg.insert("TX_LATENCY_NS".to_owned(), c.tx_latency_ns.to_string());
     cfg.insert("RX_LATENCY_NS".to_owned(), c.rx_latency_ns.to_string());
+    cfg.insert("TX_SEND_DELAY_NS".to_owned(), c.tx_send_delay_ns.to_string());
 
     let valid = Arc::new(RwLock::new(true));
     let tx_views = channel_views(c.tx_ring, c.tx_ring_frames as usize, c.tx_channels as usize, &valid);

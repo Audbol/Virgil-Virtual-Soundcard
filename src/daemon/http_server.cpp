@@ -7,7 +7,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 using socklen_t = int;
-#define DSV_CLOSE closesocket
+#define VIRGIL_CLOSE closesocket
 #else
 #include <arpa/inet.h>
 #include <netinet/in.h>
@@ -16,13 +16,13 @@ using socklen_t = int;
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
-#define DSV_CLOSE ::close
+#define VIRGIL_CLOSE ::close
 #endif
 
-#include "dsv/log.h"
-#include "dsv/net.h"
+#include "virgil/log.h"
+#include "virgil/net.h"
 
-namespace dsv {
+namespace virgil {
 
 namespace {
 
@@ -101,7 +101,7 @@ bool HttpServer::start(uint32_t addr, uint16_t port, Handler handler) {
   sa.sin_port = htons(port);
   sa.sin_addr.s_addr = htonl(addr);
   if (bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0 || listen(fd, 16) != 0) {
-    DSV_CLOSE(fd);
+    VIRGIL_CLOSE(fd);
     return false;
   }
   listen_fd_ = intptr_t(fd);
@@ -114,7 +114,7 @@ bool HttpServer::start(uint32_t addr, uint16_t port, Handler handler) {
 void HttpServer::stop() {
   running_ = false;
   if (thread_.joinable()) thread_.join();
-  if (listen_fd_ != -1) DSV_CLOSE(decltype(socket(0, 0, 0))(listen_fd_));
+  if (listen_fd_ != -1) VIRGIL_CLOSE(decltype(socket(0, 0, 0))(listen_fd_));
   listen_fd_ = -1;
 }
 
@@ -131,7 +131,7 @@ void HttpServer::run() {
     auto c = accept(lfd, reinterpret_cast<sockaddr*>(&peer), &len);
     if (c == decltype(c)(-1)) continue;
     serve(intptr_t(c));
-    DSV_CLOSE(c);
+    VIRGIL_CLOSE(c);
   }
 }
 
@@ -190,7 +190,7 @@ void HttpServer::serve(intptr_t fd) {
     } catch (const std::exception& e) {
       resp.status = 500;
       resp.body = std::string("{\"error\":\"internal error\"}");
-      DSV_LOG_WARN("control: handler failed: %s", e.what());
+      VIRGIL_LOG_WARN("control: handler failed: %s", e.what());
     }
   }
 
@@ -207,4 +207,4 @@ void HttpServer::serve(intptr_t fd) {
   send_all(fd, out);
 }
 
-}  // namespace dsv
+}  // namespace virgil

@@ -1,14 +1,14 @@
 #!/bin/sh
-SUPPORT="/Library/Application Support/DSV"
-PLIST=/Library/LaunchDaemons/org.dsv.dsvd.plist
+SUPPORT="/Library/Application Support/Virgil"
+PLIST=/Library/LaunchDaemons/org.virgil.virgild.plist
 
 # Keep a user-edited configuration on upgrade.
-if [ ! -f "$SUPPORT/dsv.conf" ]; then
-	cp "$SUPPORT/dsv.conf.default" "$SUPPORT/dsv.conf"
+if [ ! -f "$SUPPORT/virgil.conf" ]; then
+	cp "$SUPPORT/virgil.conf.default" "$SUPPORT/virgil.conf"
 fi
-chmod 664 "$SUPPORT/dsv.conf"
-chgrp admin "$SUPPORT/dsv.conf" 2>/dev/null || true
-mkdir -p /Library/Logs/DSV
+chmod 664 "$SUPPORT/virgil.conf"
+chgrp admin "$SUPPORT/virgil.conf" 2>/dev/null || true
+mkdir -p /Library/Logs/Virgil
 
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"

@@ -1,0 +1,47 @@
+# Virgil virtual soundcard configuration -- every option.
+# Copy to /etc/virgil/virgil.conf (Linux), /Library/Application Support/Virgil/virgil.conf
+# (macOS) or %ProgramData%\Virgil\virgil.conf (Windows) and run: virgild -c <file>
+#
+# Routing is done in Dante Controller: Virgil appears there as a Dante device
+# with tx_channels transmit and rx_channels receive channels.
+
+[device]
+# Device name in Dante Controller: 1-31 letters, digits, '-', '_' or spaces.
+name = Virgil
+# NIC on the Dante network: interface name or its IPv4 address.
+# Empty = first active non-loopback interface.
+interface = eth0
+# 44100, 48000, 88200 or 96000. Must match the other Dante devices.
+sample_rate = 48000
+# Channels apps play into the network (Dante transmit) and record from it
+# (Dante receive). Up to 64 each.
+tx_channels = 8
+rx_channels = 8
+# Receive latency, like Dante's device latency setting: how long received
+# audio is buffered. 1000-2000 us on a clean gigabit LAN, more otherwise.
+latency_us = 4000
+# Transmit latency: how far ahead of the media clock playback is handed to
+# the network; at least two engine ticks.
+tx_latency_us = 4000
+# Engine tick: how often the daemon moves audio between apps and the
+# network (125-4000 us). Smaller = lower latency, more CPU.
+tick_us = 1000
+# Playback safety margin for drivers (0 = two ticks).
+tx_lead_us = 0
+# Real-time scheduling (Linux SCHED_FIFO priority / macOS time-constraint /
+# Windows MMCSS "Pro Audio"). Busy-wait this long before each tick.
+rt_priority = 80
+spin_us = 50
+lock_memory = true
+# ptp = follow the Dante clock master (PTPv1, required for Dante);
+# free = local clock only (testing).
+clock = ptp
+# Local web control panel port (127.0.0.1 only).
+control_port = 8480
+
+[ptp]
+# PTPv1 subdomain Dante uses.
+subdomain = _DFLT
+# Become clock master when no other device offers a clock (e.g. Virgil is
+# the only Dante device). Real Dante hardware normally wins the election.
+master_capable = false

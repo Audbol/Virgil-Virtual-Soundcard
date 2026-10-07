@@ -5,7 +5,7 @@
 #include <string>
 #include <vector>
 
-namespace dsv {
+namespace virgil {
 
 struct Config {
   std::string device_name = "Virgil";  // name in Dante Controller (<= 31 chars)
@@ -39,6 +39,10 @@ struct Config {
   // How far capture reads trail the clock (drivers): Inferno already applies
   // the Dante receive latency; this only covers the hand-over ticks.
   uint32_t rx_latency_frames() const { return 3 * period_frames(); }
+  // How long after its media time a mixed frame is handed to the network:
+  // the tick that mixes it ends one tick later, plus room for one packet and
+  // scheduling jitter. tx_latency_us must cover this plus the network.
+  uint32_t tx_send_delay_us() const { return 2 * tick_us + 500; }
   uint32_t tx_lead_frames() const {
     return tx_lead_us ? us_to_frames(tx_lead_us) : 2 * period_frames();
   }
@@ -52,4 +56,4 @@ bool validate_config(Config* c, std::string* error);
 // Serialise back to INI text that parse_config() reads.
 std::string format_config(const Config& c);
 
-}  // namespace dsv
+}  // namespace virgil

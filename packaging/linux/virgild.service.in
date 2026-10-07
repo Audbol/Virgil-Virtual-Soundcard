@@ -1,10 +1,10 @@
 [Unit]
-Description=DSV virtual soundcard (AES67 / Dante AES67 mode)
+Description=Virgil Dante-compatible virtual soundcard
 After=network-online.target
 Wants=network-online.target
 
 [Service]
-ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/dsvd -c /etc/dsv/dsv.conf
+ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/virgild -c /etc/virgil/virgil.conf
 Restart=on-failure
 # Low-latency audio: real-time scheduling, locked memory, PTP ports < 1024.
 LimitRTPRIO=95

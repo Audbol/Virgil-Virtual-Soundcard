@@ -1,4 +1,4 @@
-LIBRARY DSVAsio
+LIBRARY VirgilAsio
 EXPORTS
 	DllGetClassObject PRIVATE
 	DllCanUnloadNow PRIVATE

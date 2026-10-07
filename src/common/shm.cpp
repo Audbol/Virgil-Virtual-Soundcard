@@ -1,4 +1,4 @@
-#include "dsv/shm.h"
+#include "virgil/shm.h"
 
 #include <cstdint>
 #include <cstring>
@@ -14,7 +14,7 @@
 #include <unistd.h>
 #endif
 
-namespace dsv {
+namespace virgil {
 
 SharedMemory::~SharedMemory() { close(); }
 
@@ -139,4 +139,4 @@ void SharedMemory::close() {
 
 #endif
 
-}  // namespace dsv
+}  // namespace virgil

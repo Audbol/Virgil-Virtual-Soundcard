@@ -5,10 +5,10 @@
 #include <fstream>
 #include <sstream>
 
-#include "dsv/engine.h"
-#include "dsv/log.h"
-#include "dsv/net.h"
-#include "dsv/platform.h"
+#include "virgil/engine.h"
+#include "virgil/log.h"
+#include "virgil/net.h"
+#include "virgil/platform.h"
 #include "ui_html.h"  // generated from src/daemon/ui/index.html
 
 #if defined(_WIN32)
@@ -17,20 +17,20 @@
 #include <sys/stat.h>
 #endif
 
-#ifndef DSV_VERSION
-#define DSV_VERSION "dev"
+#ifndef VIRGIL_VERSION
+#define VIRGIL_VERSION "dev"
 #endif
 
-namespace dsv {
+namespace virgil {
 
 std::string default_config_path() {
 #if defined(_WIN32)
   const char* pd = std::getenv("ProgramData");
-  return std::string(pd ? pd : "C:\\ProgramData") + "\\DSV\\dsv.conf";
+  return std::string(pd ? pd : "C:\\ProgramData") + "\\Virgil\\virgil.conf";
 #elif defined(__APPLE__)
-  return "/Library/Application Support/DSV/dsv.conf";
+  return "/Library/Application Support/Virgil/virgil.conf";
 #else
-  return "/etc/dsv/dsv.conf";
+  return "/etc/virgil/virgil.conf";
 #endif
 }
 
@@ -164,8 +164,8 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
   if (r.method == "POST") {
     // CSRF guard: a custom header forces a CORS preflight, which we never
     // approve, so other web pages cannot POST here. Also check Origin.
-    if (r.header("x-dsv-request") != "1")
-      return json_error(403, "missing X-DSV-Request header");
+    if (r.header("x-virgil-request") != "1")
+      return json_error(403, "missing X-Virgil-Request header");
     const std::string origin = r.header("origin");
     if (!origin.empty() && origin != "http://" + host)
       return json_error(403, "cross-origin request refused");
@@ -189,7 +189,7 @@ HttpResponse ControlServer::status_json() {
 
   Json j;
   j.begin_obj();
-  j.kv("version", DSV_VERSION);
+  j.kv("version", VIRGIL_VERSION);
   j.kv("status", ctx_->status);
   j.kv("error", ctx_->error);
   j.kv("config_path", ctx_->config_path);
@@ -308,11 +308,11 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
   std::remove(path.c_str());  // Windows rename does not replace
   if (std::rename(tmp.c_str(), path.c_str()) != 0)
     return json_error(500, "cannot replace " + path);
-  DSV_LOG_INFO("control: configuration saved to %s; restarting engine", path.c_str());
+  VIRGIL_LOG_INFO("control: configuration saved to %s; restarting engine", path.c_str());
   ctx_->reload = true;
   Json j;
   j.begin_obj().kvb("ok", true).kv("path", path).end_obj();
   return {200, "application/json", j.take(), ""};
 }
 
-}  // namespace dsv
+}  // namespace virgil

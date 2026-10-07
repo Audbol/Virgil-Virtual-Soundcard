@@ -1,14 +1,14 @@
-// CoreAudio AudioServerPlugIn exposing dsvd as a system-wide audio device.
+// CoreAudio AudioServerPlugIn exposing virgild as a system-wide audio device.
 //
 // Object tree:   PlugIn(1) -> Device(2) -> InputStream(3), OutputStream(4)
 //
-// Timing: the device clock *is* the dsvd media clock. GetZeroTimeStamp maps
+// Timing: the device clock *is* the virgild media clock. GetZeroTimeStamp maps
 // the PTP-disciplined anchor published in shared memory onto mach host time,
-// so the HAL's rate scalar tracks the Dante/AES67 grandmaster and no sample
+// so the HAL's rate scalar tracks the Dante clock master and no sample
 // rate conversion or drift correction is needed anywhere.
 //
-// Latency: input safety offset = dsvd rx latency, output safety offset =
-// dsvd tx lead; both directions add one AES67 packet of device latency.
+// Latency: input safety offset = virgild rx latency, output safety offset =
+// virgild tx lead; both directions add one engine tick of device latency.
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_time.h>
@@ -20,8 +20,8 @@
 #include <cstring>
 #include <mutex>
 
-#include "dsv/client.h"
-#include "dsv/platform.h"
+#include "virgil/client.h"
+#include "virgil/platform.h"
 
 namespace {
 
@@ -33,9 +33,9 @@ enum : AudioObjectID {
 };
 
 constexpr UInt32 kZeroTimeStampPeriod = 8192;
-#define kDeviceUID "DSV-Virtual-Soundcard"
-#define kDeviceModelUID "DSV-Virtual-Soundcard-Model"
-#define kManufacturer "DSV Project"
+#define kDeviceUID "Virgil-Virtual-Soundcard"
+#define kDeviceModelUID "Virgil-Virtual-Soundcard-Model"
+#define kManufacturer "Virgil Project"
 
 // ---- state ------------------------------------------------------------------
 
@@ -44,12 +44,12 @@ struct State {
   AudioServerPlugInHostRef host = nullptr;
   std::atomic<UInt32> ref_count{0};
 
-  dsv::Client client;  // valid while io_count > 0 and the daemon is up
+  virgil::Client client;  // valid while io_count > 0 and the daemon is up
   UInt32 io_count = 0;
   bool input_active = true;
   bool output_active = true;
 
-  // Device format, taken from dsvd at load (defaults if it is not running).
+  // Device format, taken from virgild at load (defaults if it is not running).
   Float64 sample_rate = 48000;
   UInt32 in_channels = 8;
   UInt32 out_channels = 8;
@@ -81,7 +81,7 @@ UInt64 ns_to_host(int64_t ns) {
 }
 
 void load_format_from_daemon() {
-  dsv::Client c;
+  virgil::Client c;
   if (!c.open()) return;
   g.sample_rate = c.sample_rate();
   g.in_channels = c.rx_channels() ? c.rx_channels() : 1;
@@ -411,11 +411,11 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
       case kAudioObjectPropertyOwner:
         return put<AudioObjectID>(inDataSize, outDataSize, outData, kObjectID_PlugIn);
       case kAudioObjectPropertyName: {
-        dsv::Client c;
+        virgil::Client c;
         CFStringRef name = (c.open() && c.header()->device_name[0])
                                ? CFStringCreateWithCString(nullptr, c.header()->device_name,
                                                            kCFStringEncodingUTF8)
-                               : CFSTR("DSV Virtual Soundcard");
+                               : CFSTR("Virgil Virtual Soundcard");
         return put<CFStringRef>(inDataSize, outDataSize, outData, name);
       }
       case kAudioObjectPropertyManufacturer:
@@ -446,7 +446,7 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
       case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
         return put<UInt32>(inDataSize, outDataSize, outData, 1);
       case kAudioDevicePropertyLatency:
-        // One AES67 packet of serialisation each way.
+        // One engine tick of buffering each way.
         return put<UInt32>(inDataSize, outDataSize, outData, g.period_frames);
       case kAudioDevicePropertySafetyOffset:
         return put<UInt32>(inDataSize, outDataSize, outData,
@@ -487,7 +487,7 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
         return kAudioHardwareNoError;
       case kAudioObjectPropertyName:
         return put<CFStringRef>(inDataSize, outDataSize, outData,
-                                input ? CFSTR("DSV Network In") : CFSTR("DSV Network Out"));
+                                input ? CFSTR("Virgil Network In") : CFSTR("Virgil Network Out"));
       case kAudioStreamPropertyIsActive:
         return put<UInt32>(inDataSize, outDataSize, outData,
                            input ? g.input_active : g.output_active);
@@ -523,7 +523,7 @@ OSStatus SetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
   std::lock_guard<std::mutex> l(g.mutex);
   if (id == kObjectID_Device && a->mSelector == kAudioDevicePropertyNominalSampleRate) {
     if (inDataSize < sizeof(Float64)) return kAudioHardwareBadPropertySizeError;
-    // The rate belongs to the network; it is set in dsvd's config.
+    // The rate belongs to the network; it is set in virgild's config.
     return *static_cast<const Float64*>(inData) == g.sample_rate
                ? kAudioHardwareNoError
                : kAudioDeviceUnsupportedFormatError;
@@ -559,7 +559,7 @@ bool attach_daemon_locked() {
   g.client.close();
   if (!g.client.open() || !g.client.daemon_alive()) return false;
   if (g.client.sample_rate() != UInt32(g.sample_rate)) {
-    // dsvd was restarted with another rate; refuse rather than play at the
+    // virgild was restarted with another rate; refuse rather than play at the
     // wrong speed. Reloading the plug-in (killall coreaudiod) picks it up.
     g.client.close();
     return false;
@@ -583,7 +583,7 @@ OSStatus StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32)
     g.base_frame = uint64_t(now);
   } else {
     g.free_running = true;
-    g.free_base_ns = dsv::mono_ns();
+    g.free_base_ns = virgil::mono_ns();
   }
   ++g.seed;
   return kAudioHardwareNoError;
@@ -600,8 +600,8 @@ OSStatus StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32) 
 OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32,
                           Float64* outSampleTime, UInt64* outHostTime, UInt64* outSeed) {
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  const int64_t now_ns = dsv::mono_ns();
-  dsv::ClockAnchor a;
+  const int64_t now_ns = virgil::mono_ns();
+  virgil::ClockAnchor a;
   if (!g.free_running && g.client.is_open() && g.client.anchor(&a)) {
     // Clock steps (PTP relock) move the media timeline: start a new one.
     const uint64_t steps = g.client.header()->clock_steps.load(std::memory_order_relaxed);
@@ -663,7 +663,7 @@ OSStatus DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID, Audio
 
 // ---- factory ------------------------------------------------------------------
 
-extern "C" __attribute__((visibility("default"))) void* DSV_Create(CFAllocatorRef,
+extern "C" __attribute__((visibility("default"))) void* VIRGIL_Create(CFAllocatorRef,
                                                                    CFUUIDRef inRequestedTypeUUID) {
   if (!CFEqual(inRequestedTypeUUID, kAudioServerPlugInTypeUUID)) return nullptr;
   return gDriverRef;

@@ -6,10 +6,10 @@
 #include <cstdint>
 #include <string>
 
-#include "dsv/shm.h"
-#include "dsv/shm_layout.h"
+#include "virgil/shm.h"
+#include "virgil/shm_layout.h"
 
-namespace dsv {
+namespace virgil {
 
 class Client {
  public:
@@ -18,7 +18,7 @@ class Client {
   Client(const Client&) = delete;
   Client& operator=(const Client&) = delete;
 
-  // Name defaults to $DSV_SHM_NAME, then kDefaultShmName.
+  // Name defaults to $VIRGIL_SHM_NAME, then kDefaultShmName.
   bool open(const std::string& shm_name = std::string());
   void close();
   bool is_open() const { return hdr_ != nullptr; }
@@ -79,4 +79,4 @@ class Client {
 
 std::string default_shm_name();
 
-}  // namespace dsv
+}  // namespace virgil

@@ -1,15 +1,15 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- Installed by the DSV .pkg to /Library/LaunchDaemons. -->
+<!-- Installed by the Virgil .pkg to /Library/LaunchDaemons. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
-	<string>org.dsv.dsvd</string>
+	<string>org.virgil.virgild</string>
 	<key>ProgramArguments</key>
 	<array>
-		<string>/usr/local/bin/dsvd</string>
+		<string>/usr/local/bin/virgild</string>
 		<string>-c</string>
-		<string>/Library/Application Support/DSV/dsv.conf</string>
+		<string>/Library/Application Support/Virgil/virgil.conf</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>
@@ -21,6 +21,6 @@
 	<key>ProcessType</key>
 	<string>Interactive</string>
 	<key>StandardErrorPath</key>
-	<string>/Library/Logs/DSV/dsvd.log</string>
+	<string>/Library/Logs/Virgil/virgild.log</string>
 </dict>
 </plist>

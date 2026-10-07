@@ -68,6 +68,7 @@ pub struct DeviceServer {
   mdns_server: Arc<DeviceMDNSResponder>,
   mcast_tx: mpsc::Sender<crate::protocol::mcast::MulticastMessage>,
   tx_latency_ns: u32,
+  tx_send_delay_ns: u32,
   tx_source_bit_depth: u8,
   channels_sub_tx: watch::Sender<Option<Arc<ChannelsSubscriber>>>,
   channels_subscriber: Option<Arc<ChannelsSubscriber>>,
@@ -164,6 +165,7 @@ impl DeviceServer {
       mdns_server,
       mcast_tx,
       tx_latency_ns: settings.tx_latency_ns,
+      tx_send_delay_ns: settings.tx_send_delay_ns,
       tx_source_bit_depth: settings.tx_source_bit_depth,
       channels_sub_tx,
       channels_subscriber: None,
@@ -303,6 +305,7 @@ impl DeviceServer {
     let (flows_tx_handle, flows_tx_thread) = flows_tx::FlowsTransmitter::start(
       self.self_info.clone(),
       self.tx_latency_ns.try_into().unwrap(),
+      self.tx_send_delay_ns.try_into().unwrap(),
       self.tx_source_bit_depth,
       self.get_realtime_clock_receiver(),
       rb_outputs.clone(),

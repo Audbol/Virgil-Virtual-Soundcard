@@ -1,7 +1,7 @@
-// ALSA external PCM plugin: exposes dsvd as an ALSA device ("dsv").
+// ALSA external PCM plugin: exposes virgild as an ALSA device ("virgil").
 //
-//   pcm.dsv { type dsv }               # see 50-dsv.conf
-//   aplay -D dsv file.wav / arecord -D dsv / jackd -d alsa -d dsv / PipeWire
+//   pcm.virgil { type virgil }               # see 50-virgil.conf
+//   aplay -D virgil file.wav / arecord -D virgil / jackd -d alsa -d virgil / PipeWire
 //
 // Playback frames are written straight into this pcm's mixing slot at their
 // media-clock position as soon as the application hands them over; the hw
@@ -20,14 +20,14 @@
 #include <string>
 #include <vector>
 
-#include "dsv/client.h"
-#include "dsv/sample_convert.h"
+#include "virgil/client.h"
+#include "virgil/sample_convert.h"
 
 namespace {
 
-struct DsvPcm {
+struct VirgilPcm {
   snd_pcm_ioplug_t io{};
-  dsv::Client client;
+  virgil::Client client;
   std::string shm_name;
   int timer_fd = -1;
   bool running = false;
@@ -40,9 +40,9 @@ struct DsvPcm {
   std::vector<float> scratch;  // one frame, device channel count
 };
 
-// (Re)attach to dsvd. `wait_ms` rides out an engine restart (settings applied
+// (Re)attach to virgild. `wait_ms` rides out an engine restart (settings applied
 // from the control panel), so applications only see an xrun, not an error.
-bool ensure_client(DsvPcm* p, int wait_ms = 0) {
+bool ensure_client(VirgilPcm* p, int wait_ms = 0) {
   for (int waited = 0;; waited += 50) {
     if (p->client.is_open() && p->client.daemon_alive()) {
       if (p->io.stream != SND_PCM_STREAM_PLAYBACK || p->client.has_tx_slot()) return true;
@@ -52,7 +52,7 @@ bool ensure_client(DsvPcm* p, int wait_ms = 0) {
     // with a new layout, or after a crash) switch to it; if it is the same
     // segment coming back (settings applied) we simply keep waiting on it.
     if (p->client.is_open()) {
-      dsv::Client fresh;
+      virgil::Client fresh;
       if (fresh.open(p->shm_name) && fresh.daemon_alive()) {
         p->client.close();
         continue;
@@ -66,7 +66,7 @@ bool ensure_client(DsvPcm* p, int wait_ms = 0) {
   }
 }
 
-uint32_t device_channels(const DsvPcm* p) {
+uint32_t device_channels(const VirgilPcm* p) {
   return p->io.stream == SND_PCM_STREAM_PLAYBACK ? p->client.tx_channels()
                                                  : p->client.rx_channels();
 }
@@ -78,12 +78,12 @@ inline float load_sample(const snd_pcm_channel_area_t& a, snd_pcm_uframes_t fram
       static_cast<const uint8_t*>(a.addr) + (a.first + size_t(frame) * a.step) / 8;
   switch (fmt) {
     case SND_PCM_FORMAT_FLOAT_LE: { float v; std::memcpy(&v, p, 4); return v; }
-    case SND_PCM_FORMAT_S32_LE: { int32_t v; std::memcpy(&v, p, 4); return dsv::s32_to_float(v); }
+    case SND_PCM_FORMAT_S32_LE: { int32_t v; std::memcpy(&v, p, 4); return virgil::s32_to_float(v); }
     case SND_PCM_FORMAT_S24_LE: {
       int32_t v; std::memcpy(&v, p, 4);
       return float(int32_t(uint32_t(v) << 8) >> 8) * (1.0f / 8388608.0f);
     }
-    case SND_PCM_FORMAT_S16_LE: { int16_t v; std::memcpy(&v, p, 2); return dsv::s16_to_float(v); }
+    case SND_PCM_FORMAT_S16_LE: { int16_t v; std::memcpy(&v, p, 2); return virgil::s16_to_float(v); }
     default: return 0.f;
   }
 }
@@ -93,14 +93,14 @@ inline void store_sample(const snd_pcm_channel_area_t& a, snd_pcm_uframes_t fram
   uint8_t* p = static_cast<uint8_t*>(a.addr) + (a.first + size_t(frame) * a.step) / 8;
   switch (fmt) {
     case SND_PCM_FORMAT_FLOAT_LE: std::memcpy(p, &x, 4); break;
-    case SND_PCM_FORMAT_S32_LE: { int32_t v = dsv::float_to_s32(x); std::memcpy(p, &v, 4); break; }
-    case SND_PCM_FORMAT_S24_LE: { int32_t v = dsv::float_to_int(x, 1 << 23); std::memcpy(p, &v, 4); break; }
-    case SND_PCM_FORMAT_S16_LE: { int16_t v = dsv::float_to_s16(x); std::memcpy(p, &v, 2); break; }
+    case SND_PCM_FORMAT_S32_LE: { int32_t v = virgil::float_to_s32(x); std::memcpy(p, &v, 4); break; }
+    case SND_PCM_FORMAT_S24_LE: { int32_t v = virgil::float_to_int(x, 1 << 23); std::memcpy(p, &v, 4); break; }
+    case SND_PCM_FORMAT_S16_LE: { int16_t v = virgil::float_to_s16(x); std::memcpy(p, &v, 2); break; }
     default: break;
   }
 }
 
-bool media_now(DsvPcm* p, uint64_t* out) {
+bool media_now(VirgilPcm* p, uint64_t* out) {
   double f;
   if (!p->client.frame_now(&f)) return false;
   *out = uint64_t(f);
@@ -108,7 +108,7 @@ bool media_now(DsvPcm* p, uint64_t* out) {
 }
 
 // Advance hw from the media clock. Returns false on xrun / daemon loss.
-bool update_hw(DsvPcm* p) {
+bool update_hw(VirgilPcm* p) {
   if (!p->running) return !p->xrun;
   uint64_t now;
   if (!p->client.daemon_alive() || !media_now(p, &now)) return false;
@@ -127,8 +127,8 @@ bool update_hw(DsvPcm* p) {
   return !p->xrun;
 }
 
-int dsv_start(snd_pcm_ioplug_t* io) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_start(snd_pcm_ioplug_t* io) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   uint64_t now;
   if (!ensure_client(p) || !media_now(p, &now)) return -ENODEV;
   const uint32_t ch = device_channels(p);
@@ -150,22 +150,22 @@ int dsv_start(snd_pcm_ioplug_t* io) {
   return 0;
 }
 
-int dsv_stop(snd_pcm_ioplug_t* io) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_stop(snd_pcm_ioplug_t* io) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   p->running = false;
   if (io->stream == SND_PCM_STREAM_PLAYBACK && p->client.is_open()) p->client.set_tx_active(false);
   return 0;
 }
 
-snd_pcm_sframes_t dsv_pointer(snd_pcm_ioplug_t* io) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+snd_pcm_sframes_t virgil_pointer(snd_pcm_ioplug_t* io) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!update_hw(p)) return -EPIPE;
   return snd_pcm_sframes_t(p->hw % io->buffer_size);
 }
 
-snd_pcm_sframes_t dsv_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_area_t* areas,
+snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_area_t* areas,
                                snd_pcm_uframes_t offset, snd_pcm_uframes_t size) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!p->client.is_open()) return -ENODEV;
   const uint32_t ch = device_channels(p);
   const uint32_t n = std::min<uint32_t>(io->channels, ch);
@@ -197,8 +197,8 @@ snd_pcm_sframes_t dsv_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_area_
   return snd_pcm_sframes_t(size);
 }
 
-int dsv_prepare(snd_pcm_ioplug_t* io) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_prepare(snd_pcm_ioplug_t* io) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!ensure_client(p, 3000)) return -ENODEV;
   p->running = false;
   p->xrun = false;
@@ -220,19 +220,19 @@ int dsv_prepare(snd_pcm_ioplug_t* io) {
 // Playback writes run up to buffer_size + lead ahead of the media clock and
 // capture reads trail it by buffer_size + latency; both must stay inside half
 // the ring.
-uint32_t max_buffer_frames(const dsv::Client& c) {
+uint32_t max_buffer_frames(const virgil::Client& c) {
   return c.ring_frames() / 2 - 8 * c.period_frames() - c.rx_latency_frames();
 }
 
-int dsv_hw_params(snd_pcm_ioplug_t* io, snd_pcm_hw_params_t*) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_hw_params(snd_pcm_ioplug_t* io, snd_pcm_hw_params_t*) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   return io->buffer_size <= max_buffer_frames(p->client) ? 0 : -EINVAL;
 }
 
-int dsv_poll_descriptors_count(snd_pcm_ioplug_t*) { return 1; }
+int virgil_poll_descriptors_count(snd_pcm_ioplug_t*) { return 1; }
 
-int dsv_poll_descriptors(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int space) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_poll_descriptors(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int space) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (space < 1) return -EINVAL;
   pfd->fd = p->timer_fd;
   pfd->events = POLLIN;
@@ -240,9 +240,9 @@ int dsv_poll_descriptors(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int space) 
   return 1;
 }
 
-int dsv_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
+int virgil_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
                      unsigned short* revents) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (nfds != 1) return -EINVAL;
   if (pfd->revents & POLLIN) {
     uint64_t expirations;
@@ -265,8 +265,8 @@ int dsv_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
   return 0;
 }
 
-int dsv_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   update_hw(p);
   if (io->stream == SND_PCM_STREAM_PLAYBACK)
     *delay = snd_pcm_sframes_t(p->appl - std::min(p->appl, p->hw)) +
@@ -276,8 +276,8 @@ int dsv_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
   return 0;
 }
 
-int dsv_close(snd_pcm_ioplug_t* io) {
-  auto* p = static_cast<DsvPcm*>(io->private_data);
+int virgil_close(snd_pcm_ioplug_t* io) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (p->timer_fd >= 0) close(p->timer_fd);
   delete p;
   return 0;
@@ -285,21 +285,21 @@ int dsv_close(snd_pcm_ioplug_t* io) {
 
 const snd_pcm_ioplug_callback_t kCallbacks = [] {
   snd_pcm_ioplug_callback_t c{};
-  c.start = dsv_start;
-  c.stop = dsv_stop;
-  c.pointer = dsv_pointer;
-  c.transfer = dsv_transfer;
-  c.close = dsv_close;
-  c.hw_params = dsv_hw_params;
-  c.prepare = dsv_prepare;
-  c.poll_descriptors_count = dsv_poll_descriptors_count;
-  c.poll_descriptors = dsv_poll_descriptors;
-  c.poll_revents = dsv_poll_revents;
-  c.delay = dsv_delay;
+  c.start = virgil_start;
+  c.stop = virgil_stop;
+  c.pointer = virgil_pointer;
+  c.transfer = virgil_transfer;
+  c.close = virgil_close;
+  c.hw_params = virgil_hw_params;
+  c.prepare = virgil_prepare;
+  c.poll_descriptors_count = virgil_poll_descriptors_count;
+  c.poll_descriptors = virgil_poll_descriptors;
+  c.poll_revents = virgil_poll_revents;
+  c.delay = virgil_delay;
   return c;
 }();
 
-int set_constraints(DsvPcm* p) {
+int set_constraints(VirgilPcm* p) {
   snd_pcm_ioplug_t* io = &p->io;
   static const unsigned accesses[] = {SND_PCM_ACCESS_RW_INTERLEAVED,
                                       SND_PCM_ACCESS_RW_NONINTERLEAVED,
@@ -330,7 +330,7 @@ int set_constraints(DsvPcm* p) {
 
 extern "C" {
 
-SND_PCM_PLUGIN_DEFINE_FUNC(dsv) {
+SND_PCM_PLUGIN_DEFINE_FUNC(virgil) {
   (void)root;
   std::string shm_name;
   snd_config_iterator_t i, next;
@@ -342,20 +342,20 @@ SND_PCM_PLUGIN_DEFINE_FUNC(dsv) {
     if (!strcmp(id, "shm")) {
       const char* s;
       if (snd_config_get_string(n, &s) < 0) {
-        SNDERR("dsv: 'shm' must be a string");
+        SNDERR("virgil: 'shm' must be a string");
         return -EINVAL;
       }
       shm_name = s;
       continue;
     }
-    SNDERR("dsv: unknown field %s", id);
+    SNDERR("virgil: unknown field %s", id);
     return -EINVAL;
   }
 
-  auto* p = new DsvPcm;
+  auto* p = new VirgilPcm;
   p->shm_name = shm_name;
   p->io.version = SND_PCM_IOPLUG_VERSION;
-  p->io.name = "DSV Virtual Soundcard (AES67/Dante)";
+  p->io.name = "Virgil Virtual Soundcard (Dante)";
   p->io.callback = &kCallbacks;
   p->io.private_data = p;
   p->io.mmap_rw = 0;
@@ -369,7 +369,7 @@ SND_PCM_PLUGIN_DEFINE_FUNC(dsv) {
   // stream must be known before ensure_client decides on a tx slot.
   p->io.stream = stream;
   if (!ensure_client(p)) {
-    SNDERR("dsv: daemon not running (start dsvd) or no free playback slot");
+    SNDERR("virgil: daemon not running (start virgild) or no free playback slot");
     close(p->timer_fd);
     delete p;
     return -ENODEV;
@@ -389,6 +389,6 @@ SND_PCM_PLUGIN_DEFINE_FUNC(dsv) {
   return 0;
 }
 
-SND_PCM_PLUGIN_SYMBOL(dsv);
+SND_PCM_PLUGIN_SYMBOL(virgil);
 
 }  // extern "C"

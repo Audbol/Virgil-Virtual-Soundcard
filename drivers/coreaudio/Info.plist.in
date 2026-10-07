@@ -5,13 +5,13 @@
 	<key>CFBundleDevelopmentRegion</key>
 	<string>English</string>
 	<key>CFBundleExecutable</key>
-	<string>DSVAudio</string>
+	<string>VirgilAudio</string>
 	<key>CFBundleIdentifier</key>
-	<string>org.dsv.audio.plugin</string>
+	<string>org.virgil.audio.plugin</string>
 	<key>CFBundleInfoDictionaryVersion</key>
 	<string>6.0</string>
 	<key>CFBundleName</key>
-	<string>DSVAudio</string>
+	<string>VirgilAudio</string>
 	<key>CFBundlePackageType</key>
 	<string>BNDL</string>
 	<key>CFBundleShortVersionString</key>
@@ -21,7 +21,7 @@
 	<key>CFPlugInFactories</key>
 	<dict>
 		<key>7C4E8B1A-3D52-4F6B-9A0E-5D2C8F1B3E47</key>
-		<string>DSV_Create</string>
+		<string>VIRGIL_Create</string>
 	</dict>
 	<key>CFPlugInTypes</key>
 	<dict>

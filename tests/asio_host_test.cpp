@@ -1,5 +1,5 @@
-// Minimal ASIO host: loads DSVAsio.dll directly (no registry), plays a sine
-// on output 1 and records input 1. With dsvd looping tx -> rx (see
+// Minimal ASIO host: loads VirgilAsio.dll directly (no registry), plays a sine
+// on output 1 and records input 1. With virgild looping tx -> rx (see
 // tests/loopback.conf) the recording must contain the sine without glitches.
 #include <windows.h>
 
@@ -15,8 +15,8 @@
 
 static const double kPi = 3.14159265358979323846;
 
-static const CLSID kClsid = {0x6b1e4f2a, 0x9c3d, 0x4e8b,
-                             {0xa1, 0xf5, 0x2d, 0x7c, 0x9e, 0x0b, 0x3a, 0x64}};
+static const CLSID kClsid = {0xacddf2ef, 0xfa26, 0x401c,
+                             {0x9c, 0xa6, 0xba, 0x44, 0x7c, 0xea, 0x8d, 0x38}};
 
 static ASIOBufferInfo g_bufs[2];
 static long g_size = 0;
@@ -44,7 +44,7 @@ static long on_message(long sel, long value, void*, double*) {
 }
 
 int main(int argc, char** argv) {
-  const char* dll = argc > 1 ? argv[1] : "DSVAsio.dll";
+  const char* dll = argc > 1 ? argv[1] : "VirgilAsio.dll";
   HMODULE m = LoadLibraryA(dll);
   if (!m) return std::printf("cannot load %s\n", dll), 1;
   auto get = reinterpret_cast<HRESULT(WINAPI*)(REFCLSID, REFIID, void**)>(

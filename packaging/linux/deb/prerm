@@ -2,9 +2,9 @@
 set -e
 if [ -d /run/systemd/system ]; then
 	if [ "$1" = "remove" ]; then
-		systemctl disable --now dsvd.service >/dev/null 2>&1 || true
+		systemctl disable --now virgild.service >/dev/null 2>&1 || true
 	else
-		systemctl stop dsvd.service >/dev/null 2>&1 || true
+		systemctl stop virgild.service >/dev/null 2>&1 || true
 	fi
 fi
 exit 0

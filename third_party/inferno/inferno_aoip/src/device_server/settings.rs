@@ -155,6 +155,8 @@ fn create_self_info(
 pub struct Settings {
   pub self_info: DeviceInfo,
   pub tx_latency_ns: u32,
+  /// How long after a frame's media time it is read and sent (Virgil patch).
+  pub tx_send_delay_ns: u32,
   pub clock_path: Option<PathBuf>,
   pub use_safe_clock: bool,
   pub tx_source_bit_depth: u8,
@@ -199,6 +201,10 @@ impl Settings {
         .get("TX_LATENCY_NS")
         .map(|p| p.parse().expect("invalid TX_LATENCY_NS, must be integer"))
         .unwrap_or(10_000_000),
+      tx_send_delay_ns: config
+        .get("TX_SEND_DELAY_NS")
+        .map(|p| p.parse().expect("invalid TX_SEND_DELAY_NS, must be integer"))
+        .unwrap_or(0),
       clock_path: config.get("CLOCK_PATH").map(|p| p.try_into().unwrap()),
       use_safe_clock,
       tx_source_bit_depth,

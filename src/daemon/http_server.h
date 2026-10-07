@@ -9,7 +9,7 @@
 #include <string>
 #include <thread>
 
-namespace dsv {
+namespace virgil {
 
 struct HttpRequest {
   std::string method;
@@ -49,4 +49,4 @@ class HttpServer {
   std::atomic<bool> running_{false};
 };
 
-}  // namespace dsv
+}  // namespace virgil

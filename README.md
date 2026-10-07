@@ -1,35 +1,35 @@
-# DSV: a low-latency virtual network soundcard
+# Virgil: a low-latency virtual network soundcard
 
-DSV makes a computer's audio apps send and receive multichannel audio over the
+Virgil makes a computer's audio apps send and receive multichannel audio over the
 network as **AES67** streams. AES67 is the interoperability standard that Dante
 devices support in their **AES67 mode**. Apps see an ordinary soundcard on every
 platform:
 
 | OS      | Driver                         | Apps see it as                   |
 |---------|--------------------------------|----------------------------------|
-| Linux   | ALSA external PCM plugin       | `dsv` ALSA device (JACK, PipeWire, aplay, …) |
-| macOS   | CoreAudio AudioServerPlugIn    | "DSV Virtual Soundcard" system device |
-| Windows | ASIO driver (COM in-proc)      | "DSV Virtual Soundcard" ASIO device |
+| Linux   | ALSA external PCM plugin       | `virgil` ALSA device (JACK, PipeWire, aplay, …) |
+| macOS   | CoreAudio AudioServerPlugIn    | "Virgil Virtual Soundcard" system device |
+| Windows | ASIO driver (COM in-proc)      | "Virgil Virtual Soundcard" ASIO device |
 
 ## About Dante
 
-**DSV does not implement Audinate's native Dante protocol.** Native Dante
+**Virgil does not implement Audinate's native Dante protocol.** Native Dante
 (its device discovery, routing and audio transport) is proprietary. The only
-legitimate way to use it is Audinate's licensed SDKs. DSV is not affiliated
+legitimate way to use it is Audinate's licensed SDKs. Virgil is not affiliated
 with Audinate.
 
-DSV talks to Dante gear through **Dante's AES67 mode**:
+Virgil talks to Dante gear through **Dante's AES67 mode**:
 
 1. In Dante Controller, open *Device View → AES67 Config* on a Dante device and
    enable AES67 mode, then reboot the device.
-2. **Dante → DSV:** create a multicast transmit flow on the Dante device and tick
-   "AES67". DSV discovers it via SAP. Run `dsvd --discover` to list it, then
-   subscribe in `dsv.conf` with `sap_name = …`.
-3. **DSV → Dante:** DSV announces its transmit flows via SAP. They appear in
+2. **Dante → Virgil:** create a multicast transmit flow on the Dante device and tick
+   "AES67". Virgil discovers it via SAP. Run `virgild --discover` to list it, then
+   subscribe in `virgil.conf` with `sap_name = …`.
+3. **Virgil → Dante:** Virgil announces its transmit flows via SAP. They appear in
    Dante Controller's routing grid as an AES67 device that Dante receivers can
    subscribe to.
 4. Clocking: Dante devices in AES67 mode bridge their clock onto PTPv2
-   domain 0, which DSV follows. DSV only acts as PTPv2 grandmaster if it hears
+   domain 0, which Virgil follows. Virgil only acts as PTPv2 grandmaster if it hears
    no other master.
 
 The usual Dante AES67 limits apply: 48 kHz, multicast, 1 ms packet time and up
@@ -43,10 +43,10 @@ to 8 channels per flow.
  apps ─► ASIO driver ─┘   (lock-free, per-frame      └─◄ AES67 RTP ◄─ Dante / AES67 devices
                            addressed by media clock)
                                     ▲
-                               dsvd daemon ── PTPv2 slave/master, SAP announce/discover
+                               virgild daemon ── PTPv2 slave/master, SAP announce/discover
 ```
 
-* **One clock.** `dsvd` steers a media clock to the PTP grandmaster with a PI
+* **One clock.** `virgild` steers a media clock to the PTP grandmaster with a PI
   servo and publishes a `(host time, media frame, rate)` anchor in shared
   memory. Every driver runs its callbacks from that anchor: CoreAudio zero
   timestamps, ASIO buffer switches and the ALSA hw pointer. Apps therefore run
@@ -82,28 +82,28 @@ installer and a portable archive:
 
 | Platform | Installer | Portable (no install) |
 |---|---|---|
-| Windows 10/11 x64 | `DSV-<ver>-win64-setup.exe` | `DSV-<ver>-windows-x64-portable.zip` |
-| macOS 11+ (Apple silicon & Intel) | `DSV-<ver>-macos.pkg` | `DSV-<ver>-macos-portable.zip` |
-| Debian / Ubuntu | `dsv_<ver>_amd64.deb` | `DSV-<ver>-linux-x86_64.tar.gz` |
-| Fedora / RHEL / openSUSE | `dsv-<ver>-1.x86_64.rpm` | same tarball |
+| Windows 10/11 x64 | `Virgil-<ver>-win64-setup.exe` | `Virgil-<ver>-windows-x64-portable.zip` |
+| macOS 11+ (Apple silicon & Intel) | `Virgil-<ver>-macos.pkg` | `Virgil-<ver>-macos-portable.zip` |
+| Debian / Ubuntu | `virgil_<ver>_amd64.deb` | `Virgil-<ver>-linux-x86_64.tar.gz` |
+| Fedora / RHEL / openSUSE | `virgil-<ver>-1.x86_64.rpm` | same tarball |
 
 What each one sets up:
 
-- **Installers:** `dsvd` runs as a background service that starts at boot
+- **Installers:** `virgild` runs as a background service that starts at boot
   (a Windows service, a launchd daemon or a systemd unit), plus the
-  platform's driver and **DSV Control**. On Windows that also means ASIO
+  platform's driver and **Virgil Control**. On Windows that also means ASIO
   driver registration, a firewall rule, Start-menu and desktop shortcuts,
   and an Add/Remove Programs entry.
 - **Portable archives:** run from the extracted folder.
-  Double-click **DSV Control** and it starts `dsvd` from that folder. The
+  Double-click **Virgil Control** and it starts `virgild` from that folder. The
   only one-time step is the driver: `register-asio-driver.cmd` on Windows,
   `install-driver.command` on macOS, `setup-alsa.sh` on Linux. Each archive
   has a `START-HERE.txt`.
 
 ## Control panel
 
-**DSV Control** opens the control panel in your browser. You can also go to
-http://127.0.0.1:8480/ directly while `dsvd` runs. It shows:
+**Virgil Control** opens the control panel in your browser. You can also go to
+http://127.0.0.1:8480/ directly while `virgild` runs. It shows:
 
 - **Status:** clock state (PTP locked, grandmaster or free-running) with its
   offset, format, packet rates and loss, and which apps are connected and
@@ -120,7 +120,7 @@ http://127.0.0.1:8480/ directly while `dsvd` runs. It shows:
   raw configuration file.
 
 **Apply** validates the configuration, saves it and restarts the audio
-engine inside `dsvd`. Apps stay connected when the sample rate and channel
+engine inside `virgild`. Apps stay connected when the sample rate and channel
 counts are unchanged. If those change, ALSA apps reconnect by themselves
 and ASIO hosts get a driver reset request. On macOS, restart Core Audio
 after changing them.
@@ -133,15 +133,15 @@ Configuration file and log locations, if you prefer editing by hand:
 
 | Platform | Configuration | Log |
 |---|---|---|
-| Windows | `C:\ProgramData\DSV\dsv.conf` | `C:\ProgramData\DSV\dsvd.log` |
-| macOS | `/Library/Application Support/DSV/dsv.conf` | `/Library/Logs/DSV/dsvd.log` |
-| Linux | `/etc/dsv/dsv.conf` | `journalctl -u dsvd` |
+| Windows | `C:\ProgramData\Virgil\virgil.conf` | `C:\ProgramData\Virgil\virgild.log` |
+| macOS | `/Library/Application Support/Virgil/virgil.conf` | `/Library/Logs/Virgil/virgild.log` |
+| Linux | `/etc/virgil/virgil.conf` | `journalctl -u virgild` |
 
 Upgrades keep your configuration. Uninstalling also keeps it:
 
 - **Windows:** use Add/Remove Programs.
-- **macOS:** run `sudo "/Library/Application Support/DSV/uninstall.sh"`. Add `--purge` to delete the configuration too.
-- **Linux:** use `apt remove dsv` or `dnf remove dsv`. `apt purge` deletes the configuration.
+- **macOS:** run `sudo "/Library/Application Support/Virgil/uninstall.sh"`. Add `--purge` to delete the configuration too.
+- **Linux:** use `apt remove virgil` or `dnf remove virgil`. `apt purge` deletes the configuration.
 
 With no interface set, the service uses the first active network interface. It
 waits for the network if the service starts at boot before the network is up.
@@ -175,8 +175,8 @@ such as `v0.1.0`, or run the workflow by hand with a version, it publishes them
 as a GitHub Release, together with
 `SHA256SUMS` and the notes from `packaging/release-notes.md`.
 
-* **macOS signing and notarisation:** set `DSV_CODESIGN_ID`,
-  `DSV_INSTALLER_ID` and `DSV_NOTARY_PROFILE`, or the matching repository
+* **macOS signing and notarisation:** set `VIRGIL_CODESIGN_ID`,
+  `VIRGIL_INSTALLER_ID` and `VIRGIL_NOTARY_PROFILE`, or the matching repository
   secrets in CI. Unsigned packages still install, but Gatekeeper asks the
   user to approve them in System Settings → Privacy & Security.
 * **Windows signing:** the installer is unsigned, so SmartScreen warns on
@@ -185,15 +185,15 @@ as a GitHub Release, together with
 ## Running
 
 ```sh
-dsvd --status                     # clock state, packet counters, connected apps
-dsvd --discover -i eth0           # list AES67 / Dante AES67 flows on the network
-dsvd -c my.conf -v                # run in the foreground with debug output
+virgild --status                     # clock state, packet counters, connected apps
+virgild --discover -i eth0           # list AES67 / Dante AES67 flows on the network
+virgild -c my.conf -v                # run in the foreground with debug output
 ```
 
-Configuration reference: [`config/dsv.conf.example`](config/dsv.conf.example).
+Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.example).
 
-* **Linux:** use `-D dsv` (automatic format conversion) or `-D dsv_hw`
-  (raw), e.g. `jackd -d alsa -d dsv_hw -p 64`.
+* **Linux:** use `-D virgil` (automatic format conversion) or `-D virgil_hw`
+  (raw), e.g. `jackd -d alsa -d virgil_hw -p 64`.
 
 ## Status and testing
 
@@ -202,8 +202,8 @@ Configuration reference: [`config/dsv.conf.example`](config/dsv.conf.example).
 | AES67 engine, RTP, SDP, SAP, config | Unit tests; end-to-end UDP loopback is sample-accurate (error ≤ 6e-8, i.e. 24-bit quantisation) on Linux and on Windows (Wine) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon in loopback: 3.000 s tone, 0 discontinuities with 64-frame periods |
 | Control panel | Browser test with Playwright against two daemons on one machine, with one standing in for a Dante device. Checked: stream discovery, one-click subscribe, Apply, and audio arriving on the chosen capture channels. Meters match the generated levels exactly. No console errors, no sideways scrolling at phone width. Requests with a foreign Host header, without the custom header, or cross-origin are refused. `aplay` stays connected when Apply keeps the layout, and reconnects when it changes |
-| Linux portable | Extracted and used as a user would: `setup-alsa.sh`, `dsv-control` (starts `dsvd`), playback and recording through the `dsv` device |
-| Linux `.deb` | Installed with `dpkg` in a container. The system ALSA config lists the `dsv` devices and a 3 s tone passes through. Config edits survive reinstall; `purge` removes everything |
+| Linux portable | Extracted and used as a user would: `setup-alsa.sh`, `virgil-control` (starts `virgild`), playback and recording through the `virgil` device |
+| Linux `.deb` | Installed with `dpkg` in a container. The system ALSA config lists the `virgil` devices and a 3 s tone passes through. Config edits survive reinstall; `purge` removes everything |
 | Windows installer | Run silently under Wine. Checked: files, ASIO registration, uninstall entry, service creation and auto-start, a clean service stop, config kept on upgrade, and removal on uninstall. Wine's service handling is unreliable, so **this needs a run on real Windows** |
 | macOS `.pkg` | **Not yet built.** The scripts are syntax-checked only. The `Installers` workflow builds it on macOS |
 | ASIO driver | Built against a stand-in for the documented SDK interface. A test host (`tests/asio_host_test.cpp`) under Wine got exactly 750 buffer switches in 2 s and a glitch-free round trip. Not yet run in a real DAW or against the real SDK headers |
@@ -216,10 +216,10 @@ Known limitations:
 * Timestamps are software-only (kernel receive timestamps on Linux). Expect
   tens of µs of PTP jitter, which is enough for audio but not for SMPTE 2110
   strictness.
-* The sample rate and channel count come from `dsv.conf`. Changing them means
-  restarting `dsvd`; on macOS also restart `coreaudiod`.
+* The sample rate and channel count come from `virgil.conf`. Changing them means
+  restarting `virgild`; on macOS also restart `coreaudiod`.
 * The Windows service creates a `Global\` shared-memory section that every
-  user session can reach. A `dsvd` started by hand from a non-elevated
+  user session can reach. A `virgild` started by hand from a non-elevated
   console falls back to `Local\`, which only that session can reach.
 * On macOS, the HAL plug-in may run inside coreaudiod's sandbox, and that may
-  block opening `dsvd`'s POSIX shared memory. This has not been tested.
+  block opening `virgild`'s POSIX shared memory. This has not been tested.
