@@ -71,6 +71,29 @@ impl log::Log for BridgeLogger {
 }
 
 static LOGGER: BridgeLogger = BridgeLogger;
+static TEST_CRASHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// Inferno runs its audio on threads of its own: a panic there would end the
+/// thread silently. Log it (synchronously, it is the last word) and flag it
+/// so the daemon can restart the engine.
+fn install_panic_hook() {
+    static ONCE: std::sync::Once = std::sync::Once::new();
+    ONCE.call_once(|| {
+        std::panic::set_hook(Box::new(|info| {
+            PANICKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            let thread = std::thread::current().name().unwrap_or("?").to_owned();
+            let msg = info
+                .payload()
+                .downcast_ref::<String>()
+                .cloned()
+                .or_else(|| info.payload().downcast_ref::<&str>().map(|s| s.to_string()))
+                .unwrap_or_else(|| "panic".into());
+            let loc = info.location().map(|l| format!(" at {}:{}", l.file(), l.line())).unwrap_or_default();
+            log_line(0, &format!("dante: thread '{thread}' crashed: {msg}{loc}"));
+        }));
+    });
+}
 static LOG_TX: std::sync::OnceLock<mpsc::SyncSender<(i32, String)>> = std::sync::OnceLock::new();
 
 /// Log thread: writes lines through the C sink, collapsing bursts of the
@@ -171,6 +194,17 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     };
     *LOG_SINK.write().unwrap() = c.log;
     start_log_thread();
+    install_panic_hook();
+    PANICKED.store(false, std::sync::atomic::Ordering::SeqCst);
+    // Tests: simulate a crash in one of the Dante threads after N seconds.
+    if let Some(secs) = std::env::var("VIRGIL_TEST_DANTE_CRASH_S").ok().and_then(|s| s.parse::<u64>().ok()) {
+        if !TEST_CRASHED.swap(true, std::sync::atomic::Ordering::SeqCst) {
+            let _ = std::thread::Builder::new().name("test-crash".into()).spawn(move || {
+                std::thread::sleep(std::time::Duration::from_secs(secs));
+                panic!("simulated crash (VIRGIL_TEST_DANTE_CRASH_S)");
+            });
+        }
+    }
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(log::LevelFilter::Debug);
     if let Some(f) = c.mono_ns {
@@ -290,4 +324,19 @@ pub unsafe extern "C" fn vg_dante_stop(handle: *mut std::ffi::c_void) {
     }
     // Inferno may still hold views until its threads are gone; they are.
     *h.valid.write().unwrap() = false;
+}
+
+/// 1 while the Dante stack runs normally; 0 once any of its threads crashed
+/// or the main thread ended.
+///
+/// # Safety
+/// `handle` must come from vg_dante_start and not have been stopped.
+#[no_mangle]
+pub unsafe extern "C" fn vg_dante_healthy(handle: *mut std::ffi::c_void) -> i32 {
+    if handle.is_null() {
+        return 0;
+    }
+    let h = &*(handle as *const Handle);
+    let finished = h.thread.as_ref().map_or(true, |t| t.is_finished());
+    (!finished && !PANICKED.load(std::sync::atomic::Ordering::SeqCst)) as i32
 }

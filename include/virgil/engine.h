@@ -47,6 +47,8 @@ class Engine {
   uint32_t interface_address() const { return iface_; }
   std::string grandmaster() const { return clock_ ? clock_->grandmaster() : std::string(); }
   bool dante_running() const { return dante_ != nullptr; }
+  // False if the Dante stack was started and has since crashed or stopped.
+  bool dante_healthy() const;
   // Peak level (linear) per channel since the previous call; resets them.
   void take_peaks(std::vector<float>* tx, std::vector<float>* rx);
 

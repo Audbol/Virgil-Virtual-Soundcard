@@ -160,7 +160,16 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       }
     }
 
-    while (!g_quit && !ctx.reload) wait_reload(1000000000LL);
+    // Watchdog: if the Dante stack dies (a crash in one of its threads),
+    // restart the audio engine rather than staying silent.
+    while (!g_quit && !ctx.reload) {
+      wait_reload(1000000000LL);
+      if (engine && !engine->dante_healthy() && !g_quit && !ctx.reload) {
+        VIRGIL_LOG_ERROR("Dante stack stopped unexpectedly; restarting the audio engine");
+        wait_reload(2000000000LL);  // do not spin if it keeps failing
+        ctx.reload = true;
+      }
+    }
 
     if (engine) {
       {

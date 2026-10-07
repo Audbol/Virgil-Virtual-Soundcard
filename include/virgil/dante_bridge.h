@@ -34,6 +34,9 @@ void* vg_dante_start(const VgDanteConfig* config);
 // t being mono_ns(). Call whenever the servo updates.
 void vg_dante_set_clock(int64_t last_sync, int64_t shift, double freq_scale);
 // Stops the device and releases the rings.
+// 1 while running normally, 0 after a crash of any of its threads.
+int vg_dante_healthy(void* handle);
+
 void vg_dante_stop(void* handle);
 
 #ifdef __cplusplus

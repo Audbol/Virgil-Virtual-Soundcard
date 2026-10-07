@@ -1,3 +1,7 @@
+**0.2.8:** reliability and diagnostics.
+- The log file is written immediately. On Windows the last moments before a problem were held in a buffer and missing from `virgild.log`.
+- A crash inside the Dante stack is now logged (thread and location), and the audio engine restarts automatically instead of going silent.
+
 **0.2.7:** fixes Dante transmit getting stuck after Virgil locks to the network clock. Receivers got only the first channel, new subscriptions and reroutes were refused, and "Restart audio engine" or stopping the service hung. Cause: the clock jump when Virgil locks to a Dante master stalled Inferno's transmitter, so it stopped handling requests.
 
 **0.2.6:** fixes receivers with low latency settings (for example a WING at 1 ms) dropping Virgil's audio. Only one channel arrived, and the WING kept re-requesting the stream and eventually gave up. Virgil now timestamps outgoing audio one transmit latency (4 ms by default) ahead, like Dante Virtual Soundcard, so it arrives in time for any receiver.

@@ -194,6 +194,10 @@ void Engine::stop() {
   if (!shm_ext_) shm_own_.close();  // a shared segment stays for the next engine
 }
 
+bool Engine::dante_healthy() const {
+  return !dante_ || vg_dante_healthy(dante_) != 0;
+}
+
 void Engine::clear_rings() {
   for (uint32_t i = 0; i < kMaxTxClients; ++i)
     std::memset(tx_ring(hdr_, i), 0, tx_ring_floats(hdr_) * sizeof(float));

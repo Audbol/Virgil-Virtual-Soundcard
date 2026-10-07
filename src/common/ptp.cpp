@@ -332,6 +332,7 @@ void PtpClock::run() {
       gm_string_.clear();
     }
     if (!have_master_ && !is_master_ && !opt_.master_capable && !warned_no_master_ &&
+        gm_string_.empty() && master_seen_ns_ == start_ns_ &&
         now - start_ns_ > 15000000000LL) {
       warned_no_master_ = true;
       VIRGIL_LOG_WARN("ptp: no Dante clock master heard after 15 s (%d PTP sender(s) seen); "

@@ -46,6 +46,9 @@ void log_message(int level, const char* fmt, ...) {
   std::strftime(ts, sizeof ts, "%H:%M:%S", std::localtime(&t));
   std::lock_guard<std::mutex> l(m);
   std::fprintf(stderr, "%s [%s] %s\n", ts, tags[level < 0 ? 0 : level > 3 ? 3 : level], msg);
+  // stderr may be redirected to a (buffered) file: never keep lines back,
+  // or the last moments before a problem are missing from the log.
+  std::fflush(stderr);
 }
 
 }  // namespace virgil
