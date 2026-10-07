@@ -1,3 +1,5 @@
+**0.2.7:** fixes Dante transmit getting stuck after Virgil locks to the network clock. Receivers got only the first channel, new subscriptions and reroutes were refused, and "Restart audio engine" or stopping the service hung. Cause: the clock jump when Virgil locks to a Dante master stalled Inferno's transmitter, so it stopped handling requests.
+
 **0.2.6:** fixes receivers with low latency settings (for example a WING at 1 ms) dropping Virgil's audio. Only one channel arrived, and the WING kept re-requesting the stream and eventually gave up. Virgil now timestamps outgoing audio one transmit latency (4 ms by default) ahead, like Dante Virtual Soundcard, so it arrives in time for any receiver.
 
 **0.2.5:** Virgil has a logo: Virgil's laurel wreath around an Inferno flame made of audio meter bars. It appears on the Windows programs and installer, the macOS app, the Linux menu entry and the control panel.

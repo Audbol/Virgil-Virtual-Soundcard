@@ -329,6 +329,13 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           std::thread::sleep(sleep_duration);
         }
         if let Some(now) = self.now() {
+          // Virgil patch: if the media clock stepped backwards (e.g. when PTP
+          // first locks to a Dante master), the next event time can lie far in
+          // the future and commands (stop, add flow, set channels) would never
+          // be processed again. Never wait longer than one interval.
+          if wrapped_diff(next_process_events, now as Clock) > process_events_interval as ClockDiff {
+            next_process_events = now as Clock;
+          }
           let process_events = wrapped_diff(now as Clock, next_process_events) >= 0;
           self.transmit(&mut dither_rng, now, process_events);
           if process_events {

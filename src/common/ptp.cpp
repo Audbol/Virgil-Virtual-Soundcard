@@ -267,6 +267,10 @@ bool PtpClock::start(const Options& o) {
   ClockModel initial;
   initial.base_local = mono_ns();
   initial.base_ptp = realtime_ns() + kTaiUtcOffsetNs;
+  // Tests: start from a Dante-like time base (seconds since power-on) so a
+  // follower has to step its clock by decades, as with real Dante masters.
+  if (const char* e = std::getenv("VIRGIL_TEST_PTP_EPOCH_S"); e && *e)
+    initial.base_ptp = std::atoll(e) * 1000000000LL;
   servo_.reset_to(initial);
   publish(initial);
   state_ = kStateFreeRun;

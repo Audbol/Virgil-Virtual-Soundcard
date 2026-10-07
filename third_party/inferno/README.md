@@ -37,3 +37,9 @@ Changes for Virgil:
    (a WING at 1 ms dropped Virgil's packets otherwise).
 6. `util/os.rs`: on Windows the real-time threads also join the MMCSS
    "Pro Audio" class.
+7. `flows_tx.rs`: when the media clock steps backwards (e.g. the first lock
+   to a Dante master, whose time counts from power-on), the transmitter's
+   next command-processing time lay decades ahead, so it never again
+   processed add-flow, set-channels or stop commands: receivers got only
+   the first channel and stopping the engine hung. It is now clamped to one
+   interval ahead.

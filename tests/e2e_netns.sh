@@ -2,8 +2,8 @@
 # End-to-end Dante test on one Linux machine (needs root and iproute2).
 #
 # Builds a private test network out of network namespaces:
-#   vg-a (10.77.0.1)  virgild "VirgilA", clock master
-#   vg-b (10.77.0.2)  virgild "VirgilB"
+#   vg-a (10.77.0.1)  virgild "VirgilA"
+#   vg-b (10.77.0.2)  virgild "VirgilB", clock master
 #   vg-c (10.77.0.3)  controller: a Dante controller CLI, e.g. netaudio
 # joined by a bridge in vg-hub. Then subscribes B's receive channels 1-2 to A's
 # transmit channels 1-2 and checks that a tone played into A arrives at B.
@@ -57,19 +57,23 @@ lock_memory = false
 master_capable = $3
 EOF
 }
-conf VirgilA virgil-e2e-a true
-conf VirgilB virgil-e2e-b false
+conf VirgilA virgil-e2e-a false
+conf VirgilB virgil-e2e-b true
 # Separate Inferno state per device.
 HOME="$work/home-a" ip netns exec vg-a "$build/virgild" -c "$work/VirgilA.conf" -i va \
   >"$work/a.log" 2>&1 &
 pids+=($!)
-HOME="$work/home-b" ip netns exec vg-b "$build/virgild" -c "$work/VirgilB.conf" -i vb \
+# B is the clock master and its clock counts from "power-on" like a Dante
+# device's, so the transmitter A steps back by decades when it locks
+# (regression: Inferno's transmitter then ignored commands such as adding
+# channel 2 or stopping).
+VIRGIL_TEST_PTP_EPOCH_S=1000 HOME="$work/home-b" ip netns exec vg-b "$build/virgild" -c "$work/VirgilB.conf" -i vb \
   >"$work/b.log" 2>&1 &
 pids+=($!)
 
-echo "waiting for B to lock to A's clock..."
+echo "waiting for A to lock to B's clock..."
 for _ in $(seq 60); do
-  grep -q "following master" "$work/b.log" 2>/dev/null && break
+  grep -q "following master" "$work/a.log" 2>/dev/null && break
   sleep 0.5
 done
 sleep 5
