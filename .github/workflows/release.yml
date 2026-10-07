@@ -1,12 +1,19 @@
 name: Release
 
 # Builds every download on each push (kept as workflow artifacts) and
-# publishes them as a GitHub Release when a version tag (v1.2.3) is pushed.
+# publishes them as a GitHub Release when a version tag (v1.2.3) is pushed,
+# or when run by hand with a version: the tag is then created on the
+# commit the run was started from.
 on:
   push:
     branches: [main, "claude/**"]
     tags: ["v*"]
   workflow_dispatch:
+    inputs:
+      version:
+        description: "Publish a release with this tag (e.g. v0.1.0); empty = build only"
+        required: false
+        default: ""
 
 permissions:
   contents: write
@@ -61,9 +68,11 @@ jobs:
         with: { name: macos, path: "dist/*" }
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(inputs.version, 'v'))
     needs: [linux-packages, linux-portable, windows, macos]
     runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event_name == 'workflow_dispatch' && inputs.version || github.ref_name }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
@@ -71,8 +80,10 @@ jobs:
       - run: cd dist && sha256sum * > SHA256SUMS && ls -l
       - uses: softprops/action-gh-release@v2
         with:
-          name: DSV ${{ github.ref_name }}
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: DSV ${{ env.TAG }}
           body_path: packaging/release-notes.md
           generate_release_notes: true
-          prerelease: ${{ startsWith(github.ref_name, 'v0.') }}
+          prerelease: ${{ startsWith(env.TAG, 'v0.') }}
           files: dist/*

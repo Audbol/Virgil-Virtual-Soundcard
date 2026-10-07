@@ -171,7 +171,8 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 
 Output goes to `dist/`. The **Release** GitHub workflow builds all of them on
 every push to `main`, keeping them as workflow artifacts. When you push a tag
-such as `v0.1.0`, it publishes them as a GitHub Release, together with
+such as `v0.1.0`, or run the workflow by hand with a version, it publishes them
+as a GitHub Release, together with
 `SHA256SUMS` and the notes from `packaging/release-notes.md`.
 
 * **macOS signing and notarisation:** set `DSV_CODESIGN_ID`,
