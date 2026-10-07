@@ -21,9 +21,10 @@ permissions:
 jobs:
   linux-packages:
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev rpm dpkg-dev
+      - run: .github/apt-install.sh libasound2-dev rpm dpkg-dev
       - run: packaging/linux/build-packages.sh all
       - uses: actions/upload-artifact@v4
         with: { name: linux-packages, path: "dist/*" }
@@ -31,9 +32,10 @@ jobs:
   linux-portable:
     # Oldest supported runner: the tarball then runs on glibc 2.35 and newer.
     runs-on: ubuntu-22.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: .github/apt-install.sh libasound2-dev
       - run: packaging/linux/build-packages.sh portable
       - uses: actions/upload-artifact@v4
         with: { name: linux-portable, path: "dist/*.tar.gz" }
@@ -42,9 +44,10 @@ jobs:
     # Cross-built with MinGW-w64 + NSIS, the toolchain the installer was
     # developed and tested with; binaries are statically linked.
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
-      - run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 nsis zip
+      - run: .github/apt-install.sh g++-mingw-w64-x86-64 nsis zip
       - run: rustup target add x86_64-pc-windows-gnu
       - name: Fetch the Steinberg ASIO SDK (not redistributed with Virgil)
         run: |
@@ -57,6 +60,7 @@ jobs:
 
   macos:
     runs-on: macos-14
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -73,6 +77,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))
     needs: [linux-packages, linux-portable, windows, macos]
     runs-on: ubuntu-24.04
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
