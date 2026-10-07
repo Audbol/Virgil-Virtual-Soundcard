@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- sudo cp org.dsv.dsvd.plist /Library/LaunchDaemons/ &&
+     sudo launchctl load -w /Library/LaunchDaemons/org.dsv.dsvd.plist -->
+<plist version="1.0">
+<dict>
+	<key>Label</key>
+	<string>org.dsv.dsvd</string>
+	<key>ProgramArguments</key>
+	<array>
+		<string>/usr/local/bin/dsvd</string>
+		<string>-c</string>
+		<string>/Library/Application Support/DSV/dsv.conf</string>
+	</array>
+	<key>RunAtLoad</key>
+	<true/>
+	<key>KeepAlive</key>
+	<true/>
+	<key>ProcessType</key>
+	<string>Interactive</string>
+</dict>
+</plist>

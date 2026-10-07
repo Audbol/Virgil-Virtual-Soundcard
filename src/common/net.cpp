@@ -1,5 +1,6 @@
 #include "dsv/net.h"
 
+#include <cerrno>
 #include <cstring>
 
 #include "dsv/platform.h"

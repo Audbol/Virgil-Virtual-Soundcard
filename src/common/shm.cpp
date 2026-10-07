@@ -1,5 +1,6 @@
 #include "dsv/shm.h"
 
+#include <cstdint>
 #include <cstring>
 
 #if defined(_WIN32)

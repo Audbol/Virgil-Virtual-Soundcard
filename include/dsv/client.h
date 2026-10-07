@@ -46,9 +46,17 @@ class Client {
   void set_tx_active(bool on);
   void touch();  // refresh slot heartbeat; call at least every few hundred ms
 
+  // Earliest media frame a playback write can still reach the network with.
+  // Anything older has been (or is being) consumed by the daemon; writing it
+  // would leave stale audio in the ring that replays one ring later.
+  uint64_t tx_horizon() const {
+    return hdr_->now_frames.load(std::memory_order_acquire) + hdr_->period_frames;
+  }
+
   // Interleaved float I/O at absolute media frame positions. Channels beyond
-  // the device count are dropped (tx) or zero-filled (rx).
-  void write_tx(uint64_t frame, const float* src, uint32_t frames, uint32_t src_channels);
+  // the device count are dropped (tx) or zero-filled (rx). write_tx skips
+  // frames before tx_horizon() and returns how many were too late.
+  uint32_t write_tx(uint64_t frame, const float* src, uint32_t frames, uint32_t src_channels);
   void read_rx(uint64_t frame, float* dst, uint32_t frames, uint32_t dst_channels) const;
 
   // Per-frame access for drivers that convert formats on the fly. The pointer

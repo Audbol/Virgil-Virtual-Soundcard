@@ -90,6 +90,7 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "rx_channels" || key == "capture_channels") { if (!need_u32(&c->rx_channels)) return false; }
       else if (key == "packet_time_us") { if (!need_u32(&c->packet_time_us)) return false; }
       else if (key == "latency_us" || key == "rx_latency_us") { if (!need_u32(&c->rx_latency_us)) return false; }
+      else if (key == "tx_lead_us") { if (!need_u32(&c->tx_lead_us)) return false; }
       else if (key == "ring_frames") { if (!need_u32(&c->ring_frames)) return false; }
       else if (key == "rt_priority") { uint32_t p; if (!need_u32(&p)) return false; c->rt_priority = int(p); }
       else if (key == "spin_us") { if (!need_u32(&c->spin_us)) return false; }
@@ -151,10 +152,11 @@ bool validate_config(Config* c, std::string* error) {
 
   const uint32_t min_latency = 2 * c->packet_time_us;
   if (c->rx_latency_us < min_latency) c->rx_latency_us = min_latency;
+  if (c->tx_lead_us < min_latency) c->tx_lead_us = min_latency;
 
   // Auto ring size: comfortably larger than latency + packet slack both ways.
   if (c->ring_frames == 0) {
-    uint32_t need = 8 * (c->rx_latency_frames() + 4 * c->period_frames());
+    uint32_t need = 8 * (c->rx_latency_frames() + c->tx_lead_frames() + 4 * c->period_frames());
     uint32_t r = 4096;
     while (r < need) r <<= 1;
     c->ring_frames = r;

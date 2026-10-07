@@ -1,0 +1,43 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: ctest --test-dir build --output-on-failure
+      - uses: actions/upload-artifact@v4
+        with:
+          name: DSVAudio.driver
+          path: build/drivers/coreaudio/DSVAudio.driver
+
+  windows:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Fetch ASIO SDK (not redistributed with DSV)
+        shell: pwsh
+        continue-on-error: true
+        run: |
+          Invoke-WebRequest https://www.steinberg.net/asiosdk -OutFile asiosdk.zip
+          Expand-Archive asiosdk.zip -DestinationPath asio
+          $sdk = (Get-ChildItem asio -Directory | Select-Object -First 1).FullName
+          "ASIO_SDK_DIR=$sdk" | Out-File -FilePath $env:GITHUB_ENV -Append
+      - run: cmake -S . -B build -DASIO_SDK_DIR="${{ env.ASIO_SDK_DIR }}"
+      - run: cmake --build build --config Release -j
+      - run: ctest --test-dir build -C Release --output-on-failure

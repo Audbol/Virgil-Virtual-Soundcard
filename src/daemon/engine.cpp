@@ -34,8 +34,8 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   const std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
   const size_t bytes = shm_total_bytes(cfg_.ring_frames, cfg_.tx_channels, cfg_.rx_channels);
   if (!shm_.create(shm_name, bytes)) {
-    DSV_LOG_ERROR("cannot create shared memory '%s' (%zu bytes); is another dsvd running?",
-                  shm_name.c_str(), bytes);
+    DSV_LOG_ERROR("cannot create shared memory '%s' (%llu bytes); is another dsvd running?",
+                  shm_name.c_str(), (unsigned long long)bytes);
     return false;
   }
   hdr_ = static_cast<ShmHeader*>(shm_.data());
@@ -48,7 +48,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   hdr_->ring_frames = cfg_.ring_frames;
   hdr_->period_frames = cfg_.period_frames();
   hdr_->rx_latency_frames = cfg_.rx_latency_frames();
-  hdr_->tx_lead_frames = 2 * cfg_.period_frames();
+  hdr_->tx_lead_frames = cfg_.tx_lead_frames();
   std::strncpy(hdr_->device_name, cfg_.device_name.c_str(), sizeof hdr_->device_name - 1);
   mix_.assign(size_t(hdr_->period_frames) * std::max(1u, cfg_.tx_channels), 0.f);
 

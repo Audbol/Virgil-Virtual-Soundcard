@@ -152,9 +152,7 @@ snd_pcm_sframes_t dsv_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_area_
   const uint32_t n = std::min<uint32_t>(io->channels, ch);
 
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-    uint64_t now = 0;
-    if (p->running) media_now(p, &now);
-    const uint64_t too_late = now + p->client.period_frames();
+    const uint64_t too_late = p->running ? p->client.tx_horizon() : 0;
     for (snd_pcm_uframes_t f = 0; f < size; ++f) {
       const uint64_t k = p->appl + f;
       float* dst;

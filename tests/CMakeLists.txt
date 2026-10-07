@@ -8,3 +8,9 @@ add_test(NAME loopback COMMAND dsv_loopback_test)
 
 add_executable(dsv_latency_probe latency_probe.cpp)
 target_link_libraries(dsv_latency_probe PRIVATE dsv_net)
+
+if(WIN32 AND TARGET DSVAsio)
+  add_executable(dsv_asio_host_test asio_host_test.cpp)
+  target_include_directories(dsv_asio_host_test PRIVATE "${ASIO_SDK_DIR}/common")
+  target_link_libraries(dsv_asio_host_test PRIVATE ole32 uuid)
+endif()

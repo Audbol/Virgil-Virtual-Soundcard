@@ -30,6 +30,7 @@ struct Config {
   uint32_t rx_channels = 8;
   uint32_t packet_time_us = 1000;  // 125, 250, 333, 1000 (AES67 / Dante)
   uint32_t rx_latency_us = 2000;   // receive buffer, like Dante "latency"
+  uint32_t tx_lead_us = 0;         // playback safety margin; 0 = 2 packets
   uint32_t ring_frames = 0;        // 0 = auto
   int rt_priority = 80;
   uint32_t spin_us = 50;           // busy-wait before each tick
@@ -49,6 +50,9 @@ struct Config {
   }
   uint32_t rx_latency_frames() const {
     return uint32_t((uint64_t(sample_rate) * rx_latency_us + 500000) / 1000000);
+  }
+  uint32_t tx_lead_frames() const {
+    return uint32_t((uint64_t(sample_rate) * tx_lead_us + 500000) / 1000000);
   }
 };
 

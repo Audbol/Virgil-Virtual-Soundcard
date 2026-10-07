@@ -1,5 +1,6 @@
 #include "dsv/client.h"
 
+#include <algorithm>
 #include <cstdlib>
 #include <cstring>
 
@@ -90,15 +91,20 @@ void Client::touch() {
   if (slot_ >= 0) hdr_->clients[slot_].heartbeat_ns.store(mono_ns(), std::memory_order_relaxed);
 }
 
-void Client::write_tx(uint64_t frame, const float* src, uint32_t frames, uint32_t src_channels) {
-  if (!tx_) return;
+uint32_t Client::write_tx(uint64_t frame, const float* src, uint32_t frames,
+                          uint32_t src_channels) {
+  if (!tx_) return frames;
   const uint32_t ch = hdr_->tx_channels;
   const uint32_t n = src_channels < ch ? src_channels : ch;
-  for (uint32_t f = 0; f < frames; ++f) {
+  const uint64_t horizon = tx_horizon();
+  const uint32_t skip =
+      frame >= horizon ? 0 : uint32_t(std::min<uint64_t>(frames, horizon - frame));
+  for (uint32_t f = skip; f < frames; ++f) {
     float* d = tx_frame(frame + f);
     const float* s = src + size_t(f) * src_channels;
     for (uint32_t c = 0; c < n; ++c) d[c] = s[c];
   }
+  return skip;
 }
 
 void Client::read_rx(uint64_t frame, float* dst, uint32_t frames, uint32_t dst_channels) const {

@@ -26,6 +26,7 @@ void usage() {
       "      --free-run        do not use PTP; run on the local clock\n"
       "      --packet-time US  AES67 packet time in microseconds (125/250/333/1000)\n"
       "      --latency US      receive latency in microseconds\n"
+      "      --tx-lead US      playback safety margin in microseconds\n"
       "      --discover        list SAP-announced AES67/Dante streams and exit\n"
       "      --status          print statistics of a running daemon and exit\n"
       "  -v, --verbose         debug logging\n"
@@ -90,7 +91,7 @@ int main(int argc, char** argv) {
   dsv::Config cfg;
   std::string config_path, iface_override, name_override;
   bool free_run = false, do_discover = false, do_status = false, loaded = false;
-  uint32_t ptime = 0, latency = 0;
+  uint32_t ptime = 0, latency = 0, tx_lead = 0;
 
   for (int i = 1; i < argc; ++i) {
     std::string a = argv[i];
@@ -107,6 +108,7 @@ int main(int argc, char** argv) {
     else if (a == "--free-run") free_run = true;
     else if (a == "--packet-time") ptime = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
     else if (a == "--latency") latency = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
+    else if (a == "--tx-lead") tx_lead = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
     else if (a == "--discover") do_discover = true;
     else if (a == "--status") do_status = true;
     else if (a == "-v" || a == "--verbose") dsv::g_log_level = dsv::kLogDebug;
@@ -134,6 +136,7 @@ int main(int argc, char** argv) {
   if (free_run) cfg.clock = "free";
   if (ptime) cfg.packet_time_us = ptime;
   if (latency) cfg.rx_latency_us = latency;
+  if (tx_lead) cfg.tx_lead_us = tx_lead;
 
   if (!loaded || (cfg.tx.empty() && cfg.rx.empty())) {
     // Default: one 8-channel AES67 flow each way, Dante-compatible format.

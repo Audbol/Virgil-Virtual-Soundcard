@@ -9,6 +9,7 @@
 #include <avrt.h>
 #include <timeapi.h>
 #elif defined(__APPLE__)
+#include <errno.h>
 #include <mach/mach.h>
 #include <mach/mach_time.h>
 #include <mach/thread_policy.h>

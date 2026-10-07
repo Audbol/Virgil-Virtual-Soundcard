@@ -1,0 +1,18 @@
+[Unit]
+Description=DSV virtual soundcard (AES67 / Dante AES67 mode)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+ExecStart=/usr/local/bin/dsvd -c /etc/dsv/dsv.conf
+Restart=on-failure
+# Low-latency audio: real-time scheduling, locked memory, PTP ports < 1024.
+LimitRTPRIO=95
+LimitMEMLOCK=infinity
+AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
+DynamicUser=yes
+# The shared-memory soundcard must be reachable by desktop users.
+UMask=0000
+
+[Install]
+WantedBy=multi-user.target
