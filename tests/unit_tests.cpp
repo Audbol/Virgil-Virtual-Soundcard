@@ -132,7 +132,7 @@ TEST(ptp1_master_follower_lock) {
     std::printf("  (skipped: cannot bind PTP ports 319/320 here)\n");
     return;
   }
-  const int64_t deadline = mono_ns() + 25000000000LL;
+  const int64_t deadline = mono_ns() + 40000000000LL;  // one servo update per second
   bool locked = false;
   while (mono_ns() < deadline && !locked) {
     sleep_until_ns(mono_ns() + 200000000LL);

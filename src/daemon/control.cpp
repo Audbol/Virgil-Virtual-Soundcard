@@ -257,7 +257,7 @@ HttpResponse ControlServer::interfaces_json() {
   j.begin_arr();
   for (const auto& i : list_interfaces()) {
     j.begin_obj().kv("name", i.name).kv("address", ipv4_to_string(i.addr));
-    j.kvb("loopback", i.loopback).end_obj();
+    j.kvb("loopback", i.loopback).kvb("virtual", i.virtual_adapter).end_obj();
   }
   j.end_arr();
   return {200, "application/json", j.take(), ""};

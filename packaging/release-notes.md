@@ -1,3 +1,8 @@
+**0.2.4:** fixes from the second real-network log.
+- Automatic interface choice no longer picks a Hyper-V/WSL, VPN or other virtual adapter; it prefers wired over Wi-Fi. The control panel marks virtual adapters.
+- Clock: uses the least-delayed of every 4 Sync messages, so late receive timestamps on Windows no longer cause the ±1 ms clock jumps.
+- Dante messages are logged from a separate thread, and bursts of the same message become one line per second. A flood of "send returned error" lines could stall the transmitter.
+
 **0.2.3:** Windows timing and clock fixes from the first real Dante network test.
 - Fixes frequent "tx lag … dropout" errors: Windows 11 throttled the Virgil service's timers because it has no window. Virgil now opts out, and Inferno's transmit thread runs in the "Pro Audio" scheduling class.
 - One late clock packet no longer makes the clock jump by about 1 ms and back.

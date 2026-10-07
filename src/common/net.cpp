@@ -1,5 +1,8 @@
 #include "virgil/net.h"
 
+#include <cctype>
+#include <cstring>
+
 #include <cerrno>
 #include <cstring>
 
@@ -60,45 +63,51 @@ bool is_multicast(uint32_t addr) { return (addr >> 28) == 0xE; }
 bool resolve_interface(const std::string& name, uint32_t* out) {
   ensure_wsa();
   if (!name.empty() && parse_ipv4(name, out)) return true;
-#if defined(_WIN32)
-  ULONG size = 16 * 1024;
-  std::vector<unsigned char> buf;
-  IP_ADAPTER_ADDRESSES* aa = nullptr;
-  ULONG rc = ERROR_BUFFER_OVERFLOW;
-  for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; ++tries) {
-    buf.assign(size, 0);
-    aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-    rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr,
-                              aa, &size);
-  }
-  if (rc != NO_ERROR) return false;
-  for (auto* a = aa; a; a = a->Next) {
-    if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
-    char fname[256];
-    WideCharToMultiByte(CP_UTF8, 0, a->FriendlyName, -1, fname, sizeof fname, nullptr, nullptr);
-    if (!name.empty() && name != fname && name != a->AdapterName) continue;
-    for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
-      auto* sin = reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr);
-      *out = ntohl(sin->sin_addr.s_addr);
-      return true;
+  // By name: exact match. Automatic: the best-scored interface, so that a
+  // Hyper-V/WSL, VPN or container adapter is not picked over the real NIC.
+  const InterfaceInfo* best = nullptr;
+  const auto all = list_interfaces();
+  for (const auto& i : all) {
+    if (!name.empty()) {
+      if (i.name == name || i.id == name) {
+        *out = i.addr;
+        return true;
+      }
+      continue;
     }
+    if (i.loopback) continue;
+    if (!best || i.score > best->score) best = &i;
   }
-  return false;
-#else
-  ifaddrs* ifs = nullptr;
-  if (getifaddrs(&ifs) != 0) return false;
-  bool found = false;
-  for (ifaddrs* i = ifs; i && !found; i = i->ifa_next) {
-    if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET) continue;
-    if (!(i->ifa_flags & IFF_UP)) continue;
-    if (name.empty() ? (i->ifa_flags & IFF_LOOPBACK) != 0 : name != i->ifa_name) continue;
-    *out = ntohl(reinterpret_cast<sockaddr_in*>(i->ifa_addr)->sin_addr.s_addr);
-    found = true;
-  }
-  freeifaddrs(ifs);
-  return found;
-#endif
+  if (!best) return false;
+  *out = best->addr;
+  return true;
 }
+
+namespace {
+bool contains_ci(const std::string& hay, const char* needle) {
+  std::string h = hay, n = needle;
+  for (auto& c : h) c = char(std::tolower(static_cast<unsigned char>(c)));
+  for (auto& c : n) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return h.find(n) != std::string::npos;
+}
+bool looks_virtual(const std::string& s) {
+  static const char* kWords[] = {"hyper-v", "vethernet", "virtual", "vmware", "virtualbox", "wsl",
+                                 "tap-", "tap ", "vpn", "wireguard", "tailscale", "zerotier",
+                                 "npcap", "bluetooth", "miniport", "docker"};
+  for (const char* w : kWords)
+    if (contains_ci(s, w)) return true;
+  return false;
+}
+bool posix_virtual_name(const std::string& n) {
+  static const char* kPrefixes[] = {"docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "tun",
+                                    "tap", "wg", "zt", "tailscale", "utun", "awdl", "llw",
+                                    "bridge", "lxc", "cni", "flannel"};
+  for (const char* p : kPrefixes)
+    if (n.compare(0, std::strlen(p), p) == 0) return true;
+  return false;
+}
+int link_local_penalty(uint32_t addr) { return (addr >> 16) == 0xA9FE ? -1 : 0; }  // 169.254/16
+}  // namespace
 
 std::vector<InterfaceInfo> list_interfaces() {
   ensure_wsa();
@@ -111,19 +120,28 @@ std::vector<InterfaceInfo> list_interfaces() {
   for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; ++tries) {
     buf.assign(size, 0);
     aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-    rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr,
-                              aa, &size);
+    rc = GetAdaptersAddresses(
+        AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST | GAA_FLAG_INCLUDE_GATEWAYS, nullptr,
+        aa, &size);
   }
   if (rc != NO_ERROR) return out;
   for (auto* a = aa; a; a = a->Next) {
     if (a->OperStatus != IfOperStatusUp) continue;
-    char fname[256];
+    char fname[256], desc[256];
     WideCharToMultiByte(CP_UTF8, 0, a->FriendlyName, -1, fname, sizeof fname, nullptr, nullptr);
+    WideCharToMultiByte(CP_UTF8, 0, a->Description, -1, desc, sizeof desc, nullptr, nullptr);
+    const bool virt = looks_virtual(fname) || looks_virtual(desc);
+    int score = a->IfType == IF_TYPE_ETHERNET_CSMACD ? 4 : a->IfType == IF_TYPE_IEEE80211 ? 2 : 1;
+    if (a->FirstGatewayAddress) score += 1;
+    if (virt) score -= 10;
     for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
       InterfaceInfo i;
       i.name = fname;
+      i.id = a->AdapterName;
       i.addr = ntohl(reinterpret_cast<sockaddr_in*>(u->Address.lpSockaddr)->sin_addr.s_addr);
       i.loopback = a->IfType == IF_TYPE_SOFTWARE_LOOPBACK;
+      i.virtual_adapter = virt;
+      i.score = score + link_local_penalty(i.addr);
       out.push_back(i);
     }
   }
@@ -136,6 +154,12 @@ std::vector<InterfaceInfo> list_interfaces() {
     info.name = i->ifa_name;
     info.addr = ntohl(reinterpret_cast<sockaddr_in*>(i->ifa_addr)->sin_addr.s_addr);
     info.loopback = (i->ifa_flags & IFF_LOOPBACK) != 0;
+    info.id = info.name;
+    info.virtual_adapter = posix_virtual_name(info.name);
+    // Wired names first (eth*, en* on Linux and macOS's en0), Wi-Fi next.
+    info.score = (info.name.compare(0, 2, "wl") == 0) ? 2 : 4;
+    if (info.virtual_adapter) info.score -= 10;
+    info.score += link_local_penalty(info.addr);
     out.push_back(info);
   }
   freeifaddrs(ifs);

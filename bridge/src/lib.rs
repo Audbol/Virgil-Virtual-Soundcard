@@ -61,25 +61,68 @@ impl log::Log for BridgeLogger {
             log::Level::Info => 2,
             _ => 3,
         };
-        let msg = format!("dante: {}", record.args());
-        if let Some(f) = *LOG_SINK.read().unwrap() {
-            if let Ok(c) = CString::new(msg) {
-                f(level, c.as_ptr());
-            }
-        } else {
-            eprintln!("{msg}");
+        // Inferno logs from its real-time threads: never write the log file
+        // there. Hand the line to the log thread; drop it if that is behind.
+        if let Some(tx) = LOG_TX.get() {
+            let _ = tx.try_send((level, format!("dante: {}", record.args())));
         }
     }
     fn flush(&self) {}
 }
 
 static LOGGER: BridgeLogger = BridgeLogger;
+static LOG_TX: std::sync::OnceLock<mpsc::SyncSender<(i32, String)>> = std::sync::OnceLock::new();
+
+/// Log thread: writes lines through the C sink, collapsing bursts of the
+/// same message (e.g. a send error per packet) into one line per second.
+fn start_log_thread() {
+    LOG_TX.get_or_init(|| {
+        let (tx, rx) = mpsc::sync_channel::<(i32, String)>(1024);
+        std::thread::Builder::new()
+            .name("virgil-dante-log".into())
+            .spawn(move || {
+                use std::time::{Duration, Instant};
+                let mut last: Option<(i32, String)> = None;
+                let mut repeats = 0u64;
+                let mut window = Instant::now();
+                let flush_repeats = |last: &Option<(i32, String)>, repeats: &mut u64| {
+                    if let (Some((lvl, msg)), true) = (last, *repeats > 0) {
+                        log_line(*lvl, &format!("{msg} (repeated {repeats} more times)"));
+                        *repeats = 0;
+                    }
+                };
+                loop {
+                    match rx.recv_timeout(Duration::from_millis(1000)) {
+                        Ok((lvl, msg)) => {
+                            if last.as_ref().map_or(false, |(_, m)| *m == msg) && window.elapsed() < Duration::from_secs(1) {
+                                repeats += 1;
+                                continue;
+                            }
+                            flush_repeats(&last, &mut repeats);
+                            log_line(lvl, &msg);
+                            last = Some((lvl, msg));
+                            window = Instant::now();
+                        }
+                        Err(mpsc::RecvTimeoutError::Timeout) => {
+                            flush_repeats(&last, &mut repeats);
+                            window = Instant::now();
+                        }
+                        Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                    }
+                }
+            })
+            .expect("log thread");
+        tx
+    });
+}
 
 fn log_line(level: i32, msg: &str) {
     if let Some(f) = *LOG_SINK.read().unwrap() {
         if let Ok(c) = CString::new(msg) {
             f(level, c.as_ptr());
         }
+    } else {
+        eprintln!("{msg}");
     }
 }
 
@@ -127,6 +170,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         None => return std::ptr::null_mut(),
     };
     *LOG_SINK.write().unwrap() = c.log;
+    start_log_thread();
     let _ = log::set_logger(&LOGGER);
     log::set_max_level(log::LevelFilter::Debug);
     if let Some(f) = c.mono_ns {

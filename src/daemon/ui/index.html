@@ -289,7 +289,7 @@ function fillForm() {
   const t = S.cfg;
   const ifSel = $("f-interface"); const cur = getKey(t, "device", "interface") || "";
   const opts = [`<option value="">Automatic (first active interface)</option>`].concat(
-    S.ifaces.filter(i => !i.loopback).map(i => `<option value="${esc(i.name)}">${esc(i.name)} — ${esc(i.address)}</option>`));
+    S.ifaces.filter(i => !i.loopback).map(i => `<option value="${esc(i.name)}">${esc(i.name)} — ${esc(i.address)}${i.virtual ? " (virtual adapter)" : ""}</option>`));
   if (cur && !S.ifaces.some(i => i.name === cur || i.address === cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not found)</option>`);
   ifSel.innerHTML = opts.join("");
   for (const id of FIELDS) {

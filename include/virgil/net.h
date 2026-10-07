@@ -18,13 +18,17 @@ std::string ipv4_to_string(uint32_t addr);
 bool is_multicast(uint32_t addr);
 
 // Pick the IPv4 address of a named interface ("eth0"), or validate a literal
-// address. Empty input picks the first non-loopback interface.
+// address. Empty input picks the most likely physical network interface:
+// wired over Wi-Fi, never a virtual adapter unless nothing else is up.
 bool resolve_interface(const std::string& name_or_ip, uint32_t* out);
 
 struct InterfaceInfo {
   std::string name;  // OS name ("eth0", "en0", "Ethernet 2")
   uint32_t addr = 0;
   bool loopback = false;
+  std::string id;                // adapter GUID on Windows, else the name
+  bool virtual_adapter = false;  // Hyper-V/WSL, VPN, container bridge, ...
+  int score = 0;                 // automatic choice prefers the highest
 };
 // Active IPv4 interfaces.
 std::vector<InterfaceInfo> list_interfaces();

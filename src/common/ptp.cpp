@@ -403,6 +403,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     delay_pending_ = false;
     have_pair_ = false;
     delay_count_ = 0;
+    window_count_ = 0;
     mean_path_delay_ = 0;
     next_delay_req_ns_ = now;
   }
@@ -483,6 +484,14 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   last_t2_ = t2;
   have_pair_ = true;
   if (delay_count_ == 0) return;  // need a path delay before steering
+  if (window_count_ == 0 || (t2 - t1) < (best_t2_ - best_t1_)) {
+    best_t1_ = t1;
+    best_t2_ = t2;
+  }
+  if (++window_count_ < std::max(1, opt_.sync_window)) return;
+  window_count_ = 0;
+  t1 = best_t1_;
+  t2 = best_t2_;
   const auto r = servo_.sample(t2, t1 + mean_path_delay_);
   if (r == PiServo::kOutlier) return;
   if (r == PiServo::kStep)

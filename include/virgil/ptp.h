@@ -144,6 +144,10 @@ class PtpClock : public ClockSource {
     std::string subdomain = "_DFLT";
     bool master_capable = false;  // only for networks without Dante hardware
     uint8_t stratum = 254;        // as master: loses against real devices
+    // Sync messages per servo update: the least-delayed of each group is
+    // used. Software receive timestamps are only ever late, never early, so
+    // this drops the scheduling hiccups (1 s at Dante's 4 Sync/s).
+    int sync_window = 4;
   };
 
   ~PtpClock() override { stop(); }
@@ -204,6 +208,8 @@ class PtpClock : public ClockSource {
   bool sync_pending_ = false;
   int64_t last_t1_ = 0, last_t2_ = 0;
   bool have_pair_ = false;
+  int64_t best_t1_ = 0, best_t2_ = 0;  // least-delayed Sync in the current window
+  int window_count_ = 0;
 
   // Delay measurement.
   uint16_t delay_seq_ = 0;
