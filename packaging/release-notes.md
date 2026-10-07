@@ -1,3 +1,5 @@
+**0.2.1:** fixes the ASIO driver on Windows. DAWs such as REAPER showed Virgil with no inputs or outputs ("device closed"), because the driver asked Windows for more access to the shared soundcard than ordinary, non-administrator apps get.
+
 **Virgil** (formerly DSV) is now a native Dante device. It appears in Dante Controller with its own transmit and receive channels, and you route it there like any other Dante device. AES67 mode is no longer needed or used. Dante support comes from [Inferno](https://github.com/teodly/inferno), an independent open-source implementation of the protocol.
 
 ## Downloads

@@ -57,9 +57,13 @@ bool SharedMemory::create(const std::string& name, size_t size) {
 
 bool SharedMemory::open(const std::string& name) {
   close();
-  HANDLE h = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, name.c_str());
+  // Ask only for what the section's DACL grants ordinary users (read/write).
+  // FILE_MAP_ALL_ACCESS would also request WRITE_DAC etc. and be refused for
+  // any app not running elevated, e.g. a DAW opening the ASIO driver.
+  const DWORD access = FILE_MAP_READ | FILE_MAP_WRITE;
+  HANDLE h = OpenFileMappingA(access, FALSE, name.c_str());
   if (!h) return false;
-  void* p = MapViewOfFile(h, FILE_MAP_ALL_ACCESS, 0, 0, 0);
+  void* p = MapViewOfFile(h, access, 0, 0, 0);
   if (!p) {
     CloseHandle(h);
     return false;

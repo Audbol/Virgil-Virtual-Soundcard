@@ -76,8 +76,12 @@ class VirgilAsio : public IASIO {
 
   // IASIO
   ASIOBool init(void*) override {
-    if (!client_.open() || !client_.daemon_alive()) {
-      set_error("virgild is not running. Start the Virgil service and reopen the driver.");
+    if (!client_.open()) {
+      set_error("Cannot open the Virgil soundcard: is the Virgil service running?");
+      return ASIOFalse;
+    }
+    if (!client_.daemon_alive()) {
+      set_error("The Virgil service is not running its audio engine. Restart it and reopen the driver.");
       client_.close();
       return ASIOFalse;
     }
