@@ -111,6 +111,7 @@ class PiServo {
     init_ = true;
     count_ = 0;
     good_ = 0;
+    big_ = 0;
     locked_ = false;
     rms_ = 0;
     first_local_ = last_local_ = 0;
@@ -128,6 +129,7 @@ class PiServo {
   bool locked_ = false;
   int count_ = 0;
   int good_ = 0;
+  int big_ = 0;  // consecutive samples beyond the step threshold
   double drift_ppb_ = 0;
   double rms_ = 0;
   int64_t last_local_ = 0;
@@ -162,6 +164,11 @@ class PtpClock : public ClockSource {
  private:
   void run();
   void handle_event(const uint8_t* p, size_t n, int64_t rx_ns);
+  // Logs the first packet from each sender (diagnostics for clocking issues).
+  void note_sender(const Endpoint& from, const uint8_t* p, size_t n, bool event_port);
+  uint32_t senders_[32] = {};
+  int sender_count_ = 0;
+  bool warned_no_master_ = false;
   void handle_general(const uint8_t* p, size_t n);
   void consider_master(const ptp1::PortId& src, const ptp1::ClockProps& props, int64_t now);
   void process_sync_pair(int64_t t1, int64_t t2);

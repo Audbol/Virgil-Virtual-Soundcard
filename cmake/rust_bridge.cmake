@@ -72,7 +72,7 @@ add_dependencies(virgil_dante virgil_dante_build)
 if(WIN32)
   set_property(TARGET virgil_dante PROPERTY INTERFACE_LINK_LIBRARIES
     iphlpapi advapi32 cfgmgr32 fwpuclnt gdi32 kernel32 msimg32 ntdll ole32 shell32
-    user32 winspool ws2_32 bcrypt userenv dbghelp synchronization)
+    user32 winspool ws2_32 bcrypt userenv dbghelp synchronization avrt winmm)
 elseif(APPLE)
   set_property(TARGET virgil_dante PROPERTY INTERFACE_LINK_LIBRARIES
     "-framework CoreFoundation" "-framework SystemConfiguration" "-framework Security"

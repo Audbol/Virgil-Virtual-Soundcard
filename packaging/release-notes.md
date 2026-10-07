@@ -1,3 +1,8 @@
+**0.2.3:** Windows timing and clock fixes from the first real Dante network test.
+- Fixes frequent "tx lag … dropout" errors: Windows 11 throttled the Virgil service's timers because it has no window. Virgil now opts out, and Inferno's transmit thread runs in the "Pro Audio" scheduling class.
+- One late clock packet no longer makes the clock jump by about 1 ms and back.
+- The log now names every PTP clock source Virgil hears, and warns if no Dante clock master shows up within 15 s.
+
 **0.2.2:** the Windows installer can now update the ASIO driver while a DAW has it loaded. Previously it failed with "Error opening file for writing".
 
 **0.2.1:** fixes the ASIO driver on Windows. DAWs such as REAPER showed Virgil with no inputs or outputs ("device closed"), because the driver asked Windows for more access to the shared soundcard than ordinary, non-administrator apps get.

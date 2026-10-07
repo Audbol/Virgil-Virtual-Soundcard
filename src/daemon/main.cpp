@@ -89,6 +89,7 @@ int status() {
 // again, while the process (and the panel) stay up.
 int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   if (on_started) on_started();
+  virgil::tune_process_timers();
 
   virgil::ControlServer control(&ctx);
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);

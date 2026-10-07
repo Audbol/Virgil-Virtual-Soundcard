@@ -87,6 +87,25 @@ bool set_realtime_priority(int, int64_t) {
   return h != nullptr;
 }
 
+void tune_process_timers() {
+  timeBeginPeriod(1);
+  // PROCESS_POWER_THROTTLING_STATE via SetProcessInformation (Windows 8+;
+  // the timer-resolution flag needs Windows 11). Looked up dynamically so
+  // older systems and SDK headers are fine.
+  struct Throttling {
+    ULONG Version, ControlMask, StateMask;
+  } st{1 /* CURRENT_VERSION */, 0x1 /* EXECUTION_SPEED */ | 0x4 /* IGNORE_TIMER_RESOLUTION */,
+       0 /* i.e. do not throttle either */};
+  using Fn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+  if (auto fn = reinterpret_cast<Fn>(reinterpret_cast<void*>(
+          GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetProcessInformation")))) {
+    if (!fn(GetCurrentProcess(), 4 /* ProcessPowerThrottling */, &st, sizeof st)) {
+      st.ControlMask = 0x1;  // pre-Windows 11: execution speed only
+      fn(GetCurrentProcess(), 4, &st, sizeof st);
+    }
+  }
+}
+
 bool lock_memory() {
   // Working-set locking on Windows is per-region; the rings are touched every
   // tick and stay resident. Raise the minimum working set as a hint.
@@ -185,6 +204,8 @@ bool set_realtime_priority(int priority, int64_t period_ns) {
 }
 
 bool lock_memory() { return mlockall(MCL_CURRENT | MCL_FUTURE) == 0; }
+
+void tune_process_timers() {}
 
 uint32_t process_id() { return uint32_t(getpid()); }
 

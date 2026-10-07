@@ -185,6 +185,10 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   if (dt <= 0 && first_local_ != 0) return kOutlier;
 
   if (std::llabs(err) > step_threshold_ns) {
+    // Once tracking, one late software timestamp (a descheduled receive
+    // thread on Windows) must not step the clock: only a run of them does.
+    if (count_ > 0 && ++big_ < 3) return kOutlier;
+    big_ = 0;
     m_.base_local = local;
     m_.base_ptp = master;
     count_ = 0;
@@ -199,6 +203,7 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   // ignore samples far outside the recent error envelope.
   if (locked_ && std::fabs(double(err)) > 6.0 * rms_ + 20000.0) return kOutlier;
 
+  big_ = 0;
   last_local_ = local;
   ++count_;
   if (count_ == 16 && local - first_local_ > 1000000000LL) {
@@ -294,6 +299,8 @@ void PtpClock::publish(const ClockModel& m) {
 }
 
 void PtpClock::run() {
+  // Receive timestamps are taken in software: wake promptly.
+  set_realtime_priority(75, 1000000);
   uint8_t buf[1500];
   while (running_) {
     const int ready = UdpSocket::wait_readable(event_, &general_, 20);
@@ -301,11 +308,13 @@ void PtpClock::run() {
       Endpoint from;
       int64_t rx = 0;
       const int n = event_.recv_from(buf, sizeof buf, &from, &rx);
+      if (n > 0) note_sender(from, buf, size_t(n), true);
       if (n > 0) handle_event(buf, size_t(n), rx);
     }
     if (ready & 2) {
       Endpoint from;
       const int n = general_.recv_from(buf, sizeof buf, &from);
+      if (n > 0) note_sender(from, buf, size_t(n), false);
       if (n > 0) handle_general(buf, size_t(n));
     }
     const int64_t now = mono_ns();
@@ -317,6 +326,14 @@ void PtpClock::run() {
       master_seen_ns_ = now;
       std::lock_guard<std::mutex> l(gm_mutex_);
       gm_string_.clear();
+    }
+    if (!have_master_ && !is_master_ && !opt_.master_capable && !warned_no_master_ &&
+        now - start_ns_ > 15000000000LL) {
+      warned_no_master_ = true;
+      VIRGIL_LOG_WARN("ptp: no Dante clock master heard after 15 s (%d PTP sender(s) seen); "
+                      "running on the local clock. Check that the Dante network is on this "
+                      "interface and the firewall allows UDP 319/320",
+                      sender_count_);
     }
     if (!have_master_ && !is_master_ && opt_.master_capable && now - master_seen_ns_ > 4000000000LL) {
       VIRGIL_LOG_INFO("ptp: no master found, acting as PTPv1 master (stratum %u)", opt_.stratum);
@@ -333,6 +350,29 @@ void PtpClock::run() {
       next_delay_req_ns_ = now + 750000000LL + (int64_t(std::rand()) % 500) * 1000000LL;
     }
   }
+}
+
+void PtpClock::note_sender(const Endpoint& from, const uint8_t* p, size_t n, bool event_port) {
+  if (from.addr == opt_.interface_addr) return;  // our own multicast, looped back
+  for (int i = 0; i < sender_count_; ++i)
+    if (senders_[i] == from.addr) return;
+  if (sender_count_ >= int(sizeof senders_ / sizeof senders_[0])) return;
+  senders_[sender_count_++] = from.addr;
+  const std::string ip = ipv4_to_string(from.addr);
+  if (n >= 2 && (p[0] & 0x0f) == 2) {
+    VIRGIL_LOG_WARN("ptp: %s sends PTPv2 (ignored; Dante clocking uses PTPv1)", ip.c_str());
+    return;
+  }
+  ptp1::Header h;
+  if (!ptp1::parse_header(p, n, &h)) {
+    VIRGIL_LOG_INFO("ptp: %s sent an unrecognised %zu-byte packet on port %d", ip.c_str(), n,
+                    event_port ? 319 : 320);
+    return;
+  }
+  char sub[17] = {};
+  std::memcpy(sub, h.subdomain, 16);
+  VIRGIL_LOG_INFO("ptp: hearing %s (clock %s, subdomain %s, message %u, %zu bytes)", ip.c_str(),
+                  ptp1::format_uuid(h.source.uuid).c_str(), sub, unsigned(h.control), n);
 }
 
 static bool same_subdomain(const ptp1::Header& h, const ptp1::Header& mine) {

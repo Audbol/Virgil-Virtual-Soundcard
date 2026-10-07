@@ -192,6 +192,24 @@ TEST(servo_after_reset_to) {
   CHECK_NEAR(servo.model().ratio, 1.0, 2e-6);
 }
 
+TEST(servo_ignores_single_late_timestamp) {
+  // A locked servo sees one sample 1.5 ms late (a descheduled receive thread):
+  // it must not step the clock, and must still step for a real, lasting jump.
+  PiServo servo;
+  int64_t local = 1000000000LL, master = 1700000000000000000LL;
+  for (int i = 0; i < 80; ++i, local += 250000000LL, master += 250000000LL) servo.sample(local, master);
+  CHECK(servo.locked());
+  CHECK(servo.sample(local + 1500000, master) == PiServo::kOutlier);
+  local += 250000000LL, master += 250000000LL;
+  CHECK(servo.sample(local, master) != PiServo::kStep);
+  for (int i = 0; i < 3; ++i) {
+    local += 250000000LL, master += 250000000LL;
+    const auto r = servo.sample(local, master + 5000000);
+    if (i < 2) CHECK(r == PiServo::kOutlier);
+    else CHECK(r == PiServo::kStep);
+  }
+}
+
 TEST(config_parse) {
   const char* text =
       "[device]\n"

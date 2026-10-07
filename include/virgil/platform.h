@@ -23,6 +23,11 @@ bool set_realtime_priority(int priority, int64_t period_ns);
 
 // Lock all current and future pages so the audio path never page-faults.
 bool lock_memory();
+// Process-wide timer setup for a background audio daemon. On Windows: 1 ms
+// timer resolution, and opt out of the power throttling with which Windows 11
+// ignores that request (and slows timers) for processes without a visible
+// window, e.g. services. No-op elsewhere.
+void tune_process_timers();
 
 uint32_t process_id();
 bool process_alive(uint32_t pid);
