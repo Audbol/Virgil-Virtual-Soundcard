@@ -1,0 +1,48 @@
+[package]
+name = "inferno_aoip"
+description = "Unofficial implementation of the Dante protocol (Audio over IP)"
+authors = ["Teo <teodly@lumifaza.org>"]
+license = "GPL-3.0-or-later OR AGPL-3.0-or-later"
+keywords = ["AoIP", "audio", "network", "dante", "audinate"]
+categories = ["multimedia::audio", "network-programming"]
+version = "0.5.0"
+edition = "2021"
+
+# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+
+[dependencies]
+searchfire = { path = "../searchfire" }
+bytebuffer = "2.1"
+hex = "0.4"
+binary-layout = "3.3"
+futures = "0.3"
+itertools = "0.12"
+log = "0.4"
+atomic_enum = "0.2"
+local-ip-address = "0.5"
+atomic = "0.6"
+rand = { version = "0.8", features = ["small_rng"] }
+toml = "0.8"
+platform-dirs = "0.3"
+clock-steering = "0.2"
+custom_error = "1.9"
+interprocess = { version = "1.2", features = ["tokio_support"] }
+thiserror = "1.0.57"
+thread-priority = "0.15"
+atomicbox = "0.4.0"
+mio = { version = "1.0.2", features = ["net", "os-ext", "os-poll"] }
+bool_vec = "0.2.1"
+bytemuck = "1.17.1"
+usrvclock = { path = "../usrvclock-rs" }
+arrayvec = "0.7.6"
+netdev = "0.32.0"
+binary_serde = { version = "1.0.24", features = ["std"] }
+env_logger = "0.11.8"
+
+[dependencies.serde]
+version = "1.0.159"
+features = ["derive"]
+
+[dependencies.tokio]
+version = "1.36"
+features = ["net", "time", "sync", "signal"]

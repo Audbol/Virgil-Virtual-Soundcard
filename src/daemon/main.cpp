@@ -11,7 +11,6 @@
 #include "dsv/log.h"
 #include "dsv/net.h"
 #include "dsv/platform.h"
-#include "dsv/sap.h"
 #include "dsv/shm.h"
 #include "dsv/shm_layout.h"
 #include "control.h"
@@ -44,11 +43,9 @@ void usage() {
       "  -i, --interface IF    network interface name or IPv4 address\n"
       "  -n, --name NAME       device name\n"
       "      --free-run        do not use PTP; run on the local clock\n"
-      "      --packet-time US  AES67 packet time in microseconds (125/250/333/1000)\n"
-      "      --latency US      receive latency in microseconds\n"
-      "      --tx-lead US      playback safety margin in microseconds\n"
+      "      --latency US      Dante receive latency in microseconds\n"
+      "      --tx-latency US   Dante transmit latency in microseconds\n"
       "      --control-port N  web control panel port on 127.0.0.1 (0 = off; default 8480)\n"
-      "      --discover        list SAP-announced AES67/Dante streams and exit\n"
       "      --status          print statistics of a running daemon and exit\n"
       "      --log FILE        append log output to FILE\n"
 #if defined(_WIN32)
@@ -56,27 +53,6 @@ void usage() {
 #endif
       "  -v, --verbose         debug logging\n"
       "  -q, --quiet           warnings and errors only\n");
-}
-
-int discover(const std::string& iface_name) {
-  uint32_t iface;
-  if (!dsv::resolve_interface(iface_name, &iface)) {
-    std::fprintf(stderr, "cannot find interface '%s'\n", iface_name.c_str());
-    return 1;
-  }
-  dsv::SapService sap;
-  if (!sap.start(iface)) return 1;
-  std::printf("listening for SAP announcements on %s for 35 s...\n",
-              dsv::ipv4_to_string(iface).c_str());
-  const int64_t end = dsv::mono_ns() + 35000000000LL;
-  while (!g_quit && dsv::mono_ns() < end) dsv::sleep_until_ns(dsv::mono_ns() + 200000000LL);
-  for (const auto& s : sap.sessions()) {
-    std::printf("\"%s\"\n    %s:%u  %s/%u/%u  ptime %.3f ms  mediaclk offset %u  from %s\n",
-                s.session_name.c_str(), s.connection_address.c_str(), s.port,
-                s.encoding.c_str(), s.sample_rate, s.channels, s.ptime_us / 1000.0, s.ts_offset,
-                s.origin_address.c_str());
-  }
-  return 0;
 }
 
 int status() {
@@ -94,11 +70,8 @@ int status() {
               h->ptp_offset_ns.load() / 1000.0);
   std::printf("format       %u Hz, %u playback / %u capture channels\n", h->sample_rate,
               h->tx_channels, h->rx_channels);
-  std::printf("timing       packet %u frames, rx latency %u frames, tx lead %u frames\n",
+  std::printf("timing       tick %u frames, capture lag %u frames, playback lead %u frames\n",
               h->period_frames, h->rx_latency_frames, h->tx_lead_frames);
-  std::printf("packets      tx %llu  rx %llu  lost %llu  late %llu\n",
-              (unsigned long long)h->tx_packets.load(), (unsigned long long)h->rx_packets.load(),
-              (unsigned long long)h->rx_lost.load(), (unsigned long long)h->rx_late.load());
   std::printf("scheduling   late ticks %llu, clock steps %llu\n",
               (unsigned long long)h->late_ticks.load(), (unsigned long long)h->clock_steps.load());
   for (uint32_t i = 0; i < dsv::kMaxTxClients; ++i) {
@@ -137,9 +110,6 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
       dsv::sleep_until_ns(dsv::mono_ns() + 100000000LL);
   };
 
-  // Discovery outlives engine restarts: devices re-announce only every ~30 s.
-  std::unique_ptr<dsv::SapService> sap;
-  uint32_t sap_iface = 0;
   // The soundcard apps attach to also outlives engine restarts.
   dsv::SharedMemory soundcard;
 
@@ -171,19 +141,6 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
       dsv::clear_last_error();
       engine = std::make_unique<dsv::Engine>(cfg);
       engine->set_shared_memory(&soundcard);
-      if (cfg.sap) {
-        if (!sap || sap_iface != addr) {
-          sap.reset();
-          auto s = std::make_unique<dsv::SapService>();
-          if (s->start(addr)) {
-            sap = std::move(s);
-            sap_iface = addr;
-          }
-        }
-        engine->set_shared_sap(sap.get());
-      } else {
-        sap.reset();
-      }
       if (engine->start()) {
         std::lock_guard<std::mutex> l(ctx.mutex);
         ctx.engine = engine.get();
@@ -234,7 +191,6 @@ int run_daemon(dsv::DaemonContext& ctx, void (*on_started)()) {
     }
   }
   control.stop();
-  sap.reset();  // sends deletions for anything still announced
   if (soundcard.is_open())
     static_cast<dsv::ShmHeader*>(soundcard.data())->state.store(dsv::kStateStopped);
   return g_quit ? 0 : rc;
@@ -280,9 +236,9 @@ void WINAPI service_main(DWORD, LPSTR*) {
 int main(int argc, char** argv) {
   dsv::Config& cfg = g_ctx.cfg;
   std::string config_path, iface_override, name_override, log_path;
-  bool free_run = false, do_discover = false, do_status = false, loaded = false;
+  bool free_run = false, do_status = false;
   bool service = false;
-  uint32_t ptime = 0, latency = 0, tx_lead = 0;
+  uint32_t latency = 0, tx_latency = 0;
   long control_port = -1;
 
   for (int i = 1; i < argc; ++i) {
@@ -298,10 +254,8 @@ int main(int argc, char** argv) {
     else if (a == "-i" || a == "--interface") iface_override = next();
     else if (a == "-n" || a == "--name") name_override = next();
     else if (a == "--free-run") free_run = true;
-    else if (a == "--packet-time") ptime = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
     else if (a == "--latency") latency = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
-    else if (a == "--tx-lead") tx_lead = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
-    else if (a == "--discover") do_discover = true;
+    else if (a == "--tx-latency") tx_latency = uint32_t(std::strtoul(next().c_str(), nullptr, 10));
     else if (a == "--log") log_path = next();
     else if (a == "--control-port") control_port = std::strtol(next().c_str(), nullptr, 10);
     else if (a == "--service") service = true;
@@ -334,25 +288,16 @@ int main(int argc, char** argv) {
       std::fprintf(stderr, "%s: %s\n", config_path.c_str(), err.c_str());
       return 2;
     }
-    loaded = true;
   }
   if (!iface_override.empty()) cfg.interface = iface_override;
-  if (do_discover) return discover(cfg.interface);
   if (!name_override.empty()) cfg.device_name = name_override;
   if (free_run) cfg.clock = "free";
-  if (ptime) cfg.packet_time_us = ptime;
-  if (latency) cfg.rx_latency_us = latency;
-  if (tx_lead) cfg.tx_lead_us = tx_lead;
+  if (latency) cfg.latency_us = latency;
+  if (tx_latency) cfg.tx_latency_us = tx_latency;
   if (control_port >= 0 && control_port <= 65535) cfg.control_port = uint32_t(control_port);
   g_ctx.config_path = config_path;
 
-  if (!loaded || (cfg.tx.empty() && cfg.rx.empty())) {
-    // Default: one 8-channel AES67 flow each way, Dante-compatible format.
-    dsv::StreamConfig tx;
-    tx.address = "239.69.83.67";
-    tx.channels = cfg.tx_channels < 8 ? cfg.tx_channels : 8;
-    if (tx.channels) cfg.tx.push_back(tx);
-  }
+  for (const auto& n : cfg.notes) DSV_LOG_WARN("config: %s", n.c_str());
 
   if (service) {
 #if defined(_WIN32)

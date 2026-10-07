@@ -47,12 +47,11 @@ endif()
 add_library(dsv_net STATIC
   src/common/log.cpp
   src/common/net.cpp
-  src/common/sdp.cpp
-  src/common/sap.cpp
   src/common/ptp.cpp
   src/common/config.cpp
   src/daemon/engine.cpp)
-target_link_libraries(dsv_net PUBLIC dsv_client)
+include(cmake/rust_bridge.cmake)
+target_link_libraries(dsv_net PUBLIC dsv_client virgil_dante)
 if(WIN32)
   target_link_libraries(dsv_net PUBLIC ws2_32 iphlpapi)
 endif()

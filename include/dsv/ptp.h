@@ -1,11 +1,11 @@
-// IEEE 1588-2008 (PTPv2) ordinary clock over UDP/IPv4, AES67 media profile.
+// PTPv1 (IEEE 1588-2002) ordinary clock over UDP/IPv4: the clock protocol
+// native Dante devices use (subdomain "_DFLT").
 //
-// Slave: E2E delay mechanism, two-step and one-step masters, best-master
-// selection from Announce messages, software timestamps (kernel receive
-// timestamps on Linux). Optional fallback master when no grandmaster exists.
-//
-// Dante devices speak PTPv1 natively; with AES67 mode enabled in Dante
-// Controller they bridge their clock onto PTPv2 domain 0, which this follows.
+// Follower: E2E delay mechanism, two-step ("assist") and one-step masters,
+// best master chosen from the properties carried in Sync messages, software
+// timestamps (kernel receive timestamps on Linux). Like Dante Virtual
+// Soundcard, Virgil normally never becomes master; `master_capable` exists
+// for networks with only virtual devices (and for tests).
 #pragma once
 
 #include <array>
@@ -20,79 +20,83 @@
 
 namespace dsv {
 
-namespace ptp {
+namespace ptp1 {
 
 constexpr uint16_t kEventPort = 319;
 constexpr uint16_t kGeneralPort = 320;
-constexpr uint32_t kPrimaryGroup = 0xE0000181;  // 224.0.1.129
-constexpr size_t kHeaderBytes = 34;
+constexpr uint32_t kDefaultGroup = 0xE0000181;  // 224.0.1.129 (subdomain _DFLT)
+constexpr size_t kHeaderBytes = 40;
+constexpr size_t kSyncBytes = 124;      // Sync and Delay_Req
+constexpr size_t kFollowUpBytes = 52;
+constexpr size_t kDelayRespBytes = 60;
 
-enum MessageType : uint8_t {
-  kSync = 0x0,
-  kDelayReq = 0x1,
-  kFollowUp = 0x8,
-  kDelayResp = 0x9,
-  kAnnounce = 0xB,
-};
+enum Control : uint8_t { kSync = 0, kDelayReq = 1, kFollowUp = 2, kDelayResp = 3 };
+enum MessageType : uint8_t { kEventMessage = 1, kGeneralMessage = 2 };
+constexpr uint8_t kFlagAssist = 0x08;   // two-step: precise time follows in Follow_Up
 
-using ClockId = std::array<uint8_t, 8>;
+using Uuid = std::array<uint8_t, 6>;
 
 struct PortId {
-  ClockId clock{};
+  Uuid uuid{};
   uint16_t port = 0;
-  bool operator==(const PortId& o) const { return clock == o.clock && port == o.port; }
+  bool operator==(const PortId& o) const { return uuid == o.uuid && port == o.port; }
   bool operator!=(const PortId& o) const { return !(*this == o); }
 };
 
+struct Header {
+  char subdomain[16] = {'_', 'D', 'F', 'L', 'T'};
+  uint8_t message_type = kEventMessage;
+  PortId source;
+  uint16_t sequence = 0;
+  uint8_t control = kSync;
+  uint8_t flags = 0;  // second flags octet (LI61, LI59, BC, ASSIST, ...)
+};
+
+// Grandmaster / clock properties carried in Sync (and echoed in Delay_Req).
+struct ClockProps {
+  Uuid gm_uuid{};
+  uint16_t gm_port = 0;
+  uint16_t gm_sequence = 0;
+  uint8_t stratum = 255;
+  char identifier[4] = {'D', 'F', 'L', 'T'};
+  int16_t variance = 0;
+  bool preferred = false;
+  bool boundary_clock = false;
+  int8_t sync_interval = 0;  // log2 seconds
+};
+
 struct Timestamp {
-  uint64_t seconds = 0;  // 48 bits on the wire
+  uint32_t seconds = 0;
   uint32_t nanoseconds = 0;
   int64_t ns() const { return int64_t(seconds) * 1000000000LL + nanoseconds; }
   static Timestamp from_ns(int64_t ns) {
-    return {uint64_t(ns / 1000000000LL), uint32_t(ns % 1000000000LL)};
+    return {uint32_t(uint64_t(ns) / 1000000000ULL), uint32_t(uint64_t(ns) % 1000000000ULL)};
   }
 };
 
-struct Header {
-  uint8_t type = 0;
-  uint8_t version = 2;
-  uint16_t length = 0;
-  uint8_t domain = 0;
-  uint16_t flags = 0;
-  int64_t correction = 0;  // scaled ns (ns * 2^16)
-  PortId source;
-  uint16_t sequence = 0;
-  uint8_t control = 0;
-  int8_t log_interval = 0;
-
-  bool two_step() const { return (flags & 0x0200) != 0; }
-  int64_t correction_ns() const { return correction >> 16; }
-};
-
-struct Announce {
-  int16_t utc_offset = 37;
-  uint8_t priority1 = 128;
-  uint8_t clock_class = 248;
-  uint8_t clock_accuracy = 0xFE;
-  uint16_t variance = 0xFFFF;
-  uint8_t priority2 = 128;
-  ClockId grandmaster{};
-  uint16_t steps_removed = 0;
-  uint8_t time_source = 0xA0;  // internal oscillator
-};
-
 bool parse_header(const uint8_t* p, size_t len, Header* h);
-size_t write_header(uint8_t* p, const Header& h);
+void write_header(uint8_t* p, const Header& h);
 Timestamp read_timestamp(const uint8_t* p);
 void write_timestamp(uint8_t* p, const Timestamp& t);
-bool parse_announce(const uint8_t* p, size_t len, Announce* a);
-size_t write_announce(uint8_t* p, const Header& h, const Announce& a);
-// IEEE 1588 dataset comparison: < 0 if a is the better master.
-int compare_announce(const Announce& a, const PortId& a_port, const Announce& b,
-                     const PortId& b_port);
-std::string format_clock_id(const ClockId& id);  // XX-XX-XX-XX-XX-XX-XX-XX
 
-}  // namespace ptp
+// Sync / Delay_Req body (bytes 40..123).
+bool parse_sync(const uint8_t* p, size_t len, Timestamp* origin, ClockProps* props);
+size_t write_sync(uint8_t* p, const Header& h, const Timestamp& origin, const ClockProps& props,
+                  const PortId& parent);
+// Follow_Up (bytes 40..51).
+bool parse_follow_up(const uint8_t* p, size_t len, uint16_t* associated_seq, Timestamp* precise);
+size_t write_follow_up(uint8_t* p, const Header& h, uint16_t associated_seq, const Timestamp& t);
+// Delay_Resp (bytes 40..59).
+bool parse_delay_resp(const uint8_t* p, size_t len, Timestamp* receipt, PortId* requester,
+                      uint16_t* requester_seq);
+size_t write_delay_resp(uint8_t* p, const Header& h, const Timestamp& receipt,
+                        const PortId& requester, uint16_t requester_seq);
+
+// Best master: < 0 if a is better than b (stratum, preferred, variance, uuid).
+int compare_masters(const ClockProps& a, const PortId& ap, const ClockProps& b, const PortId& bp);
+std::string format_uuid(const Uuid& u);  // 00:1d:c1:12:34:56
+
+}  // namespace ptp1
 
 // PI servo turning (local, master) samples into a phase-continuous ClockModel.
 class PiServo {
@@ -129,10 +133,9 @@ class PtpClock : public ClockSource {
  public:
   struct Options {
     uint32_t interface_addr = 0;
-    uint8_t domain = 0;
-    bool master_capable = true;  // become GM if nobody else is around
-    uint8_t priority1 = 250;     // lose against any real grandmaster
-    uint8_t priority2 = 250;
+    std::string subdomain = "_DFLT";
+    bool master_capable = false;  // only for networks without Dante hardware
+    uint8_t stratum = 254;        // as master: loses against real devices
   };
 
   ~PtpClock() override { stop(); }
@@ -144,17 +147,24 @@ class PtpClock : public ClockSource {
   std::string grandmaster() const override;
   int64_t last_offset_ns() const override { return offset_ns_.load(); }
 
+  // Called whenever the clock model changes (Virgil feeds Inferno from it).
+  void set_listener(void (*fn)(const ClockModel&, void*), void* ctx) {
+    listener_ = fn;
+    listener_ctx_ = ctx;
+  }
+
  private:
   void run();
-  void handle_event(const uint8_t* p, size_t n, int64_t rx_ns, const Endpoint& from);
-  void handle_general(const uint8_t* p, size_t n, int64_t rx_ns);
+  void handle_event(const uint8_t* p, size_t n, int64_t rx_ns);
+  void handle_general(const uint8_t* p, size_t n);
+  void consider_master(const ptp1::PortId& src, const ptp1::ClockProps& props, int64_t now);
   void process_sync_pair(int64_t t1, int64_t t2);
   void send_delay_req();
   void master_duties(int64_t now);
-  void become_master();
-  void select_master(int64_t now);
+  void publish(const ClockModel& m);
 
   Options opt_;
+  ptp1::Header proto_;  // template header (subdomain, our identity)
   UdpSocket event_, general_;
   std::thread thread_;
   std::atomic<bool> running_{false};
@@ -162,12 +172,14 @@ class PtpClock : public ClockSource {
   std::atomic<int64_t> offset_ns_{0};
   ClockModelCell cell_;
   PiServo servo_;
-  ptp::PortId self_;
+  ptp1::PortId self_;
+  void (*listener_)(const ClockModel&, void*) = nullptr;
+  void* listener_ctx_ = nullptr;
 
-  // Best foreign master.
+  // Current master.
   bool have_master_ = false;
-  ptp::PortId master_;
-  ptp::Announce master_announce_;
+  ptp1::PortId master_;
+  ptp1::ClockProps master_props_;
   int64_t master_seen_ns_ = 0;
   int64_t start_ns_ = 0;
   mutable std::mutex gm_mutex_;
@@ -176,7 +188,6 @@ class PtpClock : public ClockSource {
   // Sync / Follow_Up pairing.
   uint16_t sync_seq_ = 0;
   int64_t sync_rx_ns_ = 0;
-  int64_t sync_correction_ns_ = 0;
   bool sync_pending_ = false;
   int64_t last_t1_ = 0, last_t2_ = 0;
   bool have_pair_ = false;
@@ -192,8 +203,8 @@ class PtpClock : public ClockSource {
 
   // Master mode.
   bool is_master_ = false;
-  uint16_t m_sync_seq_ = 0, m_announce_seq_ = 0;
-  int64_t next_sync_ns_ = 0, next_announce_ns_ = 0;
+  uint16_t m_sync_seq_ = 0;
+  int64_t next_sync_ns_ = 0;
 };
 
 }  // namespace dsv

@@ -1,0 +1,12 @@
+# Virgil replacement for Inferno's `usrvclock` crate (MIT OR Apache-2.0 upstream).
+# Upstream receives clock overlays from an external PTP daemon over a Unix
+# socket, which only works on Unix. Virgil runs its own PTP follower inside
+# the daemon and hands overlays to Inferno directly, on every OS.
+[package]
+name = "usrvclock"
+version = "0.2.0-virgil"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+
+[dependencies]
+tokio = { version = "1.38.1", features = ["sync"] }

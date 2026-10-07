@@ -1,0 +1,40 @@
+// C interface of the Virgil <-> Inferno bridge (bridge/src/lib.rs).
+#pragma once
+
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct VgDanteConfig {
+  const char* name;      // device name shown in Dante Controller (<= 31 chars)
+  const char* bind_ip;   // IPv4 address of the Dante network interface
+  uint32_t sample_rate;  // 44100 / 48000 / 88200 / 96000
+  uint32_t tx_channels;  // channels this computer sends to the network
+  uint32_t rx_channels;  // channels this computer receives
+  uint32_t tx_latency_ns;
+  uint32_t rx_latency_ns;
+  // Interleaved 32-bit sample rings indexed by media frame (frame & (frames-1)),
+  // owned by the caller and valid until vg_dante_stop() returns.
+  int32_t* tx_ring;
+  uint32_t tx_ring_frames;
+  int32_t* rx_ring;
+  uint32_t rx_ring_frames;
+  // Monotonic clock the PTP overlay refers to (dsv::mono_ns).
+  int64_t (*mono_ns)(void);
+  // Log sink (level 0 error .. 3 debug); may be NULL.
+  void (*log)(int level, const char* message);
+} VgDanteConfig;
+
+// Starts the Dante device. Returns an opaque handle, or NULL on failure.
+void* vg_dante_start(const VgDanteConfig* config);
+// Publishes the PTP clock: ptp_ns = t + shift + (t - last_sync) * freq_scale,
+// t being mono_ns(). Call whenever the servo updates.
+void vg_dante_set_clock(int64_t last_sync, int64_t shift, double freq_scale);
+// Stops the device and releases the rings.
+void vg_dante_stop(void* handle);
+
+#ifdef __cplusplus
+}
+#endif

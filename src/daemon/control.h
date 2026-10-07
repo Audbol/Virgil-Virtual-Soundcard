@@ -37,7 +37,6 @@ class ControlServer {
  private:
   HttpResponse handle(const HttpRequest& r);
   HttpResponse status_json();
-  HttpResponse sessions_json();
   HttpResponse interfaces_json();
   HttpResponse get_config();
   HttpResponse save_config(const HttpRequest& r);

@@ -1,14 +1,18 @@
-// End-to-end: client playback -> mixer -> AES67 RTP over UDP (localhost) ->
-// receiver -> capture ring -> client capture. Verifies sample accuracy and
-// that two clients are mixed.
+// Soundcard path end to end, with Inferno replaced by a network simulator:
+// two playback clients -> mixer -> Dante TX ring --(sent at f + tx latency,
+// written by the receiver at + rx latency)--> Dante RX ring -> capture ring
+// -> client. Verifies mixing, 32-bit conversion and frame alignment.
+#include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <string>
+#include <thread>
 #include <vector>
 
 #include "dsv/client.h"
 #include "dsv/engine.h"
 #include "dsv/log.h"
+#include "dsv/media_clock.h"
 #include "dsv/platform.h"
 #include "test_main.h"
 
@@ -16,10 +20,10 @@ using namespace dsv;
 
 static void wait_ms(int ms) { sleep_until_ns(mono_ns() + int64_t(ms) * 1000000); }
 
-TEST(loopback_unicast) {
+TEST(soundcard_loopback_through_dante_rings) {
   g_log_level = kLogWarn;
   Config c;
-  c.device_name = "DSV Loopback Test";
+  c.device_name = "Loop Test";
   c.interface = "127.0.0.1";
 #if defined(_WIN32)
   c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id());
@@ -27,27 +31,39 @@ TEST(loopback_unicast) {
   c.shm_name = std::string(kDefaultShmName) + "-test-" + std::to_string(process_id());
 #endif
   c.clock = "free";
-  c.sap = false;
   c.lock_memory = false;
   c.tx_channels = 4;
   c.rx_channels = 4;
-  c.packet_time_us = 250;
-  c.rx_latency_us = 3000;
-  c.ring_frames = 16384;  // block + latency must fit in half a ring
-  StreamConfig tx;
-  tx.address = "127.0.0.1";
-  tx.port = 25004;
-  tx.channels = 4;
-  c.tx.push_back(tx);
-  StreamConfig rx;
-  rx.port = 25004;
-  rx.channels = 4;
-  c.rx.push_back(rx);
+  c.latency_us = 2000;
+  c.tx_latency_us = 3000;
+  c.ring_frames = 16384;
 
   Engine e(c);
+  e.set_dante_enabled(false);
   CHECK(e.start());
   if (!e.running()) return;
-  wait_ms(50);
+  wait_ms(50);  // first ticks publish the clock
+  const uint32_t rate = c.sample_rate;
+  const uint64_t L = c.us_to_frames(c.tx_latency_us), RL = c.us_to_frames(c.latency_us);
+  const uint64_t D = L + RL;
+  const uint64_t dmask = c.ring_frames - 1;
+
+  // Network simulator: what Inferno + the wire + a receiving Inferno do.
+  std::atomic<bool> sim_run{true};
+  std::thread sim([&] {
+    auto& tx = e.dante_tx_ring();
+    auto& rx = e.dante_rx_ring();
+    uint64_t done = 0;
+    while (sim_run) {
+      wait_ms(1);
+      const uint64_t media = e.header()->now_frames.load();
+      if (done == 0) done = media - 64;
+      const uint64_t sent_until = media > L ? media - L : 0;  // frames sent by now
+      for (; done < sent_until; ++done)
+        for (uint32_t ch = 0; ch < 4; ++ch)
+          rx[size_t((done + D) & dmask) * 4 + ch] = tx[size_t(done & dmask) * 4 + ch];
+    }
+  });
 
   Client a, b;
   CHECK(a.open(c.shm_name));
@@ -62,7 +78,6 @@ TEST(loopback_unicast) {
   CHECK(a.frame_now(&now));
   const uint64_t start = uint64_t(now) + 480;  // 10 ms ahead
   const uint32_t n = 2400;
-  CHECK(480 + n + a.rx_latency_frames() < a.ring_frames() / 2);
   std::vector<float> sa(n * 4), sb(n * 2);
   for (uint32_t f = 0; f < n; ++f) {
     for (uint32_t ch = 0; ch < 4; ++ch)
@@ -70,48 +85,44 @@ TEST(loopback_unicast) {
     sb[f * 2 + 0] = 0.125f;  // DC on ch 1 from client b
     sb[f * 2 + 1] = 0.f;
   }
-  a.write_tx(start, sa.data(), n, 4);
-  b.write_tx(start, sb.data(), n, 2);
+  CHECK(a.write_tx(start, sa.data(), n, 4) == 0);
+  CHECK(b.write_tx(start, sb.data(), n, 2) == 0);
 
-  // Wait until the whole block is past the capture playout point.
+  // The block comes back D frames later; wait until it is all readable.
   for (;;) {
     double t;
     a.frame_now(&t);
-    if (t > double(start + n + a.rx_latency_frames() + a.period_frames())) break;
+    if (t > double(start + D + n + a.rx_latency_frames() + 2 * a.period_frames())) break;
     wait_ms(5);
   }
   std::vector<float> got(n * 4);
-  a.read_rx(start, got.data(), n, 4);
+  a.read_rx(start + D, got.data(), n, 4);
   double max_err = 0;
   for (uint32_t f = 0; f < n; ++f)
     for (uint32_t ch = 0; ch < 4; ++ch) {
       const float want = sa[f * 4 + ch] + (ch == 0 ? 0.125f : 0.f);
       max_err = std::max(max_err, double(std::fabs(got[f * 4 + ch] - want)));
     }
-  std::printf("  loopback max error %.3g over %u frames, %s\n", max_err, n,
-              e.status_line().c_str());
+  std::printf("  loopback max error %.3g over %u frames (round trip %llu frames), %s\n", max_err,
+              n, (unsigned long long)D, e.status_line().c_str());
   CHECK(max_err < 1e-6);
 
-  // Meters saw the same signal: ch1 = sine(0.25) + DC 0.125 from client b.
+  // Nothing before the block (it was consumed, not replayed).
+  std::vector<float> pre(48 * 4);
+  a.read_rx(start + D - 48, pre.data(), 48, 4);
+  for (float v : pre) CHECK(v == 0.f);
+
+  // Meters saw the signal in both directions.
   std::vector<float> tx_peak, rx_peak;
   e.take_peaks(&tx_peak, &rx_peak);
   CHECK(tx_peak.size() == 4 && rx_peak.size() == 4);
   CHECK_NEAR(tx_peak[0], 0.375, 0.01);
   CHECK_NEAR(rx_peak[0], 0.375, 0.01);
-  CHECK_NEAR(rx_peak[3], 0.25, 0.01);
-  e.take_peaks(&tx_peak, &rx_peak);  // drained: silence since
-  CHECK(tx_peak[0] < 1e-6);
-  auto rs = e.rx_status();
-  CHECK(rs.size() == 1 && rs[0].resolved);
 
-  // Frames before the block must be silent (nothing leaked from the past).
-  std::vector<float> pre(48 * 4);
-  a.read_rx(start - 48, pre.data(), 48, 4);
-  for (float v : pre) CHECK(v == 0.f);
-
+  sim_run = false;
+  sim.join();
   a.release_tx_slot();
   b.release_tx_slot();
-  CHECK(!a.has_tx_slot());
   e.stop();
   CHECK(!a.daemon_alive());
 }

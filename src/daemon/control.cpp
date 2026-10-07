@@ -156,7 +156,6 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
       return resp;
     }
     if (r.path == "/api/status") return status_json();
-    if (r.path == "/api/sessions") return sessions_json();
     if (r.path == "/api/interfaces") return interfaces_json();
     if (r.path == "/api/config") return get_config();
     return json_error(404, "not found");
@@ -202,24 +201,20 @@ HttpResponse ControlServer::status_json() {
   j.kv("sample_rate", c.sample_rate);
   j.kv("tx_channels", c.tx_channels);
   j.kv("rx_channels", c.rx_channels);
-  j.kv("packet_time_us", c.packet_time_us);
-  j.kv("latency_us", c.rx_latency_us);
-  j.kv("tx_lead_us", h ? uint32_t(uint64_t(h->tx_lead_frames) * 1000000 / c.sample_rate)
-                       : c.tx_lead_us);
+  j.kv("latency_us", c.latency_us);
+  j.kv("tx_latency_us", c.tx_latency_us);
+  j.kvb("dante", e ? e->dante_running() : false);
   j.end_obj();
 
   j.key("clock").begin_obj();
   j.kv("state", h ? state_name(h->state.load()) : "stopped");
   j.kv("offset_us", h ? double(h->ptp_offset_ns.load()) / 1000.0 : 0.0);
   j.kv("grandmaster", e ? e->grandmaster() : std::string());
+  j.kv("source", c.clock);
   j.end_obj();
 
   j.key("counters").begin_obj();
   if (h) {
-    j.kv("tx_packets", (unsigned long long)h->tx_packets.load());
-    j.kv("rx_packets", (unsigned long long)h->rx_packets.load());
-    j.kv("rx_lost", (unsigned long long)h->rx_lost.load());
-    j.kv("rx_late", (unsigned long long)h->rx_late.load());
     j.kv("late_ticks", (unsigned long long)h->late_ticks.load());
     j.kv("clock_steps", (unsigned long long)h->clock_steps.load());
   }
@@ -233,31 +228,6 @@ HttpResponse ControlServer::status_json() {
       if (!pid) continue;
       j.begin_obj().kv("slot", i).kv("pid", pid).kv("name", std::string(s.name));
       j.kvb("active", s.active.load() != 0).end_obj();
-    }
-  }
-  j.end_arr();
-
-  j.key("tx_flows").begin_arr();
-  for (const auto& s : c.tx) {
-    j.begin_obj().kv("name", s.name).kv("address", s.address).kv("port", uint32_t(s.port));
-    j.kv("first_channel", s.first_channel).kv("channels", s.channels);
-    j.kv("encoding", s.encoding).end_obj();
-  }
-  j.end_arr();
-
-  j.key("rx_flows").begin_arr();
-  if (e) {
-    for (const auto& st : e->rx_status()) {
-      j.begin_obj().kv("sap_name", st.cfg.sap_name).kv("address", st.address);
-      j.kv("port", uint32_t(st.port)).kv("first_channel", st.cfg.first_channel);
-      j.kv("channels", st.cfg.channels).kvb("resolved", st.resolved);
-      j.kvb("receiving", st.receiving).end_obj();
-    }
-  } else {
-    for (const auto& s : c.rx) {
-      j.begin_obj().kv("sap_name", s.sap_name).kv("address", s.address);
-      j.kv("port", uint32_t(s.port)).kv("first_channel", s.first_channel);
-      j.kv("channels", s.channels).kvb("resolved", false).kvb("receiving", false).end_obj();
     }
   }
   j.end_arr();
@@ -279,25 +249,6 @@ HttpResponse ControlServer::status_json() {
   j.end_obj();
 
   j.end_obj();
-  return {200, "application/json", j.take(), ""};
-}
-
-HttpResponse ControlServer::sessions_json() {
-  std::vector<SdpInfo> sessions;
-  {
-    std::lock_guard<std::mutex> l(ctx_->mutex);
-    if (ctx_->engine) sessions = ctx_->engine->discovered();
-  }
-  Json j;
-  j.begin_arr();
-  for (const auto& s : sessions) {
-    j.begin_obj().kv("name", s.session_name).kv("info", s.session_info);
-    j.kv("address", s.connection_address).kv("port", uint32_t(s.port));
-    j.kv("origin", s.origin_address).kv("encoding", s.encoding);
-    j.kv("sample_rate", s.sample_rate).kv("channels", s.channels);
-    j.kv("ptime_us", s.ptime_us).kv("grandmaster", s.ptp_grandmaster).end_obj();
-  }
-  j.end_arr();
   return {200, "application/json", j.take(), ""};
 }
 

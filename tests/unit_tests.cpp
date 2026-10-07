@@ -5,11 +5,9 @@
 #include "dsv/client.h"
 #include "dsv/config.h"
 #include "dsv/media_clock.h"
+#include "dsv/platform.h"
 #include "dsv/ptp.h"
-#include "dsv/rtp.h"
 #include "dsv/sample_convert.h"
-#include "dsv/sap.h"
-#include "dsv/sdp.h"
 #include "dsv/shm_layout.h"
 #include "test_main.h"
 
@@ -38,38 +36,6 @@ TEST(l16_roundtrip) {
   }
 }
 
-TEST(rtp_header) {
-  uint8_t buf[64] = {};
-  RtpHeader h;
-  h.payload_type = 97;
-  h.sequence = 0xBEEF;
-  h.timestamp = 0xDEADBEEF;
-  h.ssrc = 0x12345678;
-  h.marker = true;
-  CHECK(write_rtp_header(buf, h) == 12);
-  RtpHeader p;
-  const uint8_t* pl;
-  size_t plen;
-  CHECK(parse_rtp(buf, 40, &p, &pl, &plen));
-  CHECK(p.payload_type == 97 && p.sequence == 0xBEEF && p.timestamp == 0xDEADBEEF);
-  CHECK(p.ssrc == 0x12345678 && p.marker);
-  CHECK(pl == buf + 12 && plen == 28);
-
-  // With one CSRC and an extension header.
-  buf[0] = 0x80 | 0x10 | 0x01;
-  buf[16] = 0xBE; buf[17] = 0xDE; buf[18] = 0; buf[19] = 1;  // 1 word
-  CHECK(parse_rtp(buf, 40, &p, &pl, &plen));
-  CHECK(pl == buf + 12 + 4 + 4 + 4);
-  CHECK(!parse_rtp(buf, 10, &p, &pl, &plen));
-}
-
-TEST(timestamp_unwrap) {
-  const uint64_t ref = 0x100000010ULL;
-  CHECK(unwrap_timestamp(0x00000020u, ref) == 0x100000020ULL);
-  CHECK(unwrap_timestamp(0xFFFFFFF0u, ref) == 0x0FFFFFFF0ULL);
-  CHECK(unwrap_timestamp(0x00000000u, ref) == 0x100000000ULL);
-}
-
 TEST(media_clock_conversion) {
   const uint32_t rate = 48000;
   CHECK(ptp_ns_to_frames(1000000000LL, rate) == 48000);
@@ -95,101 +61,95 @@ TEST(shm_anchor_seqlock) {
   CHECK_NEAR(b.host_ns_at(48048), 1000 + 1000000, 1);
 }
 
-static const char* kDanteSdp =
-    "v=0\r\n"
-    "o=- 1311738121 1311738121 IN IP4 192.168.1.71\r\n"
-    "s=Y001-Yamaha-Ri8-D-14c7cc : 32\r\n"
-    "c=IN IP4 239.69.161.58/32\r\n"
-    "t=0 0\r\n"
-    "a=keywds:Dante\r\n"
-    "m=audio 5004 RTP/AVP 97\r\n"
-    "i=2 channels: 01, 02\r\n"
-    "a=recvonly\r\n"
-    "a=rtpmap:97 L24/48000/2\r\n"
-    "a=ptime:1\r\n"
-    "a=ts-refclk:ptp=IEEE1588-2008:00-1D-C1-FF-FE-14-C7-CC:0\r\n"
-    "a=mediaclk:direct=750129\r\n";
+TEST(ptp1_messages) {
+  uint8_t buf[128];
+  ptp1::Header h;
+  h.message_type = ptp1::kEventMessage;
+  h.control = ptp1::kSync;
+  h.source.uuid = {0x00, 0x1d, 0xc1, 0x12, 0x34, 0x56};
+  h.source.port = 1;
+  h.sequence = 4711;
+  h.flags = ptp1::kFlagAssist;
+  ptp1::ClockProps props;
+  props.gm_uuid = h.source.uuid;
+  props.stratum = 3;
+  props.preferred = true;
+  props.variance = -4000;
+  props.sync_interval = -2;
+  CHECK(ptp1::write_sync(buf, h, ptp1::Timestamp::from_ns(1234567890123456789LL % 4000000000000000000LL),
+                         props, h.source) == 124);
+  // Wire layout as Dante sends it.
+  CHECK(buf[0] == 0 && buf[1] == 1 && std::memcmp(buf + 4, "_DFLT", 5) == 0);
+  CHECK(buf[20] == 1 && buf[32] == 0 && (buf[35] & 0x08));
+  ptp1::Header p;
+  CHECK(ptp1::parse_header(buf, sizeof buf, &p));
+  CHECK(p.source == h.source && p.sequence == 4711 && p.control == ptp1::kSync);
+  ptp1::Timestamp ts;
+  ptp1::ClockProps pr;
+  CHECK(ptp1::parse_sync(buf, 124, &ts, &pr));
+  CHECK(pr.stratum == 3 && pr.preferred && pr.variance == -4000 && pr.sync_interval == -2);
+  CHECK(pr.gm_uuid == props.gm_uuid);
+  CHECK(!ptp1::parse_sync(buf, 100, &ts, &pr));
 
-TEST(sdp_parse_dante) {
-  SdpInfo s;
-  CHECK(parse_sdp(kDanteSdp, &s));
-  CHECK(s.session_name == "Y001-Yamaha-Ri8-D-14c7cc : 32");
-  CHECK(s.connection_address == "239.69.161.58");
-  CHECK(s.port == 5004 && s.payload_type == 97);
-  CHECK(s.encoding == "L24" && s.sample_rate == 48000 && s.channels == 2);
-  CHECK(s.ptime_us == 1000 && s.ts_offset == 750129);
-  CHECK(s.ptp_grandmaster == "00-1D-C1-FF-FE-14-C7-CC" && s.ptp_domain == 0);
-  CHECK(s.frames_per_packet() == 48);
+  ptp1::write_follow_up(buf, h, 4711, ptp1::Timestamp{1700000000, 999999999});
+  uint16_t seq;
+  CHECK(ptp1::parse_follow_up(buf, 52, &seq, &ts));
+  CHECK(seq == 4711 && ts.seconds == 1700000000 && ts.nanoseconds == 999999999);
+  CHECK(buf[42] == 0x12 && buf[43] == 0x67);  // associatedSequenceId at 42 (spec layout)
+
+  ptp1::PortId req{{2, 3, 4, 5, 6, 7}, 1};
+  ptp1::write_delay_resp(buf, h, ptp1::Timestamp{5, 6}, req, 99);
+  ptp1::PortId rq;
+  uint16_t rs;
+  CHECK(ptp1::parse_delay_resp(buf, 60, &ts, &rq, &rs));
+  CHECK(rq == req && rs == 99 && ts.seconds == 5 && ts.nanoseconds == 6);
+
+  // PTPv2 packets are not mistaken for v1.
+  uint8_t v2[44] = {0x00, 0x02};
+  CHECK(!ptp1::parse_header(v2, sizeof v2, &p));
+
+  // Master choice: preferred, then stratum, variance, uuid.
+  ptp1::ClockProps a, b;
+  ptp1::PortId pa{{1}, 1}, pb{{2}, 1};
+  a.stratum = 4; b.stratum = 3;
+  CHECK(ptp1::compare_masters(b, pb, a, pa) < 0);
+  a.preferred = true;
+  CHECK(ptp1::compare_masters(a, pa, b, pb) < 0);
+  CHECK(ptp1::format_uuid(h.source.uuid) == "00:1d:c1:12:34:56");
 }
 
-TEST(sdp_roundtrip) {
-  SdpInfo a;
-  a.session_name = "DSV 1-8";
-  a.session_id = 42;
-  a.origin_address = "10.0.0.5";
-  a.connection_address = "239.69.83.67";
-  a.channels = 8;
-  a.payload_type = 98;
-  a.ptime_us = 250;
-  a.ptp_grandmaster = "00-11-22-FF-FE-33-44-55";
-  SdpInfo b;
-  const std::string text = build_sdp(a);
-  CHECK(text.find("a=ptime:0.25\r\n") != std::string::npos);
-  CHECK(text.find("a=framecount:12\r\n") != std::string::npos);
-  CHECK(parse_sdp(text, &b));
-  CHECK(b.session_name == a.session_name && b.channels == 8 && b.payload_type == 98);
-  CHECK(b.ptime_us == 250 && b.connection_address == a.connection_address);
-  CHECK(b.ptp_grandmaster == a.ptp_grandmaster);
-}
-
-TEST(sap_roundtrip) {
-  auto pkt = sap::build_packet(kDanteSdp, 0xC0A80147, 0x1234, false);
-  std::string sdp;
-  bool del;
-  uint16_t hash;
-  uint32_t origin;
-  CHECK(sap::parse_packet(pkt.data(), pkt.size(), &sdp, &del, &hash, &origin));
-  CHECK(sdp == kDanteSdp && !del && hash == 0x1234 && origin == 0xC0A80147);
-  auto d = sap::build_packet("v=0\r\n", 1, 2, true);
-  CHECK(sap::parse_packet(d.data(), d.size(), &sdp, &del, &hash, &origin) && del);
-  // No payload-type field.
-  std::vector<uint8_t> raw = {0x20, 0, 0, 1, 10, 0, 0, 1, 'v', '=', '0'};
-  CHECK(sap::parse_packet(raw.data(), raw.size(), &sdp, &del, &hash, &origin) && sdp == "v=0");
-}
-
-TEST(ptp_messages) {
-  uint8_t buf[64];
-  ptp::Header h;
-  h.type = ptp::kSync;
-  h.length = 44;
-  h.domain = 3;
-  h.flags = 0x0200;
-  h.correction = int64_t(1234) << 16;
-  h.source.clock = {1, 2, 3, 4, 5, 6, 7, 8};
-  h.source.port = 9;
-  h.sequence = 777;
-  h.log_interval = -3;
-  ptp::write_header(buf, h);
-  ptp::write_timestamp(buf + 34, ptp::Timestamp::from_ns(1700000000123456789LL));
-  ptp::Header p;
-  CHECK(ptp::parse_header(buf, 44, &p));
-  CHECK(p.type == ptp::kSync && p.domain == 3 && p.two_step() && p.correction_ns() == 1234);
-  CHECK(p.source == h.source && p.sequence == 777 && p.log_interval == -3);
-  CHECK(ptp::read_timestamp(buf + 34).ns() == 1700000000123456789LL);
-
-  ptp::Announce a, b;
-  a.priority1 = 128;
-  a.grandmaster = {1};
-  b.priority1 = 250;
-  b.grandmaster = {2};
-  ptp::PortId pa, pb;
-  CHECK(ptp::compare_announce(a, pa, b, pb) < 0);
-  CHECK(ptp::compare_announce(b, pb, a, pa) > 0);
-  ptp::write_announce(buf, h, a);
-  ptp::Announce r;
-  CHECK(ptp::parse_announce(buf, 64, &r));
-  CHECK(r.priority1 == 128 && r.grandmaster == a.grandmaster);
-  CHECK(ptp::format_clock_id(h.source.clock) == "01-02-03-04-05-06-07-08");
+TEST(ptp1_master_follower_lock) {
+  // Two PTPv1 clocks on this host: one becomes master, the other must follow
+  // it to within a few hundred microseconds (software timestamps).
+  uint32_t lo = 0x7F000001;
+  PtpClock master, follower;
+  PtpClock::Options mo;
+  mo.interface_addr = lo;
+  mo.master_capable = true;
+  PtpClock::Options fo;
+  fo.interface_addr = lo;
+  if (!master.start(mo) || !follower.start(fo)) {
+    std::printf("  (skipped: cannot bind PTP ports 319/320 here)\n");
+    return;
+  }
+  const int64_t deadline = mono_ns() + 25000000000LL;
+  bool locked = false;
+  while (mono_ns() < deadline && !locked) {
+    sleep_until_ns(mono_ns() + 200000000LL);
+    locked = master.state() == kStatePtpMaster && follower.state() == kStatePtpLocked;
+  }
+  if (!locked) {
+    // multicast loopback may be unavailable (some containers)
+    std::printf("  (skipped: no multicast loopback; master=%u follower=%u)\n",
+                unsigned(master.state()), unsigned(follower.state()));
+    return;
+  }
+  const int64_t t = mono_ns();
+  const int64_t diff = master.model().ptp_at(t) - follower.model().ptp_at(t);
+  std::printf("  follower offset from master: %.1f us, gm %s\n", diff / 1000.0,
+              follower.grandmaster().c_str());
+  CHECK(std::llabs(diff) < 500000);
+  CHECK(follower.grandmaster() == master.grandmaster());
 }
 
 TEST(servo_converges) {
@@ -217,55 +177,61 @@ TEST(servo_converges) {
 TEST(config_parse) {
   const char* text =
       "[device]\n"
-      "name = Studio DSV\n"
+      "name = Studio Rack\n"
       "interface = 127.0.0.1\n"
       "tx_channels = 16 ; comment\n"
       "rx_channels = 4\n"
-      "packet_time_us = 250\n"
-      "latency_us = 1000\n"
+      "latency_us = 2000\n"
+      "tx_latency_us = 3000\n"
       "clock = free\n"
-      "[tx]\n"
-      "address = 239.69.1.1\n"
-      "channels = 8\n"
-      "[tx]\n"
-      "address = 239.69.1.2\n"
-      "first_channel = 9\n"
-      "channels = 8\n"
-      "[rx]\n"
-      "sap_name = \"Ri8 : 32\"\n"
-      "channels = 2\n";
+      "[ptp]\n"
+      "subdomain = _DFLT\n"
+      "master_capable = true\n";
   Config c;
   std::string err;
   CHECK(parse_config(text, &c, &err));
   CHECK(validate_config(&c, &err));
-  CHECK(c.device_name == "Studio DSV" && c.tx.size() == 2 && c.rx.size() == 1);
-  CHECK(c.tx[1].first_channel == 9 && c.rx[0].sap_name == "Ri8 : 32");
-  CHECK(c.period_frames() == 12 && c.rx_latency_frames() == 48);
-  CHECK((c.ring_frames & (c.ring_frames - 1)) == 0 && c.ring_frames >= 4096);
-  CHECK(c.tx[0].name == "Studio DSV 1-8");
+  CHECK(c.device_name == "Studio Rack" && c.tx_channels == 16 && c.rx_channels == 4);
+  CHECK(c.latency_us == 2000 && c.tx_latency_us == 3000 && c.ptp_master_capable);
+  CHECK(c.period_frames() == 48 && c.rx_latency_frames() == 144 && c.tx_lead_frames() == 96);
+  CHECK((c.ring_frames & (c.ring_frames - 1)) == 0 && c.ring_frames >= 8192);
 
   Config bad;
   CHECK(!parse_config("[device]\nbogus = 1\n", &bad, &err));
   CHECK(err.find("line 2") != std::string::npos);
-  Config mtu;
-  parse_config("[device]\ntx_channels=64\n[tx]\naddress=239.1.1.1\nchannels=64\n", &mtu, &err);
-  CHECK(!validate_config(&mtu, &err));  // 64ch L24 @1ms > MTU
+  Config name;
+  parse_config("[device]\nname = bad/name\n", &name, &err);
+  CHECK(!validate_config(&name, &err));
+  Config lat;
+  parse_config("[device]\ntx_latency_us = 1000\ntick_us = 1000\n", &lat, &err);
+  CHECK(!validate_config(&lat, &err));  // below two ticks
+}
+
+TEST(config_legacy_aes67_is_ignored) {
+  // A config from the AES67 version still loads; flows are reported, not fatal.
+  const char* old =
+      "[device]\nname = DSV\npacket_time_us = 1000\nsap = true\n"
+      "[ptp]\ndomain = 0\n"
+      "[tx]\naddress = 239.69.1.1\nchannels = 8\n"
+      "[rx]\nsap_name = \"Ri8 : 32\"\n";
+  Config c;
+  std::string err;
+  CHECK(parse_config(old, &c, &err));
+  CHECK(validate_config(&c, &err));
+  CHECK(c.device_name == "DSV" && c.notes.size() >= 3);
 }
 
 TEST(config_format_roundtrip) {
   Config a;
   std::string err;
   parse_config("[device]\nname = Studio ; A\ninterface = 10.0.0.2\ntx_channels = 16\n"
-               "control_port = 0\n[tx]\naddress=239.1.1.1\nchannels=8\n"
-               "[rx]\nsap_name = \"Ri8 : 32 # x\"\nchannels = 2\nfirst_channel = 3\n",
+               "control_port = 0\nlatency_us = 1500\n[ptp]\nsubdomain = _DFLT\n",
                &a, &err);
   CHECK(a.device_name == "Studio");
   Config b;
   CHECK(parse_config(format_config(a), &b, &err));
   CHECK(b.device_name == a.device_name && b.interface == "10.0.0.2");
-  CHECK(b.tx_channels == 16 && b.control_port == 0);
-  CHECK(b.tx.size() == 1 && b.tx[0].address == "239.1.1.1" && b.tx[0].channels == 8);
-  CHECK(b.rx.size() == 1 && b.rx[0].sap_name == "Ri8 : 32 # x" && b.rx[0].first_channel == 3);
+  CHECK(b.tx_channels == 16 && b.control_port == 0 && b.latency_us == 1500);
   CHECK(format_config(a) == format_config(b));
 }
 

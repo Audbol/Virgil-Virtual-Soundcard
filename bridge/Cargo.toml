@@ -1,0 +1,25 @@
+# Virgil <-> Inferno bridge: a static library with a C ABI that the daemon
+# (C++) links. Inferno does the Dante protocol; Virgil provides the PTP
+# clock, the audio rings and the OS drivers.
+[package]
+name = "virgil_dante"
+version = "0.2.0"
+edition = "2021"
+license = "GPL-3.0-or-later"
+publish = false
+
+[lib]
+crate-type = ["staticlib"]
+path = "src/lib.rs"
+
+[dependencies]
+inferno_aoip = { path = "../third_party/inferno/inferno_aoip" }
+usrvclock = { path = "../third_party/inferno/usrvclock-rs" }
+tokio = { version = "1.36", features = ["rt", "net", "time", "sync", "macros"] }
+log = "0.4"
+
+[profile.release]
+opt-level = 3
+debug = false
+panic = "unwind"
+codegen-units = 4

@@ -1,0 +1,35 @@
+[package]
+name = "searchfire"
+version = "0.1.0"
+edition = "2021"
+description = "📡 Rust mDNS server & client library designed with user interfaces in mind"
+authors = ["William Venner <william@venner.io>", "Teo LumiFaza <teo@lumifaza.org>"]
+license = "MIT OR Apache-2.0"
+repository = "https://gitlab.com/lumifaza/searchfire"
+keywords = ["mdns", "dns", "discovery", "lan", "zeroconf"]
+categories = ["network-programming", "asynchronous"]
+
+[features]
+default = ["discovery", "broadcast"]
+discovery = []
+broadcast = []
+
+[package.metadata.docs.rs]
+all-features = true
+rustdoc-args = ["--cfg", "docsrs"]
+
+[dependencies]
+tokio = { version = "1", features = ["net", "rt", "sync", "time", "macros"] }
+socket2 = "0.4"
+if-addrs = "0.7"
+trust-dns-client = { version = "0.22", features = ["mdns"] }
+libc = "0.2"
+thiserror = "1"
+log = "0.4"
+
+[target.'cfg(windows)'.dependencies]
+winapi = { version = "0.3", features = ["netioapi"] }
+
+[dev-dependencies]
+dns-parser = "0.8"
+simple_logger = "4"
