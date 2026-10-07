@@ -47,13 +47,13 @@ VIAddVersionKey "LegalCopyright" "DSV Project"
   - dsvd, a background service that sends and receives AES67 network audio \
 (compatible with Dante devices in AES67 mode)$\r$\n\
   - an ASIO driver named $\"${PRODUCT}$\" for your DAW$\r$\n$\r$\n\
-After installing, set the network interface in the configuration file \
-(Start menu > DSV > Edit configuration)."
+After installing, open DSV Control (Start menu or desktop) to pick the \
+network interface and the streams to receive."
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.md"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "Open the README"
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "Edit the configuration now"
-!define MUI_FINISHPAGE_RUN_FUNCTION EditConfig
+!define MUI_FINISHPAGE_RUN_TEXT "Open DSV Control (status and settings)"
+!define MUI_FINISHPAGE_RUN_FUNCTION OpenControl
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
@@ -79,8 +79,8 @@ Function un.onInit
   SetShellVarContext all
 FunctionEnd
 
-Function EditConfig
-  Exec '"$WINDIR\notepad.exe" "$APPDATA\DSV\dsv.conf"'
+Function OpenControl
+  Exec '"$INSTDIR\dsv-control.exe"'
 FunctionEnd
 
 ;; Stop the service and wait (up to ~20 s) until it has really exited, so its
@@ -122,6 +122,7 @@ Section "DSV" SecMain
   File "${BIN_DIR}\dsvd.exe"
   File "${BIN_DIR}\DSVAsio.dll"
   File "${BIN_DIR}\dsv-latency-probe.exe"
+  File "${BIN_DIR}\dsv-control.exe"
   File "${SRC_DIR}\README.md"
   File "${SRC_DIR}\config\dsv.conf.example"
   File "${SRC_DIR}\packaging\windows\restart-dsv.cmd"
@@ -169,6 +170,8 @@ Section "DSV" SecMain
 
   ; Start menu.
   CreateDirectory "$SMPROGRAMS\DSV"
+  CreateShortcut "$SMPROGRAMS\DSV\DSV Control.lnk" "$INSTDIR\dsv-control.exe"
+  CreateShortcut "$DESKTOP\DSV Control.lnk" "$INSTDIR\dsv-control.exe"
   CreateShortcut "$SMPROGRAMS\DSV\Edit configuration.lnk" "$WINDIR\notepad.exe" '"$ConfDir\dsv.conf"'
   CreateShortcut "$SMPROGRAMS\DSV\Restart DSV service.lnk" "$INSTDIR\restart-dsv.cmd"
   CreateShortcut "$SMPROGRAMS\DSV\DSV status.lnk" "$SYSDIR\cmd.exe" '/k ""$INSTDIR\dsvd.exe" --status"'
@@ -205,6 +208,8 @@ Section "Uninstall"
   Delete /REBOOTOK "$INSTDIR\dsvd.exe"
   Delete /REBOOTOK "$INSTDIR\DSVAsio.dll"
   Delete /REBOOTOK "$INSTDIR\dsv-latency-probe.exe"
+  Delete /REBOOTOK "$INSTDIR\dsv-control.exe"
+  Delete "$DESKTOP\DSV Control.lnk"
   Delete /REBOOTOK "$INSTDIR\README.md"
   Delete /REBOOTOK "$INSTDIR\dsv.conf.example"
   Delete /REBOOTOK "$INSTDIR\restart-dsv.cmd"

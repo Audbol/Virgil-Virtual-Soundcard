@@ -13,8 +13,17 @@ version=$(sed -n 's/^CMAKE_PROJECT_VERSION:STATIC=//p' build-win-release/CMakeCa
 bin=build-win-release/bin
 mkdir -p "$bin" dist
 cp build-win-release/dsvd.exe build-win-release/dsv-latency-probe.exe \
-	build-win-release/drivers/asio/DSVAsio.dll "$bin/"
+	build-win-release/dsv-control.exe build-win-release/drivers/asio/DSVAsio.dll "$bin/"
 x86_64-w64-mingw32-strip "$bin"/*.exe "$bin"/*.dll
 makensis -V2 -DVERSION="$version" -DBIN_DIR="$PWD/$bin" -DSRC_DIR="$PWD" \
 	-DOUT_FILE="$PWD/dist/DSV-$version-win64-setup.exe" packaging/windows/dsv.nsi
-ls -l dist/DSV-*-setup.exe
+
+# Portable zip: unzip, register the ASIO driver, double-click dsv-control.exe.
+port="build-win-release/DSV-$version-windows-x64"
+rm -rf "$port" && mkdir -p "$port"
+cp "$bin"/dsvd.exe "$bin"/dsv-control.exe "$bin"/dsv-latency-probe.exe "$bin"/DSVAsio.dll "$port/"
+cp packaging/dsv.conf "$port/dsv.conf"
+cp README.md config/dsv.conf.example packaging/portable/windows/* "$port/"
+(cd build-win-release && rm -f "../dist/DSV-$version-windows-x64-portable.zip" &&
+	zip -qr "../dist/DSV-$version-windows-x64-portable.zip" "DSV-$version-windows-x64")
+ls -l dist/DSV-*-setup.exe dist/DSV-*-portable.zip

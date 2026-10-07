@@ -77,7 +77,26 @@ target_link_libraries(dsvd PRIVATE dsv_net)
 add_executable(dsv-latency-probe tools/dsv_latency_probe.cpp)
 target_link_libraries(dsv-latency-probe PRIVATE dsv_client)
 
+# DSV Control: opens the control panel (starts a portable dsvd if needed).
+if(APPLE)
+  add_executable(dsv-control MACOSX_BUNDLE tools/dsv_control.cpp)
+  set_target_properties(dsv-control PROPERTIES
+    OUTPUT_NAME "DSV Control"
+    MACOSX_BUNDLE_BUNDLE_NAME "DSV Control"
+    MACOSX_BUNDLE_GUI_IDENTIFIER org.dsv.control
+    MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
+    MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
+elseif(WIN32)
+  add_executable(dsv-control WIN32 tools/dsv_control.cpp)
+  target_link_libraries(dsv-control PRIVATE ws2_32 shell32 user32)
+else()
+  add_executable(dsv-control tools/dsv_control.cpp)
+  install(FILES packaging/linux/dsv-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+endif()
+target_link_libraries(dsv-control PRIVATE dsv_client)
+
 install(TARGETS dsvd dsv-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS dsv-control RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)
 install(FILES README.md config/dsv.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   configure_file(packaging/linux/dsvd.service.in ${CMAKE_BINARY_DIR}/dsvd.service @ONLY)

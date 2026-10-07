@@ -1,0 +1,27 @@
+DSV Virtual Soundcard - portable for macOS 11+ (Apple silicon and Intel)
+=======================================================================
+
+AES67 network soundcard with a Core Audio device. Works with Dante devices
+in AES67 mode (enable it in Dante Controller > Device View > AES67 Config).
+
+This download is not notarised. Before the first start, open Terminal in
+this folder and run:      xattr -dr com.apple.quarantine .
+
+1. Double-click "install-driver.command" (asks for your password) to add the
+   "DSV Virtual Soundcard" Core Audio device. Core Audio restarts once.
+
+2. Double-click "DSV Control". It starts dsvd from this folder and opens the
+   control panel in your browser.
+
+3. Pick "DSV Virtual Soundcard" in System Settings > Sound or in your app.
+
+Settings: dsv.conf in this folder. Log: dsvd.log.
+Run as a normal user, dsvd cannot use PTP ports and real-time priority as
+fully as the installed version; for an always-on setup that starts at boot,
+use the installer DSV-<version>-macos.pkg instead.
+
+Remove the driver: sudo rm -rf /Library/Audio/Plug-Ins/HAL/DSVAudio.driver
+and then: sudo killall coreaudiod
+
+Not affiliated with Audinate. DSV does not implement the proprietary
+Dante protocol; it talks to Dante gear through Dante's AES67 mode.

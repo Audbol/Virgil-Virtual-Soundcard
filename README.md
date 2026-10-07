@@ -77,23 +77,65 @@ offsets, ALSA `delay`), so DAW latency compensation stays exact.
 
 ## Installing
 
-Download the installer for your platform from the GitHub Releases page.
+Download from the repository's **Releases** page. Each platform has an
+installer and a portable archive:
 
-| Platform | Installer | What it sets up |
+| Platform | Installer | Portable (no install) |
 |---|---|---|
-| Windows 10/11 x64 | `DSV-<ver>-win64-setup.exe` | `dsvd` as an auto-start Windows service with restart-on-failure, the ASIO driver (registered), a firewall rule for the network streams, Start-menu entries and an Add/Remove Programs entry |
-| macOS 11+ (Apple silicon & Intel) | `DSV-<ver>-macos.pkg` | Core Audio device `DSVAudio.driver`, `dsvd` as a launch daemon, `/usr/local/bin/dsvd` |
-| Debian / Ubuntu | `dsv_<ver>_amd64.deb` | `dsvd` systemd service (enabled and started), ALSA plugin with `dsv` / `dsv_hw` devices |
-| Fedora / RHEL / openSUSE | `dsv-<ver>-1.x86_64.rpm` | same as the `.deb` |
+| Windows 10/11 x64 | `DSV-<ver>-win64-setup.exe` | `DSV-<ver>-windows-x64-portable.zip` |
+| macOS 11+ (Apple silicon & Intel) | `DSV-<ver>-macos.pkg` | `DSV-<ver>-macos-portable.zip` |
+| Debian / Ubuntu | `dsv_<ver>_amd64.deb` | `DSV-<ver>-linux-x86_64.tar.gz` |
+| Fedora / RHEL / openSUSE | `dsv-<ver>-1.x86_64.rpm` | same tarball |
 
-After installing, set the network interface and flows in the configuration
-file, then restart the service:
+What each one sets up:
 
-| Platform | Configuration | Restart | Log |
-|---|---|---|---|
-| Windows | `C:\ProgramData\DSV\dsv.conf` (Start menu → DSV → Edit configuration) | Start menu → DSV → Restart DSV service | `C:\ProgramData\DSV\dsvd.log` |
-| macOS | `/Library/Application Support/DSV/dsv.conf` | `sudo launchctl kickstart -k system/org.dsv.dsvd` | `/Library/Logs/DSV/dsvd.log` |
-| Linux | `/etc/dsv/dsv.conf` | `sudo systemctl restart dsvd` | `journalctl -u dsvd` |
+- **Installers:** `dsvd` runs as a background service that starts at boot
+  (a Windows service, a launchd daemon or a systemd unit), plus the
+  platform's driver and **DSV Control**. On Windows that also means ASIO
+  driver registration, a firewall rule, Start-menu and desktop shortcuts,
+  and an Add/Remove Programs entry.
+- **Portable archives:** run from the extracted folder.
+  Double-click **DSV Control** and it starts `dsvd` from that folder. The
+  only one-time step is the driver: `register-asio-driver.cmd` on Windows,
+  `install-driver.command` on macOS, `setup-alsa.sh` on Linux. Each archive
+  has a `START-HERE.txt`.
+
+## Control panel
+
+**DSV Control** opens the control panel in your browser. You can also go to
+http://127.0.0.1:8480/ directly while `dsvd` runs. It shows:
+
+- **Status:** clock state (PTP locked, grandmaster or free-running) with its
+  offset, format, packet rates and loss, and which apps are connected and
+  playing.
+- **Meters:** per-channel peak meters for playback to the network and
+  capture from it.
+- **Flows:** your transmit flows, and your receive flows with live
+  receiving / no-packets / not-found status.
+- **Streams on the network:** every AES67 flow announced via SAP, including
+  Dante devices in AES67 mode. Pick a capture channel, click **Receive**,
+  then **Apply**.
+- **Settings:** device name, network interface, sample rate, channel counts,
+  packet time, latency and clock source. An advanced editor gives you the
+  raw configuration file.
+
+**Apply** validates the configuration, saves it and restarts the audio
+engine inside `dsvd`. Apps stay connected when the sample rate and channel
+counts are unchanged. If those change, ALSA apps reconnect by themselves
+and ASIO hosts get a driver reset request. On macOS, restart Core Audio
+after changing them.
+
+The panel only listens on 127.0.0.1. It refuses requests addressed to other
+host names (DNS rebinding) and cross-site form posts. Set `control_port = 0`
+in `[device]` to turn it off.
+
+Configuration file and log locations, if you prefer editing by hand:
+
+| Platform | Configuration | Log |
+|---|---|---|
+| Windows | `C:\ProgramData\DSV\dsv.conf` | `C:\ProgramData\DSV\dsvd.log` |
+| macOS | `/Library/Application Support/DSV/dsv.conf` | `/Library/Logs/DSV/dsvd.log` |
+| Linux | `/etc/dsv/dsv.conf` | `journalctl -u dsvd` |
 
 Upgrades keep your configuration. Uninstalling also keeps it:
 
@@ -118,16 +160,19 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 * **Cross-compiling Windows from Linux:**
   `cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DASIO_SDK_DIR=…`
 
-### Building the installers
+### Building the installers and portable archives
 
-| Installer | Command | Needs |
+| Output | Command | Needs |
 |---|---|---|
 | `.deb` + `.rpm` | `packaging/linux/build-packages.sh` | `dpkg-dev`, `rpm` |
-| Windows `.exe` | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis` (runs on Linux) |
-| macOS `.pkg` | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
+| Linux tarball | `packaging/linux/build-packages.sh portable` | — |
+| Windows installer + zip | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis`, `zip` (runs on Linux) |
+| macOS `.pkg` + zip | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
 
-The output goes to `dist/`. The `Installers` GitHub workflow builds all of
-them, and attaches them to a release when you push a tag such as `v0.1.0`.
+Output goes to `dist/`. The **Release** GitHub workflow builds all of them on
+every push to `main`, keeping them as workflow artifacts. When you push a tag
+such as `v0.1.0`, it publishes them as a GitHub Release, together with
+`SHA256SUMS` and the notes from `packaging/release-notes.md`.
 
 * **macOS signing and notarisation:** set `DSV_CODESIGN_ID`,
   `DSV_INSTALLER_ID` and `DSV_NOTARY_PROFILE`, or the matching repository
@@ -155,6 +200,8 @@ Configuration reference: [`config/dsv.conf.example`](config/dsv.conf.example).
 |---|---|
 | AES67 engine, RTP, SDP, SAP, config | Unit tests; end-to-end UDP loopback is sample-accurate (error ≤ 6e-8, i.e. 24-bit quantisation) on Linux and on Windows (Wine) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon in loopback: 3.000 s tone, 0 discontinuities with 64-frame periods |
+| Control panel | Browser test with Playwright against two daemons on one machine, with one standing in for a Dante device. Checked: stream discovery, one-click subscribe, Apply, and audio arriving on the chosen capture channels. Meters match the generated levels exactly. No console errors, no sideways scrolling at phone width. Requests with a foreign Host header, without the custom header, or cross-origin are refused. `aplay` stays connected when Apply keeps the layout, and reconnects when it changes |
+| Linux portable | Extracted and used as a user would: `setup-alsa.sh`, `dsv-control` (starts `dsvd`), playback and recording through the `dsv` device |
 | Linux `.deb` | Installed with `dpkg` in a container. The system ALSA config lists the `dsv` devices and a 3 s tone passes through. Config edits survive reinstall; `purge` removes everything |
 | Windows installer | Run silently under Wine. Checked: files, ASIO registration, uninstall entry, service creation and auto-start, a clean service stop, config kept on upgrade, and removal on uninstall. Wine's service handling is unreliable, so **this needs a run on real Windows** |
 | macOS `.pkg` | **Not yet built.** The scripts are syntax-checked only. The `Installers` workflow builds it on macOS |

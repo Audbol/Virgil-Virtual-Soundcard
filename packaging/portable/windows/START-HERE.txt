@@ -1,0 +1,24 @@
+DSV Virtual Soundcard - portable for Windows (x64)
+=================================================
+
+AES67 network soundcard with an ASIO driver. Works with Dante devices in
+AES67 mode (enable it in Dante Controller > Device View > AES67 Config).
+
+1. Register the ASIO driver (once):
+   right-click "register-asio-driver.cmd" > Run as administrator.
+
+2. Double-click "dsv-control.exe".
+   It starts dsvd from this folder and opens the control panel in your
+   browser, where you pick the network interface and the streams to receive.
+   Allow dsvd through Windows Firewall when asked (private networks).
+
+3. In your DAW, choose the ASIO device "DSV Virtual Soundcard".
+
+Settings are stored in dsv.conf in this folder; the log is dsvd.log.
+dsvd keeps running in the background; stop it from Task Manager.
+
+For an always-on setup (Windows service, starts at boot, works for every
+user account) use the installer DSV-<version>-win64-setup.exe instead.
+
+Not affiliated with Audinate. DSV does not implement the proprietary
+Dante protocol; it talks to Dante gear through Dante's AES67 mode.
