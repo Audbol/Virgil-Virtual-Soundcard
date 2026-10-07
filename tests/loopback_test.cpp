@@ -2,6 +2,7 @@
 // two playback clients -> mixer -> Dante TX ring --(sent at f + tx latency,
 // written by the receiver at + rx latency)--> Dante RX ring -> capture ring
 // -> client. Verifies mixing, 32-bit conversion and frame alignment.
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -59,7 +60,11 @@ TEST(soundcard_loopback_through_dante_rings) {
       wait_ms(1);
       const uint64_t media = e.header()->now_frames.load();
       if (done == 0) done = media - 64;
-      const uint64_t sent_until = media > L ? media - L : 0;  // frames sent by now
+      // Inferno sends a frame L after its media time; the simulator forwards
+      // as soon as the mixer is surely done with it (two ticks) so a slow CI
+      // machine cannot make it late. Latency timing is covered by e2e_netns.sh.
+      const uint64_t lag = std::min<uint64_t>(L, 2 * c.period_frames());
+      const uint64_t sent_until = media > lag ? media - lag : 0;
       for (; done < sent_until; ++done)
         for (uint32_t ch = 0; ch < 4; ++ch)
           rx[size_t((done + D) & dmask) * 4 + ch] = tx[size_t(done & dmask) * 4 + ch];
