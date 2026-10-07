@@ -120,6 +120,14 @@ Section "Virgil" SecMain
 
   SetOutPath "$INSTDIR"
   File "${BIN_DIR}\virgild.exe"
+  ; A running DAW keeps the ASIO driver loaded, which blocks overwriting it.
+  ; Windows does allow renaming a loaded DLL: move it aside so the new one
+  ; can be written; the old copy is deleted now or after the next reboot.
+  ${If} ${FileExists} "$INSTDIR\VirgilAsio.dll"
+    Delete "$INSTDIR\VirgilAsio.dll.old"
+    Rename "$INSTDIR\VirgilAsio.dll" "$INSTDIR\VirgilAsio.dll.old"
+    Delete /REBOOTOK "$INSTDIR\VirgilAsio.dll.old"
+  ${EndIf}
   File "${BIN_DIR}\VirgilAsio.dll"
   File "${BIN_DIR}\virgil-latency-probe.exe"
   File "${BIN_DIR}\virgil-control.exe"
@@ -211,6 +219,7 @@ Section "Uninstall"
 
   Delete /REBOOTOK "$INSTDIR\virgild.exe"
   Delete /REBOOTOK "$INSTDIR\VirgilAsio.dll"
+  Delete /REBOOTOK "$INSTDIR\VirgilAsio.dll.old"
   Delete /REBOOTOK "$INSTDIR\virgil-latency-probe.exe"
   Delete /REBOOTOK "$INSTDIR\virgil-control.exe"
   Delete "$DESKTOP\Virgil Control.lnk"
