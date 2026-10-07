@@ -75,6 +75,35 @@ and a 32-frame ASIO buffer gives about 1.7 ms in and 1.4 ms out at 48 kHz. All
 drivers report these numbers to the host (`getLatencies`, CoreAudio safety
 offsets, ALSA `delay`), so DAW latency compensation stays exact.
 
+## Installing
+
+Download the installer for your platform from the GitHub Releases page.
+
+| Platform | Installer | What it sets up |
+|---|---|---|
+| Windows 10/11 x64 | `DSV-<ver>-win64-setup.exe` | `dsvd` as an auto-start Windows service with restart-on-failure, the ASIO driver (registered), a firewall rule for the network streams, Start-menu entries and an Add/Remove Programs entry |
+| macOS 11+ (Apple silicon & Intel) | `DSV-<ver>-macos.pkg` | Core Audio device `DSVAudio.driver`, `dsvd` as a launch daemon, `/usr/local/bin/dsvd` |
+| Debian / Ubuntu | `dsv_<ver>_amd64.deb` | `dsvd` systemd service (enabled and started), ALSA plugin with `dsv` / `dsv_hw` devices |
+| Fedora / RHEL / openSUSE | `dsv-<ver>-1.x86_64.rpm` | same as the `.deb` |
+
+After installing, set the network interface and flows in the configuration
+file, then restart the service:
+
+| Platform | Configuration | Restart | Log |
+|---|---|---|---|
+| Windows | `C:\ProgramData\DSV\dsv.conf` (Start menu → DSV → Edit configuration) | Start menu → DSV → Restart DSV service | `C:\ProgramData\DSV\dsvd.log` |
+| macOS | `/Library/Application Support/DSV/dsv.conf` | `sudo launchctl kickstart -k system/org.dsv.dsvd` | `/Library/Logs/DSV/dsvd.log` |
+| Linux | `/etc/dsv/dsv.conf` | `sudo systemctl restart dsvd` | `journalctl -u dsvd` |
+
+Upgrades keep your configuration. Uninstalling also keeps it:
+
+- **Windows:** use Add/Remove Programs.
+- **macOS:** run `sudo "/Library/Application Support/DSV/uninstall.sh"`. Add `--purge` to delete the configuration too.
+- **Linux:** use `apt remove dsv` or `dnf remove dsv`. `apt purge` deletes the configuration.
+
+With no interface set, the service uses the first active network interface. It
+waits for the network if the service starts at boot before the network is up.
+
 ## Building
 
 Requirements: CMake ≥ 3.16 and a C++17 compiler. Linux also needs
@@ -85,29 +114,40 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 ```
 
 * **ASIO:** download the Steinberg ASIO SDK yourself (it is not
-  redistributed). Then add `-DASIO_SDK_DIR=C:/path/to/asiosdk` and run
-  `regsvr32 DSVAsio.dll` as administrator.
+  redistributed). Then add `-DASIO_SDK_DIR=C:/path/to/asiosdk`.
 * **Cross-compiling Windows from Linux:**
   `cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DASIO_SDK_DIR=…`
-* **macOS:** the build produces `DSVAudio.driver`. Install it with
-  `sudo cp -R build/drivers/coreaudio/DSVAudio.driver /Library/Audio/Plug-Ins/HAL/ && sudo killall coreaudiod`.
+
+### Building the installers
+
+| Installer | Command | Needs |
+|---|---|---|
+| `.deb` + `.rpm` | `packaging/linux/build-packages.sh` | `dpkg-dev`, `rpm` |
+| Windows `.exe` | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis` (runs on Linux) |
+| macOS `.pkg` | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
+
+The output goes to `dist/`. The `Installers` GitHub workflow builds all of
+them, and attaches them to a release when you push a tag such as `v0.1.0`.
+
+* **macOS signing and notarisation:** set `DSV_CODESIGN_ID`,
+  `DSV_INSTALLER_ID` and `DSV_NOTARY_PROFILE`, or the matching repository
+  secrets in CI. Unsigned packages still install, but Gatekeeper asks the
+  user to approve them in System Settings → Privacy & Security.
+* **Windows signing:** the installer is unsigned, so SmartScreen warns on
+  first run. Sign it with `signtool` if you have a certificate.
 
 ## Running
 
 ```sh
-sudo dsvd -c /etc/dsv/dsv.conf    # root (or caps) for PTP ports 319/320 and RT priority
-dsvd --discover -i eth0           # list AES67 / Dante AES67 flows on the network
 dsvd --status                     # clock state, packet counters, connected apps
+dsvd --discover -i eth0           # list AES67 / Dante AES67 flows on the network
+dsvd -c my.conf -v                # run in the foreground with debug output
 ```
 
 Configuration reference: [`config/dsv.conf.example`](config/dsv.conf.example).
-Service files for systemd, launchd and Windows are in [`packaging/`](packaging).
 
-* **Linux:** install `libasound_module_pcm_dsv.so` into the alsa-lib plugin
-  directory and `50-dsv.conf` into `/etc/alsa/conf.d/`. Then use `-D dsv`, or
-  `jackd -d alsa -d dsv_hw -p 64`.
-* **Real-time permissions on Linux:** use the systemd unit, or grant
-  `CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK`, or run as root.
+* **Linux:** use `-D dsv` (automatic format conversion) or `-D dsv_hw`
+  (raw), e.g. `jackd -d alsa -d dsv_hw -p 64`.
 
 ## Status and testing
 
@@ -115,6 +155,9 @@ Service files for systemd, launchd and Windows are in [`packaging/`](packaging).
 |---|---|
 | AES67 engine, RTP, SDP, SAP, config | Unit tests; end-to-end UDP loopback is sample-accurate (error ≤ 6e-8, i.e. 24-bit quantisation) on Linux and on Windows (Wine) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon in loopback: 3.000 s tone, 0 discontinuities with 64-frame periods |
+| Linux `.deb` | Installed with `dpkg` in a container. The system ALSA config lists the `dsv` devices and a 3 s tone passes through. Config edits survive reinstall; `purge` removes everything |
+| Windows installer | Run silently under Wine. Checked: files, ASIO registration, uninstall entry, service creation and auto-start, a clean service stop, config kept on upgrade, and removal on uninstall. Wine's service handling is unreliable, so **this needs a run on real Windows** |
+| macOS `.pkg` | **Not yet built.** The scripts are syntax-checked only. The `Installers` workflow builds it on macOS |
 | ASIO driver | Built against a stand-in for the documented SDK interface. A test host (`tests/asio_host_test.cpp`) under Wine got exactly 750 buffer switches in 2 s and a glitch-free round trip. Not yet run in a real DAW or against the real SDK headers |
 | CoreAudio driver | **Not yet compiled on macOS.** Only syntax-checked against stub headers. CI builds it on macOS; it needs a real Mac to validate |
 | PTPv2 slave/master | Servo checked in simulation (80 ppm drift, 20 µs jitter → within 30 µs). **Not yet tested against real Dante/AES67 hardware** |
@@ -127,7 +170,8 @@ Known limitations:
   strictness.
 * The sample rate and channel count come from `dsv.conf`. Changing them means
   restarting `dsvd`; on macOS also restart `coreaudiod`.
-* On Windows the shared-memory section is per-session (`Local\`), so `dsvd`
-  must run in the same user session as the ASIO host.
+* The Windows service creates a `Global\` shared-memory section that every
+  user session can reach. A `dsvd` started by hand from a non-elevated
+  console falls back to `Local\`, which only that session can reach.
 * On macOS, the HAL plug-in may run inside coreaudiod's sandbox, and that may
   block opening `dsvd`'s POSIX shared memory. This has not been tested.

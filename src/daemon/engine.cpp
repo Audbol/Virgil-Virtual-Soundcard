@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cinttypes>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <random>
 
@@ -31,9 +32,19 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     DSV_LOG_WARN("mlockall failed; page faults may cause dropouts (raise RLIMIT_MEMLOCK)");
 
   // --- shared memory soundcard ---
-  const std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
+  std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
   const size_t bytes = shm_total_bytes(cfg_.ring_frames, cfg_.tx_channels, cfg_.rx_channels);
-  if (!shm_.create(shm_name, bytes)) {
+  bool created = shm_.create(shm_name, bytes);
+#if defined(_WIN32)
+  if (!created && cfg_.shm_name.empty() && !std::getenv("DSV_SHM_NAME")) {
+    // Global\ needs SeCreateGlobalPrivilege (services, elevated consoles).
+    DSV_LOG_WARN("cannot create %s (not elevated?); using %s, visible to this session only",
+                 shm_name.c_str(), kFallbackShmName);
+    shm_name = kFallbackShmName;
+    created = shm_.create(shm_name, bytes);
+  }
+#endif
+  if (!created) {
     DSV_LOG_ERROR("cannot create shared memory '%s' (%llu bytes); is another dsvd running?",
                   shm_name.c_str(), (unsigned long long)bytes);
     return false;

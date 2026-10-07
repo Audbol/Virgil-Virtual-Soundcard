@@ -23,7 +23,10 @@ constexpr uint32_t kMaxTxClients = 8;
 constexpr size_t kShmHeaderBytes = 4096;
 
 #if defined(_WIN32)
-constexpr const char* kDefaultShmName = "Local\\DSVSoundcard";
+// The service creates a Global section visible to every session; a dsvd
+// started from an unprivileged console falls back to the Local namespace.
+constexpr const char* kDefaultShmName = "Global\\DSVSoundcard";
+constexpr const char* kFallbackShmName = "Local\\DSVSoundcard";
 #else
 constexpr const char* kDefaultShmName = "/dsv-soundcard";
 #endif

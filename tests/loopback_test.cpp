@@ -21,7 +21,11 @@ TEST(loopback_unicast) {
   Config c;
   c.device_name = "DSV Loopback Test";
   c.interface = "127.0.0.1";
+#if defined(_WIN32)
+  c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id());
+#else
   c.shm_name = std::string(kDefaultShmName) + "-test-" + std::to_string(process_id());
+#endif
   c.clock = "free";
   c.sap = false;
   c.lock_memory = false;

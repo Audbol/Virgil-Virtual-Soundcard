@@ -62,14 +62,16 @@ bool resolve_interface(const std::string& name, uint32_t* out) {
   if (!name.empty() && parse_ipv4(name, out)) return true;
 #if defined(_WIN32)
   ULONG size = 16 * 1024;
-  std::vector<unsigned char> buf(size);
-  auto* aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-  if (GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr, aa,
-                           &size) == ERROR_BUFFER_OVERFLOW) {
-    buf.resize(size);
+  std::vector<unsigned char> buf;
+  IP_ADAPTER_ADDRESSES* aa = nullptr;
+  ULONG rc = ERROR_BUFFER_OVERFLOW;
+  for (int tries = 0; tries < 3 && rc == ERROR_BUFFER_OVERFLOW; ++tries) {
+    buf.assign(size, 0);
     aa = reinterpret_cast<IP_ADAPTER_ADDRESSES*>(buf.data());
-    if (GetAdaptersAddresses(AF_INET, 0, nullptr, aa, &size) != NO_ERROR) return false;
+    rc = GetAdaptersAddresses(AF_INET, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST, nullptr,
+                              aa, &size);
   }
+  if (rc != NO_ERROR) return false;
   for (auto* a = aa; a; a = a->Next) {
     if (a->OperStatus != IfOperStatusUp || a->IfType == IF_TYPE_SOFTWARE_LOOPBACK) continue;
     char fname[256];

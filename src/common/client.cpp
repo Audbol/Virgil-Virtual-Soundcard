@@ -15,7 +15,13 @@ std::string default_shm_name() {
 
 bool Client::open(const std::string& name) {
   close();
-  if (!shm_.open(name.empty() ? default_shm_name() : name)) return false;
+  if (!shm_.open(name.empty() ? default_shm_name() : name)) {
+#if defined(_WIN32)
+    if (!name.empty() || !shm_.open(kFallbackShmName)) return false;
+#else
+    return false;
+#endif
+  }
   auto* h = static_cast<ShmHeader*>(shm_.data());
   if (shm_.size() < kShmHeaderBytes || h->magic != kShmMagic || h->version != kShmVersion ||
       h->total_bytes > shm_.size() || h->ring_frames == 0 ||

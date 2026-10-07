@@ -1,0 +1,7 @@
+if [ -d /run/systemd/system ]; then
+	systemctl daemon-reload >/dev/null 2>&1 || :
+	if [ "$1" -eq 1 ]; then
+		systemctl enable dsvd.service >/dev/null 2>&1 || :
+	fi
+	systemctl restart dsvd.service >/dev/null 2>&1 || :
+fi

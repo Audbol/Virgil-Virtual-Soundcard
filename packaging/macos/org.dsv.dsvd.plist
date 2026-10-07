@@ -1,7 +1,6 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<!-- sudo cp org.dsv.dsvd.plist /Library/LaunchDaemons/ &&
-     sudo launchctl load -w /Library/LaunchDaemons/org.dsv.dsvd.plist -->
+<!-- Installed by the DSV .pkg to /Library/LaunchDaemons. -->
 <plist version="1.0">
 <dict>
 	<key>Label</key>
@@ -16,7 +15,12 @@
 	<true/>
 	<key>KeepAlive</key>
 	<true/>
+	<key>ThrottleInterval</key>
+	<integer>5</integer>
+	<!-- Real-time audio: keep the daemon out of App Nap / background QoS. -->
 	<key>ProcessType</key>
 	<string>Interactive</string>
+	<key>StandardErrorPath</key>
+	<string>/Library/Logs/DSV/dsvd.log</string>
 </dict>
 </plist>

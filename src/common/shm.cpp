@@ -6,6 +6,7 @@
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <sddl.h>
 #else
 #include <fcntl.h>
 #include <sys/mman.h>
@@ -21,11 +22,20 @@ SharedMemory::~SharedMemory() { close(); }
 
 bool SharedMemory::create(const std::string& name, size_t size) {
   close();
-  HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, nullptr, PAGE_READWRITE | SEC_COMMIT,
+  // The daemon usually runs as LocalSystem; let any logged-on user's audio
+  // apps map the soundcard read/write (default DACL would be SYSTEM/admins).
+  SECURITY_ATTRIBUTES sa{sizeof sa, nullptr, FALSE};
+  ConvertStringSecurityDescriptorToSecurityDescriptorA(
+      "D:(A;;GA;;;SY)(A;;GA;;;BA)(A;;GRGW;;;AU)(A;;GRGW;;;IU)", SDDL_REVISION_1,
+      &sa.lpSecurityDescriptor, nullptr);
+  HANDLE h = CreateFileMappingA(INVALID_HANDLE_VALUE, sa.lpSecurityDescriptor ? &sa : nullptr,
+                                PAGE_READWRITE | SEC_COMMIT,
                                 DWORD(uint64_t(size) >> 32), DWORD(size & 0xffffffffu),
                                 name.c_str());
+  const DWORD err = GetLastError();
+  if (sa.lpSecurityDescriptor) LocalFree(sa.lpSecurityDescriptor);
   if (!h) return false;
-  if (GetLastError() == ERROR_ALREADY_EXISTS) {
+  if (err == ERROR_ALREADY_EXISTS) {
     // Another daemon instance owns it.
     CloseHandle(h);
     return false;
