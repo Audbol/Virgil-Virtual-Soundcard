@@ -157,6 +157,8 @@ pub struct Settings {
   pub tx_latency_ns: u32,
   /// How long after a frame's media time it is read and sent (Virgil patch).
   pub tx_send_delay_ns: u32,
+  /// Packet timestamp minus the media time of its samples (Virgil patch).
+  pub tx_timestamp_offset_ns: i64,
   pub clock_path: Option<PathBuf>,
   pub use_safe_clock: bool,
   pub tx_source_bit_depth: u8,
@@ -205,6 +207,10 @@ impl Settings {
         .get("TX_SEND_DELAY_NS")
         .map(|p| p.parse().expect("invalid TX_SEND_DELAY_NS, must be integer"))
         .unwrap_or(0),
+      tx_timestamp_offset_ns: config
+        .get("TX_TIMESTAMP_OFFSET_NS")
+        .map(|p| p.parse().expect("invalid TX_TIMESTAMP_OFFSET_NS, must be integer"))
+        .unwrap_or(super::flows_tx::CLOCK_OFFSET_NS as i64),
       clock_path: config.get("CLOCK_PATH").map(|p| p.try_into().unwrap()),
       use_safe_clock,
       tx_source_bit_depth,

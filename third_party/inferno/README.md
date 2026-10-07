@@ -30,3 +30,10 @@ Changes for Virgil:
    The default of 0 keeps the upstream behaviour.
 4. `flows_tx.rs`: the "clock unavailable" error is not logged for the first
    clock check at startup, which misses normally.
+5. `TX_TIMESTAMP_OFFSET_NS` setting: the difference between a packet's
+   timestamp and the media time of its samples (upstream: fixed -0.5 ms).
+   Virgil sets it to its TX latency so packets are stamped later than they
+   are sent and arrive in time for receivers with any latency setting
+   (a WING at 1 ms dropped Virgil's packets otherwise).
+6. `util/os.rs`: on Windows the real-time threads also join the MMCSS
+   "Pro Audio" class.

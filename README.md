@@ -38,8 +38,11 @@ talk to each other, set `master_capable = true` in `[ptp]` on one of them.
 
 Latency: Virgil's **receive latency** (`latency_us`, default 4 ms) works like
 the device latency in Dante Controller. Its **transmit latency**
-(`tx_latency_us`, default 4 ms) is the minimum latency Virgil asks receivers
-of its channels to use, like Dante Virtual Soundcard's latency setting. Lower
+(`tx_latency_us`, default 4 ms) works like Dante Virtual Soundcard's latency
+setting: Virgil timestamps its audio that far ahead, so receivers get it in
+time whatever their own latency (even 0.25 ms on hardware). Playback through
+Virgil therefore reaches the network `tx_latency_us` plus the receiver's
+latency after the app plays it. Lower
 both on a clean, wired gigabit network. Raise them if you hear dropouts.
 
 Network ports (allow them through the firewall; the Windows installer does):

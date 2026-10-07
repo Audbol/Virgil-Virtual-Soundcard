@@ -197,6 +197,11 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     cfg.insert("TX_LATENCY_NS".to_owned(), c.tx_latency_ns.to_string());
     cfg.insert("RX_LATENCY_NS".to_owned(), c.rx_latency_ns.to_string());
     cfg.insert("TX_SEND_DELAY_NS".to_owned(), c.tx_send_delay_ns.to_string());
+    // Stamp packets tx_latency after their samples' media time: they are sent
+    // tx_send_delay after it, so every receiver gets them before even its
+    // own latency starts counting, whatever its latency setting (as Dante
+    // Virtual Soundcard does; the latency shows up as our output latency).
+    cfg.insert("TX_TIMESTAMP_OFFSET_NS".to_owned(), c.tx_latency_ns.to_string());
 
     let valid = Arc::new(RwLock::new(true));
     let tx_views = channel_views(c.tx_ring, c.tx_ring_frames as usize, c.tx_channels as usize, &valid);

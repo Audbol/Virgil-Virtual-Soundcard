@@ -42,7 +42,7 @@ pub const PROCESS_EVENTS_INTERVAL: Duration = Duration::from_millis(33);
 pub const MIN_SLEEP: Duration = Duration::from_millis(0); // to save CPU cycles, TODO: make it configurable via some "eco mode" flag
 
 // it's better to have the clock in the past than in the future - otherwise Dante devices receiving from us go mad and fart
-const CLOCK_OFFSET_NS: ClockDiff = -500_000;
+pub const CLOCK_OFFSET_NS: ClockDiff = -500_000;
 
 pub type SamplesRequestCallback = Box<dyn FnMut(Clock, usize, &mut [Sample]) + Send + 'static>;
 
@@ -479,6 +479,7 @@ impl FlowsTransmitter {
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     sample_rate: u32,
     latency_ns: usize,
+    timestamp_offset_ns: i64,
     max_lag_samples: usize,
     channels_outputs: Vec<RBOutput<Sample, P>>,
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
@@ -497,7 +498,7 @@ impl FlowsTransmitter {
       max_lag_samples,
       timestamp_shift: (0 as ClockDiff).wrapping_sub_unsigned(latency.try_into().unwrap()),
       tx_source_bit_depth,
-      clock_offset_samples: (CLOCK_OFFSET_NS as i64 * sample_rate as i64 / 1_000_000_000i64)
+      clock_offset_samples: (timestamp_offset_ns * sample_rate as i64 / 1_000_000_000i64)
         .try_into()
         .unwrap(),
       current_timestamp,
@@ -509,6 +510,7 @@ impl FlowsTransmitter {
     self_info: Arc<DeviceInfo>,
     tx_latency_ns: usize,
     tx_send_delay_ns: usize,
+    tx_timestamp_offset_ns: i64,
     tx_source_bit_depth: u8,
     clock_recv: RealTimeBoxReceiver<Option<ClockOverlay>>,
     channels_outputs: Vec<RBOutput<Sample, P>>,
@@ -527,6 +529,7 @@ impl FlowsTransmitter {
         clock_recv,
         srate,
         tx_send_delay_ns, // Virgil patch: was hardcoded 0
+        tx_timestamp_offset_ns,
         // we set max_lag_samples to tx latency because it doesn't make sense to send samples older than that
         (tx_latency_ns as u64 * srate as u64 / 1_000_000_000u64).try_into().unwrap(),
         channels_outputs,

@@ -46,10 +46,10 @@ TEST(soundcard_loopback_through_dante_rings) {
   CHECK(e.start());
   if (!e.running()) return;
   wait_ms(50);  // first ticks publish the clock
-  // Inferno sends frame f at media time f + send delay, labelled 0.5 ms
-  // early; the receiver writes it at label + its latency.
+  // Inferno sends frame f at media time f + send delay, stamped f + tx
+  // latency; the receiver writes it at stamp + its latency.
   const uint64_t L = c.us_to_frames(c.tx_send_delay_us()), RL = c.us_to_frames(c.latency_us);
-  const uint64_t D = RL - c.us_to_frames(500);
+  const uint64_t D = c.us_to_frames(c.tx_latency_us) + RL;
   const uint64_t dmask = c.ring_frames - 1;
 
   // Network simulator: what Inferno + the wire + a receiving Inferno do.
