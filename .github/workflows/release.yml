@@ -1,0 +1,64 @@
+name: Installers
+
+# Builds the installers on every push to main (as workflow artifacts) and
+# attaches them to a GitHub Release when a tag like v0.1.0 is pushed.
+on:
+  push:
+    branches: [main]
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y libasound2-dev rpm dpkg-dev
+      - run: packaging/linux/build-packages.sh all
+      - uses: actions/upload-artifact@v4
+        with: { name: linux-packages, path: "dist/*" }
+
+  windows:
+    # Cross-built with MinGW-w64 + NSIS: the same toolchain the installer
+    # was developed and tested with.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 nsis
+      - name: Fetch the Steinberg ASIO SDK (not redistributed with DSV)
+        run: |
+          curl -fsSL -o asiosdk.zip https://www.steinberg.net/asiosdk
+          unzip -q asiosdk.zip -d asio
+          echo "ASIO_SDK_DIR=$(find "$PWD/asio" -maxdepth 2 -name common -type d -printf '%h\n' | head -1)" >> "$GITHUB_ENV"
+      - run: packaging/windows/build-installer.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: windows-installer, path: "dist/*.exe" }
+
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build .pkg
+        env:
+          DSV_CODESIGN_ID: ${{ secrets.MACOS_CODESIGN_ID }}
+          DSV_INSTALLER_ID: ${{ secrets.MACOS_INSTALLER_ID }}
+          DSV_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+        run: packaging/macos/build-pkg.sh
+      - uses: actions/upload-artifact@v4
+        with: { name: macos-installer, path: "dist/*.pkg" }
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, windows, macos]
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: dist, merge-multiple: true }
+      - run: cd dist && sha256sum * > SHA256SUMS
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
