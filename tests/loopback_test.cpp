@@ -35,7 +35,9 @@ TEST(soundcard_loopback_through_dante_rings) {
   c.lock_memory = false;
   c.tx_channels = 4;
   c.rx_channels = 4;
-  c.latency_us = 4000;  // a receiver uses at least the sender's tx latency
+  // Generous receive latency: the simulator below is an ordinary thread that
+  // a loaded CI machine may delay by several milliseconds.
+  c.latency_us = 20000;
   c.tx_latency_us = 4000;
   c.ring_frames = 16384;
 
@@ -94,20 +96,32 @@ TEST(soundcard_loopback_through_dante_rings) {
   CHECK(a.write_tx(start, sa.data(), n, 4) == 0);
   CHECK(b.write_tx(start, sb.data(), n, 2) == 0);
 
-  // The block comes back D frames later; wait until it is all readable.
-  for (;;) {
-    double t;
-    a.frame_now(&t);
-    if (t > double(start + D + n + a.rx_latency_frames() + 2 * a.period_frames())) break;
-    wait_ms(5);
-  }
+  // The block comes back D frames later. Collect it as it becomes readable:
+  // the capture ring only keeps half a ring (~170 ms) of history, and a busy
+  // CI machine can oversleep a single long wait.
   std::vector<float> got(n * 4);
-  a.read_rx(start + D, got.data(), n, 4);
+  // Readiness follows the engine's last finished tick, not the interpolated
+  // clock, so a late tick cannot make us read a slot before it is filled.
+  const int64_t give_up = mono_ns() + 5000000000LL;
+  for (uint32_t have = 0; have < n && mono_ns() < give_up;) {
+    const uint64_t done = a.header()->now_frames.load(std::memory_order_acquire);
+    const uint64_t ready = done - 2 * a.period_frames();
+    if (ready > start + D + have) {
+      const uint32_t k = uint32_t(std::min<uint64_t>(ready - (start + D + have), n - have));
+      a.read_rx(start + D + have, got.data() + size_t(have) * 4, k, 4);
+      have += k;
+    }
+    wait_ms(2);
+  }
   double max_err = 0;
   for (uint32_t f = 0; f < n; ++f)
     for (uint32_t ch = 0; ch < 4; ++ch) {
       const float want = sa[f * 4 + ch] + (ch == 0 ? 0.125f : 0.f);
-      max_err = std::max(max_err, double(std::fabs(got[f * 4 + ch] - want)));
+      const double err = std::fabs(got[f * 4 + ch] - want);
+      if (err > 1e-6 && max_err <= 1e-6)
+        std::printf("  first mismatch at frame %u ch %u: got %g want %g\n", f, ch,
+                    double(got[f * 4 + ch]), double(want));
+      max_err = std::max(max_err, err);
     }
   std::printf("  loopback max error %.3g over %u frames (round trip %llu frames), %s\n", max_err,
               n, (unsigned long long)D, e.status_line().c_str());
