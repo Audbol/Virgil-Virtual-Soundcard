@@ -18,7 +18,8 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
-      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
+      - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
       - uses: actions/upload-artifact@v4

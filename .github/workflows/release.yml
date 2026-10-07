@@ -11,7 +11,7 @@ on:
   workflow_dispatch:
     inputs:
       version:
-        description: "Publish a release with this tag (e.g. v0.1.0); empty = build only"
+        description: "Publish a release with this tag (e.g. v0.2.0); empty = build only"
         required: false
         default: ""
 
@@ -45,6 +45,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y g++-mingw-w64-x86-64 nsis zip
+      - run: rustup target add x86_64-pc-windows-gnu
       - name: Fetch the Steinberg ASIO SDK (not redistributed with Virgil)
         run: |
           curl -fsSL -o asiosdk.zip https://www.steinberg.net/asiosdk
@@ -58,6 +59,7 @@ jobs:
     runs-on: macos-14
     steps:
       - uses: actions/checkout@v4
+      - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
       - name: Build .pkg and portable zip
         env:
           VIRGIL_CODESIGN_ID: ${{ secrets.MACOS_CODESIGN_ID }}

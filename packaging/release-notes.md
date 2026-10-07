@@ -1,8 +1,10 @@
+**Virgil** (formerly DSV) is now a native Dante device. It appears in Dante Controller with its own transmit and receive channels, and you route it there like any other Dante device. AES67 mode is no longer needed or used. Dante support comes from [Inferno](https://github.com/teodly/inferno), an independent open-source implementation of the protocol.
+
 ## Downloads
 
 | You have | Download | Then |
 |---|---|---|
-| **Windows 10/11** | `Virgil-*-win64-setup.exe` | Run it. Open **Virgil Control** from the Start menu or desktop. Pick *Virgil Virtual Soundcard* as the ASIO device in your DAW. |
+| **Windows 10/11** | `Virgil-*-win64-setup.exe` | Run it. Open **Virgil Control** from the Start menu or desktop and pick your Dante network interface. Choose *Virgil* as the ASIO device in your DAW. |
 | Windows, no install | `Virgil-*-windows-x64-portable.zip` | Unzip. Run `register-asio-driver.cmd` as administrator, then double-click `virgil-control.exe`. |
 | **macOS 11+** | `Virgil-*-macos.pkg` | Run it. Open **Virgil Control** from Applications. Pick *Virgil Virtual Soundcard* in System Settings › Sound. |
 | macOS, no install | `Virgil-*-macos-portable.zip` | Unzip, then follow `START-HERE.txt`. |
@@ -10,12 +12,8 @@
 | **Fedora / RHEL** | `virgil-*.x86_64.rpm` | `sudo dnf install ./virgil-*.x86_64.rpm`, then run `virgil-control`. |
 | Linux, no install | `Virgil-*-linux-x86_64.tar.gz` | Extract, `./setup-alsa.sh`, then `./virgil-control`. |
 
-**Virgil Control** opens the control panel in your browser at http://127.0.0.1:8480. It shows:
+Then, in **Dante Controller**, subscribe Virgil's receive channels to your Dante transmitters (and other devices to Virgil's transmit channels).
 
-- the clock state and level meters
-- the AES67 streams on your network, with one-click subscribe
-- the settings
+**Upgrading from DSV 0.1:** Virgil installs alongside DSV under new names. Uninstall DSV first, because both use the PTP ports. Old `dsv.conf` files are not migrated; the settings that still apply are name, interface, sample rate, channels and latency.
 
-**Dante:** Virgil talks to Dante devices through Dante's **AES67 mode**. Enable it per device in Dante Controller › Device View › AES67 Config, then create a multicast AES67 flow on the device. Virgil does not implement Audinate's proprietary native Dante protocol and is not affiliated with Audinate.
-
-This is an early release. The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will ask you to confirm the first time you run them. The release has not yet been tested with real Dante hardware.
+**Unofficial:** Virgil is not affiliated with, authorized or approved by Audinate. It has been tested between Virgil devices with an open-source Dante controller, **but not yet against Audinate hardware or Dante Controller itself**. The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will ask you to confirm the first time you run them. Licensed under the GPLv3.

@@ -27,16 +27,23 @@ else()
   set(_libname libvirgil_dante.a)
 endif()
 
+# Environment for cargo: quiet dependency warnings; match the C++ deployment
+# target on macOS so the linker does not complain about mixed versions.
+set(_env RUSTFLAGS=-Awarnings)
+if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
+  list(APPEND _env MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
+endif()
+
 set(_outputs "")
 set(_commands "")
 if(_targets STREQUAL "")
   set(_lib ${_cargo_dir}/release/${_libname})
-  list(APPEND _commands COMMAND ${CMAKE_COMMAND} -E env RUSTFLAGS=-Awarnings ${CARGO_EXECUTABLE} build --release --quiet
+  list(APPEND _commands COMMAND ${CMAKE_COMMAND} -E env ${_env} ${CARGO_EXECUTABLE} build --release --quiet
        --manifest-path ${_manifest} --target-dir ${_cargo_dir})
 else()
   foreach(t IN LISTS _targets)
     list(APPEND _outputs ${_cargo_dir}/${t}/release/${_libname})
-    list(APPEND _commands COMMAND ${CMAKE_COMMAND} -E env RUSTFLAGS=-Awarnings ${CARGO_EXECUTABLE} build --release --quiet
+    list(APPEND _commands COMMAND ${CMAKE_COMMAND} -E env ${_env} ${CARGO_EXECUTABLE} build --release --quiet
          --manifest-path ${_manifest} --target-dir ${_cargo_dir} --target ${t})
   endforeach()
   list(LENGTH _outputs _n)

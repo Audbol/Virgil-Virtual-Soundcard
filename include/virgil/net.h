@@ -29,7 +29,7 @@ struct InterfaceInfo {
 // Active IPv4 interfaces.
 std::vector<InterfaceInfo> list_interfaces();
 
-// DSCP values recommended by AES67 (section 6.2).
+// DSCP values used for media and clock traffic (as Dante and AES67 do).
 constexpr int kDscpPtp = 46;    // EF
 constexpr int kDscpMedia = 34;  // AF41
 
@@ -42,7 +42,7 @@ class UdpSocket {
   UdpSocket(UdpSocket&& o) noexcept : fd_(o.fd_) { o.fd_ = kInvalid; }
 
   // Bind to INADDR_ANY:port (port 0 = ephemeral) with SO_REUSEADDR/PORT so
-  // several receivers and other AES67 software can share the port.
+  // several receivers and other PTP software can share the port.
   bool open(uint16_t port, bool reuse = true);
   void close();
   bool is_open() const { return fd_ != kInvalid; }

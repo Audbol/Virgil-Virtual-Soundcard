@@ -1,8 +1,8 @@
 Virgil Virtual Soundcard - portable for Linux (x86_64, glibc 2.35+)
 ===============================================================
 
-AES67 network soundcard with an ALSA device. Works with Dante devices in
-AES67 mode (enable it in Dante Controller > Device View > AES67 Config).
+Dante virtual soundcard with an ALSA device: the computer shows up in Dante
+Controller as a Dante device named "Virgil"; route it there.
 
 1. ./setup-alsa.sh
    Adds the "virgil" ALSA device to ~/.asoundrc, pointing at this folder.
@@ -12,10 +12,13 @@ AES67 mode (enable it in Dante Controller > Device View > AES67 Config).
    For PTP (ports 319/320) and real-time priority, run virgild with
    privileges instead:  sudo ./virgild -c virgil.conf
 
-3. Use ALSA device "virgil" (e.g. aplay -D virgil, jackd -d alsa -d virgil_hw -p 64).
+3. In Dante Controller, subscribe Virgil's channels.
+
+4. Use ALSA device "virgil" (e.g. aplay -D virgil, jackd -d alsa -d virgil_hw -p 64).
 
 Settings: virgil.conf in this folder. Log: virgild.log.
 For a system service that starts at boot, install the .deb / .rpm instead.
 
-Not affiliated with Audinate. Virgil does not implement the proprietary
-Dante protocol; it talks to Dante gear through Dante's AES67 mode.
+Unofficial: Virgil is built on Inferno, an independent open-source Dante
+implementation, and is not affiliated with or approved by Audinate.
+License: GPLv3 (see LICENSE).

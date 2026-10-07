@@ -160,10 +160,13 @@ Section "Virgil" SecMain
   nsExec::Exec '"$SYSDIR\sc.exe" failure ${SERVICE} reset= 86400 actions= restart/2000/restart/5000/restart/30000'
   Pop $0
 
-  ; Firewall: RTP, PTP (319/320) and SAP arrive unsolicited.
+  ; Firewall: Dante audio, control (4400/4455/8700/8800), PTP (319/320) and
+  ; mDNS (5353) arrive unsolicited.
   nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${FIREWALL_RULE}"'
   Pop $0
   nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${FIREWALL_RULE}" dir=in action=allow program="$INSTDIR\virgild.exe" protocol=udp enable=yes profile=any'
+  Pop $0
+  nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${FIREWALL_RULE}" dir=in action=allow program="$INSTDIR\virgild.exe" protocol=tcp enable=yes profile=any'
   Pop $0
 
   nsExec::ExecToLog '"$SYSDIR\sc.exe" start ${SERVICE}'

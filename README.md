@@ -1,79 +1,77 @@
-# Virgil: a low-latency virtual network soundcard
+# Virgil: a low-latency Dante virtual soundcard
 
-Virgil makes a computer's audio apps send and receive multichannel audio over the
-network as **AES67** streams. AES67 is the interoperability standard that Dante
-devices support in their **AES67 mode**. Apps see an ordinary soundcard on every
-platform:
+Virgil turns a computer into a **Dante device**. In Dante Controller it shows up
+next to your other Dante gear, with its own transmit and receive channels. You
+route it like any other device, and your audio apps see an ordinary soundcard:
 
 | OS      | Driver                         | Apps see it as                   |
 |---------|--------------------------------|----------------------------------|
 | Linux   | ALSA external PCM plugin       | `virgil` ALSA device (JACK, PipeWire, aplay, …) |
 | macOS   | CoreAudio AudioServerPlugIn    | "Virgil Virtual Soundcard" system device |
-| Windows | ASIO driver (COM in-proc)      | "Virgil Virtual Soundcard" ASIO device |
+| Windows | ASIO driver (COM in-proc)      | "Virgil" ASIO device |
 
-## About Dante
+Virgil (Dante's guide through the *Inferno*) is built on
+[**Inferno**](https://github.com/teodly/inferno), an independent open-source
+implementation of the Dante protocol by Teodor Woźniak and contributors. Inferno
+is vendored in `third_party/inferno` with a few patches; see its README.
 
-**Virgil does not implement Audinate's native Dante protocol.** Native Dante
-(its device discovery, routing and audio transport) is proprietary. The only
-legitimate way to use it is Audinate's licensed SDKs. Virgil is not affiliated
-with Audinate.
+> **Unofficial.** Virgil and Inferno are reverse-engineered and are not
+> affiliated with, authorized or approved by Audinate. "Dante" is a trademark
+> of Audinate. Expect rough edges compared with Audinate's Dante Virtual
+> Soundcard. Virgil is licensed under the GPLv3 (see `LICENSE`).
 
-Virgil talks to Dante gear through **Dante's AES67 mode**:
+## Using it with Dante Controller
 
-1. In Dante Controller, open *Device View → AES67 Config* on a Dante device and
-   enable AES67 mode, then reboot the device.
-2. **Dante → Virgil:** create a multicast transmit flow on the Dante device and tick
-   "AES67". Virgil discovers it via SAP. Run `virgild --discover` to list it, then
-   subscribe in `virgil.conf` with `sap_name = …`.
-3. **Virgil → Dante:** Virgil announces its transmit flows via SAP. They appear in
-   Dante Controller's routing grid as an AES67 device that Dante receivers can
-   subscribe to.
-4. Clocking: Dante devices in AES67 mode bridge their clock onto PTPv2
-   domain 0, which Virgil follows. Virgil only acts as PTPv2 grandmaster if it hears
-   no other master.
+1. Install Virgil and start it (the installers run it as a service).
+2. In **Virgil Control**, pick the network interface your Dante network is on.
+3. In **Dante Controller**, the computer appears as a device called **Virgil**
+   (rename it in Settings). Its receive channels appear in the routing grid.
+   Subscribe them to any Dante transmitter, and subscribe other devices to
+   Virgil's transmit channels. Virgil remembers subscriptions across restarts.
+4. Play into and record from the Virgil soundcard in your apps.
 
-The usual Dante AES67 limits apply: 48 kHz, multicast, 1 ms packet time and up
-to 8 channels per flow.
+Clocking: Virgil follows the Dante clock master (PTPv1, as Dante uses). If no
+other Dante device provides a clock, for example when Virgil machines only
+talk to each other, set `master_capable = true` in `[ptp]` on one of them.
+
+Latency: Virgil's **receive latency** (`latency_us`, default 4 ms) works like
+the device latency in Dante Controller. Its **transmit latency**
+(`tx_latency_us`, default 4 ms) is the minimum latency Virgil asks receivers
+of its channels to use, like Dante Virtual Soundcard's latency setting. Lower
+both on a clean, wired gigabit network. Raise them if you hear dropouts.
+
+Network ports (allow them through the firewall; the Windows installer does):
+UDP 319/320 (PTP), 5353 (mDNS), 4400, 4455, 8700 and 8800 (Dante control),
+and the audio flows. Virgil needs administrator/root rights for the PTP
+ports.
 
 ## Architecture
 
 ```
- apps ─► ALSA plugin ─┐                              ┌─► AES67 RTP multicast ─► network
- apps ─► CoreAudio  ──┼─► shared-memory soundcard ◄──┤        (L24, 125 µs…4 ms packets)
- apps ─► ASIO driver ─┘   (lock-free, per-frame      └─◄ AES67 RTP ◄─ Dante / AES67 devices
+ apps ─► ALSA plugin ─┐                               ┌─► Inferno ─► Dante flows ─► network
+ apps ─► CoreAudio  ──┼─► shared-memory soundcard ◄───┤   (discovery, control, audio)
+ apps ─► ASIO driver ─┘   (lock-free, per-frame        └─◄ Inferno ◄─ Dante devices
                            addressed by media clock)
                                     ▲
-                               virgild daemon ── PTPv2 slave/master, SAP announce/discover
+                    virgild daemon ── PTPv1 follower (or master), mixer, control panel
 ```
 
-* **One clock.** `virgild` steers a media clock to the PTP grandmaster with a PI
-  servo and publishes a `(host time, media frame, rate)` anchor in shared
+* **One clock.** `virgild` steers a media clock to the Dante clock master with a
+  PI servo. It publishes a `(host time, media frame, rate)` anchor in shared
   memory. Every driver runs its callbacks from that anchor: CoreAudio zero
-  timestamps, ASIO buffer switches and the ALSA hw pointer. Apps therefore run
-  in lock-step with the network. There is no resampling and no drift
-  correction anywhere.
+  timestamps, ASIO buffer switches and the ALSA hw pointer. Inferno gets the
+  same clock in-process. Apps therefore run in lock-step with the network.
+  There is no resampling and no drift correction anywhere.
 * **Rings indexed by absolute media frame.** Frame *t* lives in slot
-  `t mod ring`. A received RTP packet is written at the slot of its own
-  timestamp. That makes the ring a free jitter buffer that tolerates
-  reordering. Playback from up to 8 clients is summed by the daemon, so several
-  apps can play at once without a lock.
-* **Real-time path.** The daemon tick and receive threads use SCHED_FIFO
-  (Linux), time-constraint policy (macOS) or MMCSS "Pro Audio" (Windows). Each
-  tick wakes on an absolute deadline with a short final spin. Memory is
-  `mlock`ed, nothing allocates after start-up, and audio threads never lock.
-  Packets are tagged DSCP EF/AF41 as AES67 recommends.
-
-### Latency
-
-| Path     | Latency                                                        |
-|----------|----------------------------------------------------------------|
-| Capture  | `latency_us` (network jitter buffer) + driver buffer            |
-| Playback | `tx_lead_us` + one packet + driver buffer                       |
-
-Example: `packet_time_us = 250` with `latency_us = 1000`, `tx_lead_us = 500`
-and a 32-frame ASIO buffer gives about 1.7 ms in and 1.4 ms out at 48 kHz. All
-drivers report these numbers to the host (`getLatencies`, CoreAudio safety
-offsets, ALSA `delay`), so DAW latency compensation stays exact.
+  `t mod ring`, in the apps' rings and in the 32-bit rings Inferno reads and
+  writes. Received audio lands at the slot of its own timestamp plus the
+  latency, which makes the ring a free jitter buffer. Playback from up to 8
+  clients is summed by the daemon, so several apps can play at once without
+  a lock.
+* **Real-time path.** The daemon tick uses SCHED_FIFO (Linux), the
+  time-constraint policy (macOS) or MMCSS "Pro Audio" (Windows). It wakes on an
+  absolute deadline with a short final spin. Memory is `mlock`ed, nothing
+  allocates after start-up, and audio threads never lock.
 
 ## Installing
 
@@ -105,19 +103,15 @@ What each one sets up:
 **Virgil Control** opens the control panel in your browser. You can also go to
 http://127.0.0.1:8480/ directly while `virgild` runs. It shows:
 
-- **Status:** clock state (PTP locked, grandmaster or free-running) with its
-  offset, format, packet rates and loss, and which apps are connected and
-  playing.
+- **Status:** clock state (locked, clock master or free-running) with its
+  offset, format and latencies, and which apps are connected and playing.
 - **Meters:** per-channel peak meters for playback to the network and
   capture from it.
-- **Flows:** your transmit flows, and your receive flows with live
-  receiving / no-packets / not-found status.
-- **Streams on the network:** every AES67 flow announced via SAP, including
-  Dante devices in AES67 mode. Pick a capture channel, click **Receive**,
-  then **Apply**.
 - **Settings:** device name, network interface, sample rate, channel counts,
-  packet time, latency and clock source. An advanced editor gives you the
-  raw configuration file.
+  receive and transmit latency and clock source. An advanced editor gives you
+  the raw configuration file.
+
+Routing is done in Dante Controller (or any Dante routing tool).
 
 **Apply** validates the configuration, saves it and restarts the audio
 engine inside `virgild`. Apps stay connected when the sample rate and channel
@@ -148,8 +142,9 @@ waits for the network if the service starts at boot before the network is up.
 
 ## Building
 
-Requirements: CMake ≥ 3.16 and a C++17 compiler. Linux also needs
-`libasound2-dev`.
+Requirements: CMake ≥ 3.16, a C++17 compiler and a Rust toolchain (stable,
+via [rustup](https://rustup.rs)); Cargo builds the vendored Inferno. Linux
+also needs `libasound2-dev`.
 
 ```sh
 cmake -S . -B build && cmake --build build -j && ctest --test-dir build
@@ -157,8 +152,12 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 
 * **ASIO:** download the Steinberg ASIO SDK yourself (it is not
   redistributed). Then add `-DASIO_SDK_DIR=C:/path/to/asiosdk`.
-* **Cross-compiling Windows from Linux:**
+* **Cross-compiling Windows from Linux:** `rustup target add
+  x86_64-pc-windows-gnu`, then
   `cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DASIO_SDK_DIR=…`
+* **macOS universal build:** `rustup target add aarch64-apple-darwin
+  x86_64-apple-darwin` and configure with
+  `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`.
 
 ### Building the installers and portable archives
 
@@ -171,7 +170,7 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 
 Output goes to `dist/`. The **Release** GitHub workflow builds all of them on
 every push to `main`, keeping them as workflow artifacts. When you push a tag
-such as `v0.1.0`, or run the workflow by hand with a version, it publishes them
+such as `v0.2.0`, or run the workflow by hand with a version, it publishes them
 as a GitHub Release, together with
 `SHA256SUMS` and the notes from `packaging/release-notes.md`.
 
@@ -185,8 +184,7 @@ as a GitHub Release, together with
 ## Running
 
 ```sh
-virgild --status                     # clock state, packet counters, connected apps
-virgild --discover -i eth0           # list AES67 / Dante AES67 flows on the network
+virgild --status                     # clock state, counters, connected apps
 virgild -c my.conf -v                # run in the foreground with debug output
 ```
 
@@ -199,25 +197,25 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 
 | Component | How it was verified |
 |---|---|
-| AES67 engine, RTP, SDP, SAP, config | Unit tests; end-to-end UDP loopback is sample-accurate (error ≤ 6e-8, i.e. 24-bit quantisation) on Linux and on Windows (Wine) |
-| ALSA driver | Real `aplay`/`arecord` through the daemon in loopback: 3.000 s tone, 0 discontinuities with 64-frame periods |
-| Control panel | Browser test with Playwright against two daemons on one machine, with one standing in for a Dante device. Checked: stream discovery, one-click subscribe, Apply, and audio arriving on the chosen capture channels. Meters match the generated levels exactly. No console errors, no sideways scrolling at phone width. Requests with a foreign Host header, without the custom header, or cross-origin are refused. `aplay` stays connected when Apply keeps the layout, and reconnects when it changes |
-| Linux portable | Extracted and used as a user would: `setup-alsa.sh`, `virgil-control` (starts `virgild`), playback and recording through the `virgil` device |
-| Linux `.deb` | Installed with `dpkg` in a container. The system ALSA config lists the `virgil` devices and a 3 s tone passes through. Config edits survive reinstall; `purge` removes everything |
-| Windows installer | Run silently under Wine. Checked: files, ASIO registration, uninstall entry, service creation and auto-start, a clean service stop, config kept on upgrade, and removal on uninstall. Wine's service handling is unreliable, so **this needs a run on real Windows** |
-| macOS `.pkg` | **Not yet built.** The scripts are syntax-checked only. The `Installers` workflow builds it on macOS |
-| ASIO driver | Built against a stand-in for the documented SDK interface. A test host (`tests/asio_host_test.cpp`) under Wine got exactly 750 buffer switches in 2 s and a glitch-free round trip. Not yet run in a real DAW or against the real SDK headers |
-| CoreAudio driver | **Not yet compiled on macOS.** Only syntax-checked against stub headers. CI builds it on macOS; it needs a real Mac to validate |
-| PTPv2 slave/master | Servo checked in simulation (80 ppm drift, 20 µs jitter → within 30 µs). **Not yet tested against real Dante/AES67 hardware** |
-| Dante AES67 interop | Parses real Dante AES67 SDP. **Not yet tested with Dante devices** |
+| Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock master. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. **Not yet tested against Audinate hardware or Dante Controller itself** |
+| PTPv1 clock | Unit tests: message encoding, master/follower lock, servo in simulation. Across namespaces the follower locks within about 10 µs |
+| Engine, config | Unit tests; loopback through the Dante rings is bit-exact (24-bit) |
+| ALSA driver | Real `aplay`/`arecord` through the daemon, 64-frame periods |
+| Linux packages | `.deb` installed in a container; portable tarball used as a user would |
+| Windows installer | Run silently under Wine (files, ASIO registration, service). **Needs a run on real Windows** |
+| ASIO driver | Test host under Wine; not yet run in a real DAW |
+| CoreAudio driver, macOS `.pkg` | Built by CI on macOS; **not yet run on a real Mac** |
 
 Known limitations:
 
 * Timestamps are software-only (kernel receive timestamps on Linux). Expect
-  tens of µs of PTP jitter, which is enough for audio but not for SMPTE 2110
-  strictness.
-* The sample rate and channel count come from `virgil.conf`. Changing them means
-  restarting `virgild`; on macOS also restart `coreaudiod`.
+  tens of µs of clock jitter. That is fine for audio, but Dante Controller
+  may show the clock as less stable than hardware.
+* Dante features Inferno does not implement are missing: AES67 mode, Dante
+  Domain Manager, device locking, encrypted control, and changing latency
+  or sample rate from Dante Controller (set them in Virgil instead).
+* Sample rate and channel counts come from `virgil.conf`. Changing them
+  restarts the audio engine; on macOS also restart `coreaudiod`.
 * The Windows service creates a `Global\` shared-memory section that every
   user session can reach. A `virgild` started by hand from a non-elevated
   console falls back to `Local\`, which only that session can reach.

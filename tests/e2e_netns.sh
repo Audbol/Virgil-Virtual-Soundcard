@@ -15,6 +15,7 @@ build=$(cd "${1:?usage: e2e_netns.sh BUILD_DIR [NETAUDIO_BIN]}" && pwd)
 netaudio=${2:-}
 work=$(mktemp -d)
 pids=()
+status=0
 
 cleanup() {
   for p in "${pids[@]}"; do kill "$p" 2>/dev/null || true; done
@@ -97,7 +98,33 @@ sleep 3
 na subscription list 2>&1 || true
 
 echo "--- tone A -> B"
-VIRGIL_SHM_NAME=virgil-e2e-a ip netns exec vg-a "$build/tests/virgil_tone" play 12 &
-pids+=($!)
+VIRGIL_SHM_NAME=virgil-e2e-a ip netns exec vg-a "$build/tests/virgil_tone" play 10 &
+tone=$!
 sleep 1
-VIRGIL_TONE_DUMP=${VIRGIL_TONE_DUMP:-} VIRGIL_SHM_NAME=virgil-e2e-b ip netns exec vg-b "$build/tests/virgil_tone" listen 8
+VIRGIL_TONE_DUMP=${VIRGIL_TONE_DUMP:-} VIRGIL_SHM_NAME=virgil-e2e-b ip netns exec vg-b "$build/tests/virgil_tone" listen 8 ||
+  status=$?
+
+# Same path through the ALSA plugin, if it was built: aplay on A, arecord on B.
+plugin="$build/drivers/alsa/libasound_module_pcm_virgil.so"
+if [ -f "$plugin" ] && command -v aplay >/dev/null && command -v sox >/dev/null; then
+  wait "$tone"
+  echo "--- ALSA: aplay on A -> arecord on B"
+  mkdir -p "$work/alsa"
+  cat >"$work/alsa/.asoundrc" <<CONF
+pcm_type.virgil { lib "$plugin" }
+pcm.virgil_hw { type virgil }
+pcm.virgil { type plug slave.pcm "virgil_hw" }
+CONF
+  sox -n -r 48000 -b 32 -e signed -c 8 "$work/tone.wav" synth 4 sine 440 gain -6
+  HOME="$work/alsa" VIRGIL_SHM_NAME=virgil-e2e-b ip netns exec vg-b \
+    arecord -q -D virgil -f S32_LE -r 48000 -c 8 -d 6 "$work/rec.wav" &
+  rec=$!
+  sleep 1
+  HOME="$work/alsa" VIRGIL_SHM_NAME=virgil-e2e-a ip netns exec vg-a \
+    aplay -q -D virgil "$work/tone.wav"
+  wait "$rec"
+  # Channel 1 is routed A -> B; expect the 440 Hz tone at -6 dBFS (RMS 0.354).
+  sox "$work/rec.wav" -n remix 1 trim 1.5 2 stat 2>&1 | grep -E "RMS +amplitude|Rough +frequency"
+fi
+
+exit "$status"
