@@ -117,8 +117,14 @@ std::string find_daemon_dir() {
 #if defined(__APPLE__)
   dirs.push_back(here + "/../../..");  // Virgil Control.app/Contents/MacOS -> folder
 #endif
-  for (const auto& d : dirs)
+  for (const auto& d : dirs) {
+#if !defined(_WIN32) && !defined(__APPLE__)
+    // Installed packages run virgild as a systemd service; starting a second
+    // one from /usr/bin would only fight it for the Dante ports.
+    if (d.rfind("/usr/", 0) == 0) continue;
+#endif
     if (exists(d + kSep + kDaemon)) return d;
+  }
   return {};
 }
 

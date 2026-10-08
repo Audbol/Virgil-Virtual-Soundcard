@@ -11,6 +11,9 @@ LimitRTPRIO=95
 LimitMEMLOCK=infinity
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
 DynamicUser=yes
+# Inferno keeps Dante subscriptions and the device identity under $HOME.
+StateDirectory=virgil
+Environment=HOME=/var/lib/virgil XDG_STATE_HOME=/var/lib/virgil
 # The shared-memory soundcard must be reachable by desktop users.
 UMask=0000
 

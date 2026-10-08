@@ -19,7 +19,13 @@ pub struct StateStorage {
 
 impl StateStorage {
   pub fn new(self_info: &DeviceInfo) -> Self {
-    let dir = AppDirs::new(Some("inferno_aoip"), false).unwrap().state_dir.to_str().unwrap().to_owned()
+    // Virgil patch: services may run as a user without a home directory
+    // (systemd DynamicUser); fall back to the temp directory instead of
+    // panicking, which stopped the whole device from starting.
+    let base = AppDirs::new(Some("inferno_aoip"), false)
+      .map(|d| d.state_dir)
+      .unwrap_or_else(|| std::env::temp_dir().join("inferno_aoip"));
+    let dir = base.to_string_lossy().into_owned()
       + MAIN_SEPARATOR_STR
       + &hex::encode(self_info.factory_device_id);
     create_dir_all(&dir).log_and_forget();

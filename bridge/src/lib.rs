@@ -184,6 +184,18 @@ pub extern "C" fn vg_dante_set_clock(last_sync: i64, shift: i64, freq_scale: f64
     usrvclock::publish(Some(usrvclock::ClockOverlay { clock_id: 1, last_sync, shift, freq_scale }));
 }
 
+static LAST_ERROR: std::sync::Mutex<Option<CString>> = std::sync::Mutex::new(None);
+
+fn set_last_error(msg: &str) {
+    *LAST_ERROR.lock().unwrap() = CString::new(msg.replace('\0', " ")).ok();
+}
+
+/// Why the last vg_dante_start() failed, or NULL. Valid until the next start.
+#[no_mangle]
+pub extern "C" fn vg_dante_last_error() -> *const c_char {
+    LAST_ERROR.lock().unwrap().as_ref().map_or(std::ptr::null(), |c| c.as_ptr())
+}
+
 /// # Safety
 /// `id` is NULL (no clock leader) or points to 8 bytes: the leader's EUI-64
 /// clock identity, shown in Dante Controller's clock status view.
@@ -208,6 +220,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         None => return std::ptr::null_mut(),
     };
     *LOG_SINK.write().unwrap() = c.log;
+    *LAST_ERROR.lock().unwrap() = None;
     start_log_thread();
     install_panic_hook();
     PANICKED.store(false, std::sync::atomic::Ordering::SeqCst);
@@ -229,11 +242,13 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     let frames_ok = |f: u32| f.is_power_of_two() && f >= 1024;
     if !frames_ok(c.tx_ring_frames) || !frames_ok(c.rx_ring_frames) {
         log_line(0, "dante: ring sizes must be powers of two");
+        set_last_error("ring sizes must be powers of two");
         return std::ptr::null_mut();
     }
     let ip: Option<Ipv4Addr> = cstr(c.bind_ip).and_then(|s| s.parse().ok());
     if ip.is_none() {
         log_line(0, "dante: bind_ip is not an IPv4 address");
+        set_last_error("the network address is not IPv4");
         return std::ptr::null_mut();
     }
     let name = cstr(c.name).unwrap_or_else(|| "Virgil".into());
@@ -312,6 +327,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         Ok(Ok(())) => Box::into_raw(Box::new(Handle { stop: Some(stop_tx), thread: Some(thread), valid })) as *mut _,
         Ok(Err(e)) => {
             log_line(0, &format!("dante: start failed: {e}"));
+            set_last_error(&e);
             let _ = thread.join();
             std::ptr::null_mut()
         }

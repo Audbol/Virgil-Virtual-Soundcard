@@ -161,8 +161,15 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.log = &bridge_log;
     dante_ = vg_dante_start(&dc);
     if (!dante_) {
-      VIRGIL_LOG_ERROR("Dante device failed to start (is another Virgil or Inferno instance "
-                    "running? Dante ports 4400/4455/8700/8800 must be free)");
+      const char* why = vg_dante_last_error();
+      const std::string reason = why ? why : "";
+      if (reason.empty() || reason.find("in use") != std::string::npos ||
+          reason.find("AddrInUse") != std::string::npos)
+        VIRGIL_LOG_ERROR("Dante device failed to start%s%s (is another Virgil or Inferno instance "
+                         "running? Dante ports 4400/4455/8700/8800 must be free)",
+                         reason.empty() ? "" : ": ", reason.c_str());
+      else
+        VIRGIL_LOG_ERROR("Dante device failed to start: %s", reason.c_str());
       clock_.reset();
       return false;
     }

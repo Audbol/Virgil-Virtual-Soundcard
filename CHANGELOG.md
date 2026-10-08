@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.4.4
+- Linux / Raspberry Pi: fixed "Dante device failed to start" when Virgil runs as a service. Inferno crashed looking for a home folder the service account does not have; the service now keeps its state (Dante subscriptions, device identity) in `/var/lib/virgil`, and Inferno falls back to a temporary folder instead of crashing.
+- The engine error now gives the actual reason the Dante device did not start.
+- Linux: Virgil Control no longer starts a second copy of Virgil next to the service when the panel is briefly unreachable (that copy would block the Dante ports).
+
 ## 0.4.3
 - Raspberry Pi installer is now a plain text file: opened by mistake in a text editor (which is what double-clicking it does), it shows how to run it instead of a "not valid UTF-8" error.
 

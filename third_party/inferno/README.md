@@ -47,3 +47,7 @@ Changes for Virgil:
    report the PTP clock leader. Inferno otherwise takes it from a
    `/tmp/clock-stats.*` file written by its statime fork, which Virgil does not
    use, so Dante Controller showed the sync status red with no clock details.
+9. `state_storage.rs`: without a home directory (a systemd service with
+   `DynamicUser=`, and no user database entry) the state directory lookup
+   panicked and the device never started; it now falls back to the temp
+   directory. Virgil's Linux service also sets `HOME` to its state directory.
