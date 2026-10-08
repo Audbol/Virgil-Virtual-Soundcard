@@ -1,13 +1,24 @@
 #!/bin/sh
-# Virgil one-step installer for Raspberry Pi (64-bit Raspberry Pi OS) and
-# other Debian-based Linux. The Virgil .deb package is attached to the end of
-# this file, so it needs no download.
+# ============================================================================
+#  Virgil @VERSION@ installer for Raspberry Pi
 #
-#   bash Virgil-@VERSION@-raspberry-pi-installer.sh [--name NAME] [--interface IFACE]
+#  You opened this file in a text editor. To INSTALL Virgil instead:
 #
-# It installs Virgil and its dependencies, sets the Dante device name (unique
-# per Pi: Virgil-<hostname>) and the wired network port, and starts the
-# virgild service. Running it again upgrades Virgil and keeps your settings.
+#    1. Close this window without saving.
+#    2. Open Terminal (the black ">_" icon in the top bar).
+#    3. Type or paste this line and press Enter:
+#
+#         bash ~/Downloads/Virgil-@VERSION@-raspberry-pi-installer.sh
+#
+#  (If you saved the file somewhere else, use that folder instead of
+#  ~/Downloads.) Options: --name "Stage Left"  --interface eth0
+# ============================================================================
+#
+# What it does: installs Virgil and its dependencies (64-bit Raspberry Pi OS
+# or other Debian-based Linux), sets the Dante device name (unique per Pi:
+# Virgil-<hostname>) and the wired network port, and starts the virgild
+# service. Running it again upgrades Virgil and keeps your settings. The
+# Virgil .deb package is stored, base64-encoded, at the end of this file.
 set -eu
 
 VERSION=@VERSION@
@@ -26,7 +37,7 @@ while [ $# -gt 0 ]; do
 	--name) [ $# -ge 2 ] || die "--name needs a value"; name=$2; shift 2 ;;
 	--interface) [ $# -ge 2 ] || die "--interface needs a value"; iface=$2; shift 2 ;;
 	--stage2) stage2=1; shift ;;  # internal: the part that runs as root
-	-h | --help) sed -n '2,11p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h | --help) sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) die "unknown option: $1 (see --help)" ;;
 	esac
 done
@@ -94,7 +105,8 @@ step="unpacking the package"
 tmp=$(mktemp -d)
 line=$(awk '/^__VIRGIL_PACKAGE_BELOW__$/ { print NR + 1; exit }' "$0")
 [ -n "$line" ] || die "this file is incomplete; download it again"
-tail -n +"$line" "$0" >"$tmp/virgil.deb"
+tail -n +"$line" "$0" | base64 -d >"$tmp/virgil.deb" 2>/dev/null ||
+	die "this file is damaged; download it again"
 chmod 644 "$tmp/virgil.deb"
 dpkg-deb -I "$tmp/virgil.deb" >/dev/null 2>&1 || die "this file is damaged; download it again"
 

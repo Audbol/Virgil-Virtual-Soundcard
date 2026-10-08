@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.3
+- Raspberry Pi installer is now a plain text file: opened by mistake in a text editor (which is what double-clicking it does), it shows how to run it instead of a "not valid UTF-8" error.
+
 ## 0.4.2
 - Raspberry Pi installer: the window no longer closes the moment it finishes or fails. It waits for Enter, says which step went wrong, and saves its output to `~/virgil-install.log`.
 

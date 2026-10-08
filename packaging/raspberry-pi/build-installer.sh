@@ -7,6 +7,8 @@ version=$(dpkg-deb -f "$deb" Version)
 out=${2:-$(dirname "$deb")/Virgil-$version-raspberry-pi-installer.sh}
 here=$(dirname "$0")
 sed "s/@VERSION@/$version/g" "$here/installer.sh" >"$out"
-cat "$deb" >>"$out"
+# Base64 keeps the whole file valid text, so a text editor opens it (and
+# shows the instructions at the top) instead of refusing it.
+base64 "$deb" >>"$out"
 chmod 755 "$out"
 ls -l "$out"

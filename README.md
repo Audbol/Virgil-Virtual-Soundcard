@@ -100,10 +100,12 @@ needs a USB Ethernet adapter, and Wi-Fi is not suitable for Dante. Use the
 64-bit Raspberry Pi OS (32-bit is not supported).
 
 The easiest way is the one-file installer. Download
-`Virgil-<ver>-raspberry-pi-installer.sh` on the Pi and run:
+`Virgil-<ver>-raspberry-pi-installer.sh` on the Pi, open **Terminal** (the
+`>_` icon in the top bar; double-clicking the file only opens it in a text
+editor) and run:
 
 ```sh
-bash Virgil-<ver>-raspberry-pi-installer.sh            # optional: --name "Stage Left" --interface eth0
+bash ~/Downloads/Virgil-*-raspberry-pi-installer.sh     # optional: --name "Stage Left" --interface eth0
 ```
 
 Or, once the repository is public, in one line straight from GitHub:
