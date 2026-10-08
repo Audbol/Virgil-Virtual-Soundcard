@@ -6,11 +6,8 @@
 |---|---|---|
 | **Windows 10/11** | `Virgil-*-win64-setup.exe` | Run it. **Virgil Control** opens and stays in the notification area; pick your network interface in Settings. Choose *Virgil* as the ASIO device in your DAW. |
 | Windows, no install | `Virgil-*-windows-x64-portable.zip` | Unzip. Run `register-asio-driver.cmd` as administrator, then double-click `virgil-control.exe`. |
-| **macOS 11+** | `Virgil-*-macos.pkg` | Run it. Open **Virgil Control** from Applications. Pick *Virgil Virtual Soundcard* in System Settings › Sound. |
-| macOS, no install | `Virgil-*-macos-portable.zip` | Unzip, then follow `START-HERE.txt`. |
-| **Ubuntu / Debian** | `virgil_*_amd64.deb` | `sudo apt install ./virgil_*_amd64.deb`, then run `virgil-control`. |
-| **Fedora / RHEL** | `virgil-*.x86_64.rpm` | `sudo dnf install ./virgil-*.x86_64.rpm`, then run `virgil-control`. |
-| Linux, no install | `Virgil-*-linux-x86_64.tar.gz` | Extract, `./setup-alsa.sh`, then `./virgil-control`. |
+
+This release is for Windows only. macOS and Linux builds are paused for now (the source still builds on both).
 
 Then, in your routing software, subscribe Virgil's receive channels to your transmitters (and other devices to Virgil's transmit channels).
 
