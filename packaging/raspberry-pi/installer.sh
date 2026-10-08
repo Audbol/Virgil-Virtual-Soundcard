@@ -12,6 +12,7 @@
 #
 #  (If you saved the file somewhere else, use that folder instead of
 #  ~/Downloads.) Options: --name "Stage Left"  --interface eth0
+#  --default-device yes|no  (make Virgil the default ALSA device)
 # ============================================================================
 #
 # What it does: installs Virgil and its dependencies (64-bit Raspberry Pi OS
@@ -25,7 +26,9 @@ VERSION=@VERSION@
 CONF=/etc/virgil/virgil.conf
 name=""
 iface=""
+default_dev=""
 stage2=0
+ALSA_DEFAULT=/etc/alsa/conf.d/99-virgil-default.conf
 step="starting"
 died=0
 
@@ -36,8 +39,12 @@ while [ $# -gt 0 ]; do
 	case "$1" in
 	--name) [ $# -ge 2 ] || die "--name needs a value"; name=$2; shift 2 ;;
 	--interface) [ $# -ge 2 ] || die "--interface needs a value"; iface=$2; shift 2 ;;
+	--default-device)
+		[ $# -ge 2 ] || die "--default-device needs yes or no"
+		case "$2" in yes | no) default_dev=$2 ;; *) die "--default-device takes yes or no" ;; esac
+		shift 2 ;;
 	--stage2) stage2=1; shift ;;  # internal: the part that runs as root
-	-h | --help) sed -n '3,21p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+	-h | --help) sed -n '3,22p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
 	*) die "unknown option: $1 (see --help)" ;;
 	esac
 done
@@ -59,11 +66,23 @@ if [ "$stage2" = 0 ]; then
 	else
 		runner=none
 	fi
+	# Ask once whether ALSA's "default" device (what REAPER and other ALSA
+	# programs pick unless told otherwise) should be Virgil.
+	if [ -z "$default_dev" ] && [ ! -f "$ALSA_DEFAULT" ] && [ -t 0 ] && [ -t 1 ]; then
+		say ""
+		say "Make Virgil the default sound device for ALSA programs such as REAPER?"
+		say "(Desktop sound through PipeWire, e.g. the web browser, is not affected.)"
+		printf 'Make Virgil the default? [Y/n] '
+		read -r answer || answer=""
+		case "$answer" in [nN]*) default_dev=no ;; *) default_dev=yes ;; esac
+		say ""
+	fi
 	if [ "$runner" = none ]; then
 		say "Virgil installer: please run this as root (sudo is not installed)." | tee "$log"
 		echo 1 >"$st"
 	else
-		{ $runner sh "$self" --stage2 ${name:+--name} ${name:+"$name"} ${iface:+--interface} ${iface:+"$iface"} </dev/null
+		{ $runner sh "$self" --stage2 ${name:+--name} ${name:+"$name"} ${iface:+--interface} ${iface:+"$iface"} \
+			${default_dev:+--default-device} ${default_dev:+"$default_dev"} </dev/null
 		  echo $? >"$st"; } 2>&1 | tee "$log"
 	fi
 	rc=$(cat "$st" 2>/dev/null)
@@ -191,6 +210,25 @@ else
 	iface=$cur_iface
 fi
 
+if [ -n "$default_dev" ]; then
+	step="setting the default ALSA device"
+	if [ "$default_dev" = yes ]; then
+		mkdir -p "$(dirname "$ALSA_DEFAULT")"
+		cat >"$ALSA_DEFAULT" <<'ALSA'
+# Written by the Virgil installer: ALSA's "default" device is Virgil, so
+# REAPER (Audio system: ALSA, device "default"), aplay and other ALSA
+# programs use it unless told otherwise. Delete this file to undo, or run
+# the installer again with --default-device no.
+pcm.!default {
+	type plug
+	slave.pcm "virgil_hw"
+}
+ALSA
+	else
+		rm -f "$ALSA_DEFAULT"
+	fi
+fi
+
 step="setting up CPU tuning"
 say "3/4  Tuning the Pi for low-latency audio..."
 # Keep the CPU at full speed: frequency changes delay the audio threads.
@@ -241,7 +279,12 @@ fi
 say ""
 say "  Dante name:     $new_name   (rename it in the control panel)"
 say "  Network port:   ${iface:-not chosen yet}${addr:+ ($addr)}"
-say "  Soundcard:      ALSA device 'virgil' (e.g. aplay -D virgil, or JACK/PipeWire)"
+if [ -f "$ALSA_DEFAULT" ]; then
+	say "  Soundcard:      ALSA device 'virgil_hw', also the ALSA default device"
+	say "                  (in REAPER: Audio system ALSA, device 'default' or 'virgil_hw')"
+else
+	say "  Soundcard:      ALSA device 'virgil_hw' (in REAPER: Audio system ALSA, type virgil_hw)"
+fi
 say ""
 say "Next: in Dante Controller, route channels to and from '$new_name'."
 say ""

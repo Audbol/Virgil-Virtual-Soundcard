@@ -119,6 +119,10 @@ The installer installs Virgil and its dependencies, names the device
 port, keeps the CPU at full speed for low latency, starts the service, and
 prints how to reach the control panel: http://127.0.0.1:8480/ on the Pi, or
 from another computer through `ssh -L 8480:127.0.0.1:8480 pi@raspberrypi.local`.
+It also asks whether Virgil should be the default ALSA device; say yes and
+REAPER (Audio system **ALSA**, device **default**) and other ALSA programs use
+Virgil without further setup. Desktop sound through PipeWire is not affected.
+Change it later with `--default-device yes` or `--default-device no`.
 Running it again upgrades Virgil and keeps your settings. A Pi has no
 hardware timestamping, so expect a little more clock jitter than on a
 desktop; raise the latencies if you hear dropouts.
@@ -236,6 +240,10 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 
 * **Linux:** use `-D virgil` (automatic format conversion) or `-D virgil_hw`
   (raw), e.g. `jackd -d alsa -d virgil_hw -p 64`.
+* **REAPER on Linux / Raspberry Pi:** Options → Preferences → Audio → Device:
+  Audio system **ALSA**, input and output device **virgil_hw** (or
+  **default** if the Pi installer made Virgil the default), sample rate
+  48000, block size 128, 2–3 periods, 8 in / 8 out.
 
 ## Status and testing
 

@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.5 (Raspberry Pi only)
+- The Pi installer asks whether Virgil should be the default ALSA device, so REAPER (Audio system ALSA, device "default") and other ALSA programs use it straight away. `--default-device yes|no` sets it without asking; uninstalling Virgil removes it.
+
 ## 0.4.4
 - Linux / Raspberry Pi: fixed "Dante device failed to start" when Virgil runs as a service. Inferno crashed looking for a home folder the service account does not have; the service now keeps its state (Dante subscriptions, device identity) in `/var/lib/virgil`, and Inferno falls back to a temporary folder instead of crashing.
 - The engine error now gives the actual reason the Dante device did not start.

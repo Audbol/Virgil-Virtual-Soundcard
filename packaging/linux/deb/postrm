@@ -2,6 +2,7 @@
 set -e
 if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 	rm -f /etc/systemd/system/virgil-cpu-performance.service
+	rm -f /etc/alsa/conf.d/99-virgil-default.conf  # Raspberry Pi installer option
 fi
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || true
