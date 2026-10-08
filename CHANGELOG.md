@@ -1,7 +1,10 @@
 # Changelog
 
+## 0.3.3
+- Fixed Virgil showing up in Dante Controller without details and missing from the routing page (0.3.2 had changed a protocol identifier field that Dante Controller checks).
+
 ## 0.3.2
-- Legal and attribution clean-up for public release: `NOTICE.md` with trademark and licence notices (also installed with Virgil); the device no longer announces a third-party vendor name on the network; wording no longer resembles other companies' product names.
+- Legal and attribution clean-up for public release: `NOTICE.md` with trademark and licence notices (also installed with Virgil); wording no longer resembles other companies' product names.
 - Virgil Control (Windows) has an *About Virgil* entry in the tray menu.
 
 ## 0.3.1

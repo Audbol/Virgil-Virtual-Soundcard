@@ -13,6 +13,13 @@ compatibility with Dante networks comes from
 interoperability project, vendored with small patches in `third_party/inferno`
 (the patches are listed in `third_party/inferno/README.md`).
 
+For interoperability only, Virgil's device announcements carry the fixed
+8-byte identifier field that the network protocol requires and that Dante
+Controller checks before it will show a device's details and channels. That
+value is a technical protocol constant; it is not a statement that Virgil is
+made, sold or endorsed by Audinate, and Virgil identifies itself everywhere
+else (device name, manufacturer and model fields) as Virgil / Inferno.
+
 Virgil is provided "as is", without warranty of any kind (see sections 15 and
 16 of the GNU General Public License in `LICENSE`). Do not rely on it where a
 failure could cause harm or loss, such as safety announcements or live

@@ -172,6 +172,20 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   hdr_->state.store(clock_->state(), std::memory_order_release);
   tick_thread_ = std::thread([this] { tick_loop(); });
 
+  // Which adapter that is, and what else is up: two adapters on the same
+  // network (e.g. Wi-Fi and Ethernet) are a common cause of missing clock
+  // packets, which are multicast.
+  {
+    std::string mine, others;
+    for (const auto& i : list_interfaces()) {
+      if (i.loopback) continue;
+      const std::string d = "'" + i.name + "' " + ipv4_to_string(i.addr) + (i.virtual_adapter ? " (virtual)" : "");
+      if (i.addr == iface_) mine = d;
+      else others += (others.empty() ? "" : ", ") + d;
+    }
+    VIRGIL_LOG_INFO("network adapter: %s%s%s", mine.empty() ? ipv4_to_string(iface_).c_str() : mine.c_str(),
+                    others.empty() ? "" : "; other adapters: ", others.c_str());
+  }
   VIRGIL_LOG_INFO("\"%s\" up on %s: %u Hz, %u transmit / %u receive channels, latency rx %.1f ms "
                "tx %.1f ms",
                cfg_.device_name.c_str(), ipv4_to_string(iface_).c_str(), cfg_.sample_rate,

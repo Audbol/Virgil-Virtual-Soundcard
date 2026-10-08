@@ -124,8 +124,10 @@ fn create_self_info(
     model_name: app_name.to_owned(),
     factory_device_id: devid,
     process_id,
-    // Virgil patch: do not announce a third-party vendor name.
-    vendor_string: "Virgil".to_owned(),
+    // Fixed 8-byte protocol identifier in device-info/heartbeat packets;
+    // Dante Controller ignores devices that send anything else, so this is
+    // an interoperability value, not a statement of origin (see NOTICE.md).
+    vendor_string: "Audinate Dante-compatible".to_owned(),
     factory_hostname: format!("{short_app_name}-{}", hex::encode(devid)),
     friendly_hostname,
     model_number: "_000000000000000b".to_owned(),
