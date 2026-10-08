@@ -22,7 +22,7 @@ jobs:
   linux-packages:
     if: false  # Windows-only releases for now; remove this line to re-enable
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: .github/apt-install.sh libasound2-dev rpm dpkg-dev
@@ -34,7 +34,7 @@ jobs:
     if: false  # Windows-only releases for now; remove this line to re-enable
     # Oldest supported runner: the tarball then runs on glibc 2.35 and newer.
     runs-on: ubuntu-22.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: .github/apt-install.sh libasound2-dev
@@ -46,7 +46,7 @@ jobs:
     # Cross-built with MinGW-w64 + NSIS, the toolchain the installer was
     # developed and tested with; binaries are statically linked.
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: .github/apt-install.sh g++-mingw-w64-x86-64 nsis zip
@@ -82,7 +82,7 @@ jobs:
   macos:
     if: false  # Windows-only releases for now; remove this line to re-enable
     runs-on: macos-14
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
@@ -99,7 +99,7 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))
     needs: [windows]
     runs-on: ubuntu-24.04
-    timeout-minutes: 40
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
