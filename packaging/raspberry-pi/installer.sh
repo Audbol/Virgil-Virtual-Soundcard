@@ -229,6 +229,10 @@ ALSA
 	fi
 fi
 
+# sed -i above replaced the file as root; the service account must own it
+# to save settings from the control panel.
+getent passwd virgil >/dev/null 2>&1 && chown virgil:virgil "$CONF" "$(dirname "$CONF")" || true
+
 step="setting up CPU tuning"
 say "3/4  Tuning the Pi for low-latency audio..."
 # Keep the CPU at full speed: frequency changes delay the audio threads.

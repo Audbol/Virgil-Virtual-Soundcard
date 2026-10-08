@@ -10,7 +10,10 @@ Restart=on-failure
 LimitRTPRIO=95
 LimitMEMLOCK=infinity
 AmbientCapabilities=CAP_NET_BIND_SERVICE CAP_SYS_NICE CAP_IPC_LOCK
-DynamicUser=yes
+# A fixed system account (created by the package) that owns /etc/virgil, so
+# settings saved from the control panel can be written.
+User=virgil
+Group=virgil
 # Inferno keeps Dante subscriptions and the device identity under $HOME.
 StateDirectory=virgil
 Environment=HOME=/var/lib/virgil XDG_STATE_HOME=/var/lib/virgil

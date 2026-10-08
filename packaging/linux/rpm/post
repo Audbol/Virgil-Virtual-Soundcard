@@ -1,3 +1,13 @@
+# Service account: owns /etc/virgil so the control panel can save settings.
+if ! getent passwd virgil >/dev/null 2>&1; then
+	nologin=$(command -v nologin 2>/dev/null || echo /bin/false)
+	useradd --system --user-group --home-dir /var/lib/virgil --no-create-home \
+		--shell "$nologin" --comment "Virgil virtual soundcard" virgil >/dev/null 2>&1 || true
+fi
+if getent passwd virgil >/dev/null 2>&1 && [ -d /etc/virgil ]; then
+	chown virgil:virgil /etc/virgil
+	if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
+fi
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
 	if [ "$1" -eq 1 ]; then

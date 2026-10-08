@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.6 (Raspberry Pi only)
+- Fixed "cannot write /etc/virgil/virgil.conf" when saving settings from the control panel on Linux / Raspberry Pi. The service now runs as a `virgil` system account (created by the package) that owns `/etc/virgil`. The same fix reaches the regular Linux packages with the next full release.
+
 ## 0.4.5 (Raspberry Pi only)
 - The Pi installer asks whether Virgil should be the default ALSA device, so REAPER (Audio system ALSA, device "default") and other ALSA programs use it straight away. `--default-device yes|no` sets it without asking; uninstalling Virgil removes it.
 
