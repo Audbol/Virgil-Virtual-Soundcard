@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(virgil VERSION 0.3.4 LANGUAGES C CXX)
+project(virgil VERSION 0.4.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -158,7 +158,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
       "Low-latency Dante-compatible virtual soundcard (unofficial)")
   set(CPACK_PACKAGE_DESCRIPTION
       "Virgil joins Dante networks as an audio device and exposes its channels as an ALSA soundcard. Network compatibility comes from Inferno, an independent open-source project. Virgil is not affiliated with or endorsed by Audinate; Dante is a registered trademark of Audinate Pty Ltd.")
-  set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/audbol/virgil-dante-soundcard-virtual")
+  set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/Audbol/DSV-Dante-Soundcard-Virtual")
 
   set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)
   set(CPACK_DEBIAN_PACKAGE_SECTION sound)

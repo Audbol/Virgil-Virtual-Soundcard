@@ -91,8 +91,18 @@ installer and a portable archive:
 |---|---|---|
 | Windows 10/11 x64 | `Virgil-<ver>-win64-setup.exe` | `Virgil-<ver>-windows-x64-portable.zip` |
 | macOS 11+ (Apple silicon & Intel) | `Virgil-<ver>-macos.pkg` | `Virgil-<ver>-macos-portable.zip` |
-| Debian / Ubuntu | `virgil_<ver>_amd64.deb` | `Virgil-<ver>-linux-x86_64.tar.gz` |
+| Debian 12+ / Ubuntu 22.04+ | `virgil_<ver>_amd64.deb` | `Virgil-<ver>-linux-x86_64.tar.gz` |
 | Fedora / RHEL / openSUSE | `virgil-<ver>-1.x86_64.rpm` | same tarball |
+| Raspberry Pi (64-bit Raspberry Pi OS 12+, other arm64 Linux) | `virgil_<ver>_arm64.deb` | `Virgil-<ver>-linux-arm64.tar.gz` |
+
+**Raspberry Pi:** a Pi 4 or 5 on wired Ethernet works best; a Pi 3 or Zero 2 W
+needs a USB Ethernet adapter, and Wi-Fi is not suitable for Dante. Use the
+64-bit Raspberry Pi OS (32-bit is not supported). Install with
+`sudo apt install ./virgil_<ver>_arm64.deb`, then open
+http://127.0.0.1:8480/ on the Pi (or forward the port over SSH:
+`ssh -L 8480:127.0.0.1:8480 pi@raspberrypi.local`) to pick the network
+interface. A Pi has no hardware timestamping, so expect a little more clock
+jitter than on a desktop; raise the latencies if you hear dropouts.
 
 What each one sets up:
 
@@ -112,7 +122,8 @@ What each one sets up:
 **Windows:** Virgil Control is a native app that lives in the notification
 area (system tray) and starts with Windows. Hover the icon for the clock
 status; click it for the window with level meters for every channel to and
-from the network, the clock state and the apps that are playing. Right-click
+from the network (input on top, output below), the clock state and the apps
+that are playing. Right-click
 for *Settings…*, *Restart audio engine*, *Open log*, *Start with Windows*
 and *Quit*. Closing the window keeps the tray icon; Virgil itself (the
 service) runs either way. It warns with a notification when the service
@@ -123,8 +134,8 @@ stops or the Dante clock is lost.
 
 - **Status:** clock state (locked, clock master or free-running) with its
   offset, format and latencies, and which apps are connected and playing.
-- **Meters:** per-channel peak meters for playback to the network and
-  capture from it.
+- **Meters:** per-channel peak meters for what arrives from the network
+  (what apps record) and, below it, what apps send to the network.
 - **Settings:** device name, network interface, sample rate, channel counts,
   receive and transmit latency and clock source. An advanced editor gives you
   the raw configuration file.
@@ -173,6 +184,11 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 * **Cross-compiling Windows from Linux:** `rustup target add
   x86_64-pc-windows-gnu`, then
   `cmake -B build-win -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-w64.cmake -DASIO_SDK_DIR=…`
+* **Cross-compiling for Raspberry Pi / arm64 Linux:** run
+  `.github/setup-arm64-cross.sh` once on an x86-64 Ubuntu host, then
+  `cmake -B build-arm64 -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake`.
+  `VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh deb` (or `portable`)
+  builds the release files.
 * **macOS universal build:** `rustup target add aarch64-apple-darwin
   x86_64-apple-darwin` and configure with
   `-DCMAKE_OSX_ARCHITECTURES="arm64;x86_64"`.
@@ -183,6 +199,7 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 |---|---|---|
 | `.deb` + `.rpm` | `packaging/linux/build-packages.sh` | `dpkg-dev`, `rpm` |
 | Linux tarball | `packaging/linux/build-packages.sh portable` | — |
+| Raspberry Pi `.deb` + tarball | `VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh deb` (and `portable`) | see cross-compiling above |
 | Windows installer + zip | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis`, `zip` (runs on Linux) |
 | macOS `.pkg` + zip | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
 
@@ -215,13 +232,14 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 
 | Component | How it was verified |
 |---|---|
-| Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock master. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. **Not yet tested against Audinate hardware or Dante Controller itself** |
+| Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock master. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. A probe asks for the clock status the way Dante Controller does. In use on Windows 11 with Dante Controller, a Behringer WING (clock leader) and an AVIO USB adapter |
 | PTPv1 clock | Unit tests: message encoding, master/follower lock, servo in simulation. Across namespaces the follower locks within about 10 µs |
 | Engine, config | Unit tests; loopback through the Dante rings is bit-exact (24-bit) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon, 64-frame periods |
 | Linux packages | `.deb` installed in a container; portable tarball used as a user would |
-| Windows installer | Run silently under Wine (files, ASIO registration, service). **Needs a run on real Windows** |
-| ASIO driver | Test host under Wine; not yet run in a real DAW |
+| Windows installer | In use on Windows 11; also run silently under Wine in development |
+| ASIO driver | In use with REAPER on Windows 11; test host under Wine |
+| Raspberry Pi (arm64) | Cross-built; unit and loopback tests run under QEMU in CI. **Not yet run on a real Pi** |
 | CoreAudio driver, macOS `.pkg` | Built by CI on macOS; **not yet run on a real Mac** |
 
 Known limitations:

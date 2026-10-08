@@ -20,8 +20,9 @@ permissions:
 
 jobs:
   linux-packages:
-    if: false  # Windows-only releases for now; remove this line to re-enable
-    runs-on: ubuntu-24.04
+    # Oldest supported runner, so the packages install on Debian 12 /
+    # Ubuntu 22.04 and newer (libc6 >= 2.34, libasound2).
+    runs-on: ubuntu-22.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
@@ -31,7 +32,6 @@ jobs:
         with: { name: linux-packages, path: "dist/*" }
 
   linux-portable:
-    if: false  # Windows-only releases for now; remove this line to re-enable
     # Oldest supported runner: the tarball then runs on glibc 2.35 and newer.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -41,6 +41,19 @@ jobs:
       - run: packaging/linux/build-packages.sh portable
       - uses: actions/upload-artifact@v4
         with: { name: linux-portable, path: "dist/*.tar.gz" }
+
+  raspberry-pi:
+    # 64-bit ARM .deb and tarball, cross-built on the oldest supported runner
+    # so they install on Raspberry Pi OS 12 (bookworm) 64-bit and newer.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/setup-arm64-cross.sh
+      - run: VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh deb
+      - run: VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh portable
+      - uses: actions/upload-artifact@v4
+        with: { name: raspberry-pi, path: "dist/*" }
 
   windows:
     # Cross-built with MinGW-w64 + NSIS, the toolchain the installer was
@@ -80,7 +93,6 @@ jobs:
         with: { name: windows, path: "dist/*" }
 
   macos:
-    if: false  # Windows-only releases for now; remove this line to re-enable
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -97,7 +109,7 @@ jobs:
 
   publish:
     if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))
-    needs: [windows]
+    needs: [linux-packages, linux-portable, raspberry-pi, windows, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

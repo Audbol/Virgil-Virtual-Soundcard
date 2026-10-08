@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.0
+- Releases for macOS, Linux (.deb, .rpm, tarball) and, new, **Raspberry Pi** and other 64-bit ARM Linux (.deb and tarball) alongside Windows.
+- Dante Controller's clock status shows Virgil's sync state and clock leader (it was red with no details).
+- Virgil Control: the meters for audio arriving from the network are now above the meters for audio sent to it, in the Windows app and in the browser panel.
+- Linux packages are built to install on Debian 12 and Ubuntu 22.04 or newer.
+
 ## 0.3.4
 - Fixed network output going silent for good while input kept working. After a long hiccup (or a moment where the engine was mid-update) the ASIO driver could stop feeding Virgil, or Virgil could mute the app, until the app reopened the driver. The driver now realigns itself, and the engine never mutes a connected app.
 - After *Restart engine* or a settings change, connected apps realign to the new clock straight away.

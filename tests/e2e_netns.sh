@@ -79,9 +79,6 @@ done
 sleep 5
 grep -E "ptp|locked|up on" "$work/a.log" "$work/b.log" | head -20 || true
 
-echo "--- clock status as Dante Controller asks for it"
-ip netns exec vg-c python3 "$(dirname "$0")/clock_status_probe.py" 10.77.0.1 10.77.0.3
-
 if [ -z "$netaudio" ]; then
   echo "network up. Controller namespace: sudo ip netns exec vg-c <dante tool>"
   echo "logs: $work. Ctrl+C to stop."
@@ -133,5 +130,8 @@ CONF
   # Channel 1 is routed A -> B; expect the 440 Hz tone at -6 dBFS (RMS 0.354).
   sox "$work/rec.wav" -n remix 1 trim 1.5 2 stat 2>&1 | grep -E "RMS +amplitude|Rough +frequency"
 fi
+
+echo "--- clock status as Dante Controller asks for it"
+ip netns exec vg-c python3 "$(dirname "$0")/clock_status_probe.py" 10.77.0.1 10.77.0.3 || status=1
 
 exit "$status"

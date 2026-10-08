@@ -346,11 +346,11 @@ void Engine::tick_loop() {
 // 6-byte clock UUIDs; Dante shows them as EUI-64 (ff:fe in the middle).
 void Engine::report_clock_master() {
   if (!dante_) return;
-  const uint32_t st = clock_->state();
+  // Reported as soon as Virgil follows (or is) a leader, like Dante devices
+  // that are still settling; the grandmaster is cleared when it is lost.
   unsigned b[6];
   const std::string gm = clock_->grandmaster();
-  const bool have = (st == kStatePtpLocked || st == kStatePtpMaster) &&
-                    std::sscanf(gm.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3],
+  const bool have = std::sscanf(gm.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3],
                                 &b[4], &b[5]) == 6;
   uint8_t id[8] = {};
   if (have) {

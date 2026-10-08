@@ -84,6 +84,7 @@ bool resolve_interface(const std::string& name, uint32_t* out) {
 }
 
 namespace {
+#if defined(_WIN32)
 bool contains_ci(const std::string& hay, const char* needle) {
   std::string h = hay, n = needle;
   for (auto& c : h) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -98,6 +99,7 @@ bool looks_virtual(const std::string& s) {
     if (contains_ci(s, w)) return true;
   return false;
 }
+#else
 bool posix_virtual_name(const std::string& n) {
   static const char* kPrefixes[] = {"docker", "br-", "veth", "virbr", "vmnet", "vboxnet", "tun",
                                     "tap", "wg", "zt", "tailscale", "utun", "awdl", "llw",
@@ -106,6 +108,7 @@ bool posix_virtual_name(const std::string& n) {
     if (n.compare(0, std::strlen(p), p) == 0) return true;
   return false;
 }
+#endif
 int link_local_penalty(uint32_t addr) { return (addr >> 16) == 0xA9FE ? -1 : 0; }  // 169.254/16
 }  // namespace
 

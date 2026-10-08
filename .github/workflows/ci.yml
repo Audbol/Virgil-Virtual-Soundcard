@@ -6,7 +6,6 @@ on:
 
 jobs:
   linux:
-    if: false  # Windows-only for now; remove this line to re-enable
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
@@ -16,8 +15,22 @@ jobs:
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure
 
+  # 64-bit ARM (Raspberry Pi): cross-build, then run the tests under QEMU.
+  linux-arm64:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - run: .github/setup-arm64-cross.sh
+      - run: .github/apt-install.sh qemu-user
+      - run: cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=cmake/aarch64-linux-gnu.cmake -DCMAKE_BUILD_TYPE=Release
+      - run: cmake --build build -j
+      - run: |
+          export QEMU_LD_PREFIX=/usr/aarch64-linux-gnu
+          qemu-aarch64 build/tests/virgil_unit_tests
+          qemu-aarch64 build/tests/virgil_loopback_test
+
   macos:
-    if: false  # Windows-only for now; remove this line to re-enable
     runs-on: macos-14
     timeout-minutes: 60
     steps:

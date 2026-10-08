@@ -19,6 +19,8 @@ elseif(WIN32 AND MINGW)
   list(APPEND _targets x86_64-pc-windows-gnu)
 elseif(WIN32)
   list(APPEND _targets x86_64-pc-windows-msvc)
+elseif(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+  list(APPEND _targets aarch64-unknown-linux-gnu)
 endif()
 
 if(WIN32 AND NOT MINGW)
@@ -30,6 +32,10 @@ endif()
 # Environment for cargo: quiet dependency warnings; match the C++ deployment
 # target on macOS so the linker does not complain about mixed versions.
 set(_env RUSTFLAGS=-Awarnings)
+if("aarch64-unknown-linux-gnu" IN_LIST _targets)
+  list(APPEND _env CC_aarch64_unknown_linux_gnu=${CMAKE_C_COMPILER}
+       CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=${CMAKE_C_COMPILER})
+endif()
 if(APPLE AND CMAKE_OSX_DEPLOYMENT_TARGET)
   list(APPEND _env MACOSX_DEPLOYMENT_TARGET=${CMAKE_OSX_DEPLOYMENT_TARGET})
 endif()

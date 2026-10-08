@@ -1,5 +1,7 @@
-Virgil Virtual Soundcard - portable for Linux (x86_64, glibc 2.35+)
-===============================================================
+Virgil Virtual Soundcard - portable for Linux (glibc 2.35+)
+==========================================================
+The -x86_64 archive is for PCs, the -arm64 one for 64-bit ARM such as a
+Raspberry Pi 3/4/5 or Zero 2 W running 64-bit Raspberry Pi OS.
 
 Virtual soundcard for Dante networks with an ALSA device: the computer appears in Dante
 Controller as a device named "Virgil"; route it there.
