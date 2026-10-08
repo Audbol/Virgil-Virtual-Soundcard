@@ -54,7 +54,7 @@ network interface and the streams to receive."
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.md"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "Open the README"
 !define MUI_FINISHPAGE_RUN
-!define MUI_FINISHPAGE_RUN_TEXT "Open Virgil Control (status and settings)"
+!define MUI_FINISHPAGE_RUN_TEXT "Open Virgil Control (it also lives in the notification area)"
 !define MUI_FINISHPAGE_RUN_FUNCTION OpenControl
 
 !insertmacro MUI_PAGE_WELCOME
@@ -119,6 +119,9 @@ Section "Virgil" SecMain
   StrCpy $ConfDir "$APPDATA\Virgil"
 
   Call StopService
+  ; Virgil Control (tray) keeps its .exe open: close it while files change.
+  nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM virgil-control.exe'
+  Pop $0
 
   SetOutPath "$INSTDIR"
   File "${BIN_DIR}\virgild.exe"
@@ -209,6 +212,10 @@ SectionEnd
 
 Section "Uninstall"
   Call un.StopService
+  nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM virgil-control.exe'
+  Pop $0
+  DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Virgil Control"
+  DeleteRegKey HKCU "Software\Virgil"
   nsExec::Exec '"$SYSDIR\sc.exe" delete ${SERVICE}'
   Pop $0
 

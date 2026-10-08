@@ -103,10 +103,19 @@ What each one sets up:
   `install-driver.command` on macOS, `setup-alsa.sh` on Linux. Each archive
   has a `START-HERE.txt`.
 
-## Control panel
+## Virgil Control
 
-**Virgil Control** opens the control panel in your browser. You can also go to
-http://127.0.0.1:8480/ directly while `virgild` runs. It shows:
+**Windows:** Virgil Control is a native app that lives in the notification
+area (system tray) and starts with Windows. Hover the icon for the clock
+status; click it for the window with level meters for every channel to and
+from the network, the clock state and the apps that are playing. Right-click
+for *Settings…*, *Restart audio engine*, *Open log*, *Start with Windows*
+and *Quit*. Closing the window keeps the tray icon; Virgil itself (the
+service) runs either way. It warns with a notification when the service
+stops or the Dante clock is lost.
+
+**macOS and Linux:** Virgil Control opens the same controls in your browser
+(http://127.0.0.1:8480/ while `virgild` runs). It shows:
 
 - **Status:** clock state (locked, clock master or free-running) with its
   offset, format and latencies, and which apps are connected and playing.

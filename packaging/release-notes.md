@@ -1,3 +1,10 @@
+**0.3.0:** new native Virgil Control for Windows.
+- Lives in the notification area and starts with Windows. Hover for the clock status; click for the window; right-click for settings, engine restart, the log and quit.
+- The window shows level meters for every channel to and from the network, the clock state and which apps are playing. REAPER and other ASIO hosts now appear by name.
+- Native settings dialog: device name, network interface, sample rate, channels, latencies and clock.
+- Notifications when the service stops or the Dante clock is lost.
+- The installer closes Virgil Control before updating and removes the start-at-login entry when uninstalled.
+
 **0.2.8:** reliability and diagnostics.
 - The log file is written immediately. On Windows the last moments before a problem were held in a buffer and missing from `virgild.log`.
 - A crash inside the Dante stack is now logged (thread and location), and the audio engine restarts automatically instead of going silent.

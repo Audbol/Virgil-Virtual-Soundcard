@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(virgil VERSION 0.2.8 LANGUAGES C CXX)
+project(virgil VERSION 0.3.0 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -98,8 +98,17 @@ if(APPLE)
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION}
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 elseif(WIN32)
-  add_executable(virgil-control WIN32 tools/virgil_control.cpp ${VIRGIL_ICON_SOURCES})
-  target_link_libraries(virgil-control PRIVATE ws2_32 shell32 user32)
+  # Native tray app with a Direct2D status window and a settings dialog.
+  add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_win/api.cpp
+                 tools/control_win/control.rc)
+  target_include_directories(virgil-control PRIVATE tools/control_win branding)
+  if(MINGW)
+    target_link_options(virgil-control PRIVATE -municode)
+  elseif(MSVC)
+    target_link_options(virgil-control PRIVATE /MANIFEST:NO)  # control.rc embeds ours
+  endif()
+  target_link_libraries(virgil-control PRIVATE d2d1 dwrite windowscodecs dwmapi comctl32 ole32
+                        ws2_32 shell32 user32 gdi32 advapi32)
 else()
   add_executable(virgil-control tools/virgil_control.cpp)
   install(FILES packaging/linux/virgil-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
@@ -107,7 +116,9 @@ else()
   install(FILES branding/virgil-256.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
           RENAME virgil.png)
 endif()
-target_link_libraries(virgil-control PRIVATE virgil_client)
+if(NOT WIN32)
+  target_link_libraries(virgil-control PRIVATE virgil_client)
+endif()
 
 install(TARGETS virgild virgil-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS virgil-control RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)

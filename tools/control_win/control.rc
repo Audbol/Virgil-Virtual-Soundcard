@@ -1,0 +1,40 @@
+// Virgil Control (Windows) resources. CMake puts branding/ on the include path.
+#include <windows.h>
+#include "resource.h"
+
+IDI_VIRGIL ICON "virgil.ico"
+1 RT_MANIFEST "control.manifest"
+
+IDD_SETTINGS DIALOGEX 0, 0, 290, 236
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Virgil Settings"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    GROUPBOX        "Device", -1, 7, 4, 276, 82
+    LTEXT           "Name in Dante Controller:", -1, 16, 20, 96, 9
+    EDITTEXT        IDC_NAME, 118, 18, 156, 13, ES_AUTOHSCROLL
+    LTEXT           "Network interface:", -1, 16, 38, 96, 9
+    COMBOBOX        IDC_IFACE, 118, 36, 156, 120, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Sample rate:", -1, 16, 56, 96, 9
+    COMBOBOX        IDC_RATE, 118, 54, 70, 80, CBS_DROPDOWNLIST | WS_TABSTOP
+    LTEXT           "Channels out / in:", -1, 16, 72, 96, 9
+    EDITTEXT        IDC_TXCH, 118, 70, 30, 13, ES_NUMBER
+    LTEXT           "/", -1, 152, 72, 6, 9
+    EDITTEXT        IDC_RXCH, 160, 70, 30, 13, ES_NUMBER
+
+    GROUPBOX        "Latency", -1, 7, 90, 276, 48
+    LTEXT           "Receive (ms):", -1, 16, 106, 96, 9
+    COMBOBOX        IDC_RXLAT, 118, 104, 50, 100, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Transmit (ms):", -1, 16, 122, 96, 9
+    COMBOBOX        IDC_TXLAT, 118, 120, 50, 100, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "(3.5 ms minimum)", -1, 176, 122, 100, 9
+
+    GROUPBOX        "Clock", -1, 7, 142, 276, 46
+    COMBOBOX        IDC_CLOCK, 16, 156, 258, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+    AUTOCHECKBOX    "Become clock leader when no Dante device provides one", IDC_MASTER, 16, 172, 258, 10
+
+    LTEXT           "", IDC_ERR, 7, 194, 276, 18
+    LTEXT           "", IDC_CONFPATH, 7, 220, 160, 9
+    DEFPUSHBUTTON   "Apply", IDOK, 172, 216, 52, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 230, 216, 52, 15
+END

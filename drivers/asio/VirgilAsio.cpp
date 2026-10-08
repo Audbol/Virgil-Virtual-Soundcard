@@ -85,7 +85,14 @@ class VirgilAsio : public IASIO {
       client_.close();
       return ASIOFalse;
     }
-    if (!client_.acquire_tx_slot("asio")) {
+    // Name the slot after the host (e.g. "REAPER"), shown in Virgil Control.
+    char exe[MAX_PATH] = "", name[40] = "ASIO";
+    GetModuleFileNameA(nullptr, exe, MAX_PATH);
+    if (const char* base = std::strrchr(exe, '\\')) {
+      std::snprintf(name, sizeof name, "%s", base + 1);
+      if (char* dot = std::strrchr(name, '.')) *dot = 0;
+    }
+    if (!client_.acquire_tx_slot(name)) {
       set_error("All Virgil playback slots are in use.");
       client_.close();
       return ASIOFalse;
