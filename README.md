@@ -2,6 +2,8 @@
 
 # Virgil: a low-latency Dante virtual soundcard
 
+<p align="center"><em><b>V</b>irtual <b>I</b>nterface <b>R</b>outing <b>G</b>ateway for <b>I</b>nferno-based <b>L</b>ow-latency audio</em></p>
+
 Virgil turns a computer into a **Dante device**. In Dante Controller it shows up
 next to your other Dante gear, with its own transmit and receive channels. You
 route it like any other device, and your audio apps see an ordinary soundcard:

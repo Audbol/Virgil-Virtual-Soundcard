@@ -385,7 +385,7 @@ void paint(HWND hwnd) {
   if (g_logo) g_rt->DrawBitmap(g_logo, D2D1::RectF(kPad, 16, kPad + 44, 60));
   const float tx = kPad + 58;
   text(widen(s.reachable ? s.name : "Virgil"), g_f_title, D2D1::RectF(tx, 14, W / 2 + 60, 38), kText);
-  std::wstring sub = L"Dante virtual soundcard";
+  std::wstring sub = L"Virtual Interface Routing Gateway for Inferno-based Low-latency audio";
   if (s.reachable && !s.address.empty())
     sub = widen(s.address) + fmt(L"   \u00b7   %.1f kHz   \u00b7   %u out / %u in   \u00b7   %.1f ms", s.rate / 1000.0,
                                  s.tx, s.rx, s.latency_us / 1000.0);

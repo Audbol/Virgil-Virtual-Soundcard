@@ -45,7 +45,7 @@ VIAddVersionKey "LegalCopyright" "Virgil Project"
 !define MUI_ABORTWARNING
 !define MUI_ICON "${SRC_DIR}\branding\virgil.ico"
 !define MUI_UNICON "${SRC_DIR}\branding\virgil.ico"
-!define MUI_WELCOMEPAGE_TEXT "This installs the Virgil virtual soundcard:$\r$\n$\r$\n\
+!define MUI_WELCOMEPAGE_TEXT "This installs Virgil (Virtual Interface Routing Gateway for Inferno-based Low-latency audio):$\r$\n$\r$\n\
   - virgild, a background service that appears in Dante Controller as a Dante device \
 (unofficial; built on the open-source Inferno project)$\r$\n\
   - an ASIO driver named $\"${PRODUCT}$\" for your DAW$\r$\n$\r$\n\

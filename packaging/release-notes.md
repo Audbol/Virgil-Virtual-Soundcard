@@ -1,3 +1,5 @@
+**0.3.1:** Virgil now has a full name: **V**irtual **I**nterface **R**outing **G**ateway for **I**nferno-based **L**ow-latency audio.
+
 **0.3.0:** new native Virgil Control for Windows.
 - Lives in the notification area and starts with Windows. Hover for the clock status; click for the window; right-click for settings, engine restart, the log and quit.
 - The window shows level meters for every channel to and from the network, the clock state and which apps are playing. REAPER and other ASIO hosts now appear by name.
