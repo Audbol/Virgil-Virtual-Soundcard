@@ -377,7 +377,7 @@ void PtpClock::note_sender(const Endpoint& from, const uint8_t* p, size_t n, boo
   char sub[17] = {};
   std::memcpy(sub, h.subdomain, 16);
   VIRGIL_LOG_INFO("ptp: hearing %s (clock %s, subdomain %s, message %u, %u bytes)", ip.c_str(),
-                  ptp1::format_uuid(h.source.uuid).c_str(), sub, unsigned(h.control), n);
+                  ptp1::format_uuid(h.source.uuid).c_str(), sub, unsigned(h.control), unsigned(n));
 }
 
 static bool same_subdomain(const ptp1::Header& h, const ptp1::Header& mine) {
