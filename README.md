@@ -93,29 +93,33 @@ installer and a portable archive:
 | macOS 11+ (Apple silicon & Intel) | `Virgil-<ver>-macos.pkg` | `Virgil-<ver>-macos-portable.zip` |
 | Debian 12+ / Ubuntu 22.04+ | `virgil_<ver>_amd64.deb` | `Virgil-<ver>-linux-x86_64.tar.gz` |
 | Fedora / RHEL / openSUSE | `virgil-<ver>-1.x86_64.rpm` | same tarball |
-| Raspberry Pi (64-bit Raspberry Pi OS 12+, other arm64 Linux) | `virgil_<ver>_arm64.deb` | `Virgil-<ver>-linux-arm64.tar.gz` |
+| Raspberry Pi (64-bit Raspberry Pi OS 12+, other arm64 Linux) | `Virgil-<ver>-raspberry-pi-installer.sh` (one step), or `virgil_<ver>_arm64.deb` | `Virgil-<ver>-linux-arm64.tar.gz` |
 
 **Raspberry Pi:** a Pi 4 or 5 on wired Ethernet works best; a Pi 3 or Zero 2 W
 needs a USB Ethernet adapter, and Wi-Fi is not suitable for Dante. Use the
-64-bit Raspberry Pi OS (32-bit is not supported). Install with
-`sudo apt install ./virgil_<ver>_arm64.deb`, then open
-http://127.0.0.1:8480/ on the Pi (or forward the port over SSH:
-`ssh -L 8480:127.0.0.1:8480 pi@raspberrypi.local`) to pick the network
-interface. A Pi has no hardware timestamping, so expect a little more clock
-jitter than on a desktop; raise the latencies if you hear dropouts.
+64-bit Raspberry Pi OS (32-bit is not supported).
 
-What each one sets up:
+The easiest way is the one-file installer. Download
+`Virgil-<ver>-raspberry-pi-installer.sh` on the Pi and run:
 
-- **Installers:** `virgild` runs as a background service that starts at boot
-  (a Windows service, a launchd daemon or a systemd unit), plus the
-  platform's driver and **Virgil Control**. On Windows that also means ASIO
-  driver registration, a firewall rule, Start-menu and desktop shortcuts,
-  and an Add/Remove Programs entry.
-- **Portable archives:** run from the extracted folder.
-  Double-click **Virgil Control** and it starts `virgild` from that folder. The
-  only one-time step is the driver: `register-asio-driver.cmd` on Windows,
-  `install-driver.command` on macOS, `setup-alsa.sh` on Linux. Each archive
-  has a `START-HERE.txt`.
+```sh
+bash Virgil-<ver>-raspberry-pi-installer.sh            # optional: --name "Stage Left" --interface eth0
+```
+
+Or, once the repository is public, in one line straight from GitHub:
+
+```sh
+curl -fsSL https://raw.githubusercontent.com/Audbol/DSV-Dante-Soundcard-Virtual/HEAD/packaging/raspberry-pi/get-virgil.sh | sh
+```
+
+The installer installs Virgil and its dependencies, names the device
+`Virgil-<hostname>` (Dante names must be unique), picks the wired network
+port, keeps the CPU at full speed for low latency, starts the service, and
+prints how to reach the control panel: http://127.0.0.1:8480/ on the Pi, or
+from another computer through `ssh -L 8480:127.0.0.1:8480 pi@raspberrypi.local`.
+Running it again upgrades Virgil and keeps your settings. A Pi has no
+hardware timestamping, so expect a little more clock jitter than on a
+desktop; raise the latencies if you hear dropouts.
 
 ## Virgil Control
 
@@ -200,6 +204,7 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 | `.deb` + `.rpm` | `packaging/linux/build-packages.sh` | `dpkg-dev`, `rpm` |
 | Linux tarball | `packaging/linux/build-packages.sh portable` | — |
 | Raspberry Pi `.deb` + tarball | `VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh deb` (and `portable`) | see cross-compiling above |
+| Raspberry Pi one-file installer | `packaging/raspberry-pi/build-installer.sh dist/virgil_<ver>_arm64.deb` | the `.deb` above |
 | Windows installer + zip | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis`, `zip` (runs on Linux) |
 | macOS `.pkg` + zip | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
 

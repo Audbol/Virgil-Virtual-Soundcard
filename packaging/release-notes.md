@@ -11,7 +11,8 @@
 | **Debian 12+ / Ubuntu 22.04+** | `virgil_*_amd64.deb` | `sudo apt install ./virgil_*_amd64.deb`, then open **Virgil Control** (or http://127.0.0.1:8480/). Apps use the ALSA device `virgil`. |
 | **Fedora / RHEL / openSUSE** | `virgil-*.x86_64.rpm` | `sudo dnf install ./virgil-*.x86_64.rpm` (or `zypper install`). |
 | Linux, no install | `Virgil-*-linux-x86_64.tar.gz` | Unpack, run `./setup-alsa.sh`, then `./virgil-control`. See `START-HERE.txt`. |
-| **Raspberry Pi** (64-bit Raspberry Pi OS 12+) | `virgil_*_arm64.deb` | `sudo apt install ./virgil_*_arm64.deb`. Use wired Ethernet. On a headless Pi, reach the control panel with `ssh -L 8480:127.0.0.1:8480 pi@raspberrypi.local` and open http://127.0.0.1:8480/. |
+| **Raspberry Pi** (64-bit Raspberry Pi OS 12+) | `Virgil-*-raspberry-pi-installer.sh` | One step: download it on the Pi and run `bash Virgil-*-raspberry-pi-installer.sh` in a terminal. It installs Virgil, names the device `Virgil-<hostname>`, picks the wired network port, sets the CPU for low latency and starts the service, then tells you how to open the control panel. Use wired Ethernet. |
+| Raspberry Pi, package only | `virgil_*_arm64.deb` | `sudo apt install ./virgil_*_arm64.deb` (no automatic setup). |
 | Raspberry Pi / arm64, no install | `Virgil-*-linux-arm64.tar.gz` | As for the Linux tarball. |
 
 The Windows build is the one in daily use. The macOS and Raspberry Pi builds pass their automated tests but have not been run on real hardware yet, so reports are welcome.

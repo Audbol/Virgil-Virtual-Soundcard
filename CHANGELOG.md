@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.1
+- One-step Raspberry Pi installer (`Virgil-<ver>-raspberry-pi-installer.sh`): installs Virgil, gives the device a unique Dante name, picks the wired network port, keeps the CPU at full speed for low latency and starts the service. `get-virgil.sh` fetches and runs it in one line once the repository is public.
+
 ## 0.4.0
 - Releases for macOS, Linux (.deb, .rpm, tarball) and, new, **Raspberry Pi** and other 64-bit ARM Linux (.deb and tarball) alongside Windows.
 - Dante Controller's clock status shows Virgil's sync state and clock leader (it was red with no details).

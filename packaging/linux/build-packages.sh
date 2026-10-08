@@ -33,6 +33,7 @@ if [ "$what" = deb ] || [ "$what" = all ]; then
 	cmake -S . -B build-deb$suffix $cross -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
 		-DVIRGIL_BUILD_TESTS=OFF -DVIRGIL_ALSA_PLUGIN_DIR="/usr/lib/$multiarch/alsa-lib"
 	cmake --build build-deb$suffix -j
+	rm -f build-deb$suffix/*.deb
 	(cd build-deb$suffix && cpack -G DEB)
 	cp build-deb$suffix/*.deb dist/
 fi
@@ -41,6 +42,7 @@ if { [ "$what" = rpm ] || [ "$what" = all ]; } && [ -z "$arch" ]; then
 	cmake -S . -B build-rpm -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr \
 		-DVIRGIL_BUILD_TESTS=OFF -DVIRGIL_ALSA_PLUGIN_DIR=/usr/lib64/alsa-lib
 	cmake --build build-rpm -j
+	rm -f build-rpm/*.rpm
 	(cd build-rpm && cpack -G RPM)
 	cp build-rpm/*.rpm dist/
 fi

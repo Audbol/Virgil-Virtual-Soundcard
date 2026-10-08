@@ -3,6 +3,8 @@ set -e
 if [ -d /run/systemd/system ]; then
 	if [ "$1" = "remove" ]; then
 		systemctl disable --now virgild.service >/dev/null 2>&1 || true
+		# Added by the Raspberry Pi installer; goes away with Virgil.
+		systemctl disable virgil-cpu-performance.service >/dev/null 2>&1 || true
 	else
 		systemctl stop virgild.service >/dev/null 2>&1 || true
 	fi
