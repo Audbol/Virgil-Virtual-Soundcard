@@ -258,7 +258,7 @@ struct Button {
 };
 std::vector<Button> g_buttons;  // rebuilt each paint
 
-const float kW = 640, kHeader = 76, kFooter = 56, kMeterH = 210, kPad = 22;
+const float kW = 640, kHeader = 76, kFooter = 56, kMeterH = 150, kPad = 22;
 
 float strip_w(unsigned n) {
   // Strips get narrower with many channels so the window stays on screen.
@@ -272,9 +272,11 @@ float group_w(unsigned n) {
   return 34 + float(std::max(1u, n)) * (w + gap) - gap;
 }
 float window_w(const vc::Status& s) {
-  return std::max(kW, kPad * 2 + group_w(s.tx) + 44 + group_w(s.rx));
+  return std::max(kW, kPad * 2 + std::max(group_w(s.tx), group_w(s.rx)));
 }
-float window_h() { return kHeader + 34 + kMeterH + 40 + kFooter; }
+// Two meter groups stacked: from the network on top, to the network below.
+const float kGroupH = 34 + kMeterH + 30;
+float window_h() { return kHeader + 14 + 2 * kGroupH + 10 + kFooter; }
 
 // ---- painting -----------------------------------------------------------------------------
 
@@ -414,13 +416,13 @@ void paint(HWND hwnd) {
     b.r = D2D1::RectF(W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172);
     draw_button(b);
   } else {
-    // Meter bridge.
-    const float my = kHeader + 34 + 14;
-    const float bridge = group_w(s.tx) + 44 + group_w(s.rx);
-    const float bx = std::max(kPad, (W - bridge) / 2);
-    draw_meter_group(bx, my, fmt(L"To network  \u2014  %u channels", s.tx).c_str(), s.tx, g_mtx, now);
-    draw_meter_group(bx + group_w(s.tx) + 44, my, fmt(L"From network  \u2014  %u channels", s.rx).c_str(), s.rx,
-                     g_mrx, now);
+    // Meter bridge: what arrives from the network (the apps' inputs) on top,
+    // what the apps send to the network below. Scales line up on the left.
+    const float my = kHeader + 14 + 34;
+    const float bx = std::max(kPad, (W - std::max(group_w(s.tx), group_w(s.rx))) / 2);
+    draw_meter_group(bx, my, fmt(L"From network  \u2014  %u channels", s.rx).c_str(), s.rx, g_mrx, now);
+    draw_meter_group(bx, my + kGroupH, fmt(L"To network  \u2014  %u channels", s.tx).c_str(), s.tx, g_mtx,
+                     now);
     if (!s.error.empty())
       text(widen(s.error), g_f_sub, D2D1::RectF(kPad, H - kFooter - 22, W - kPad, H - kFooter - 4), kBad);
   }
