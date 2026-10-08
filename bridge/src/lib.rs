@@ -185,6 +185,21 @@ pub extern "C" fn vg_dante_set_clock(last_sync: i64, shift: i64, freq_scale: f64
 }
 
 /// # Safety
+/// `id` is NULL (no clock leader) or points to 8 bytes: the leader's EUI-64
+/// clock identity, shown in Dante Controller's clock status view.
+#[no_mangle]
+pub unsafe extern "C" fn vg_dante_set_clock_master(id: *const u8) {
+    let v = if id.is_null() {
+        None
+    } else {
+        let mut a = [0u8; 8];
+        a.copy_from_slice(std::slice::from_raw_parts(id, 8));
+        Some(a)
+    };
+    inferno_aoip::device_server::set_clock_master(v);
+}
+
+/// # Safety
 /// `config` must point to a valid VgDanteConfig whose rings outlive the device.
 #[no_mangle]
 pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut std::ffi::c_void {

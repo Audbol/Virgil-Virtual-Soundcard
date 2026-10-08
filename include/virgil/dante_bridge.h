@@ -33,6 +33,9 @@ void* vg_dante_start(const VgDanteConfig* config);
 // Publishes the PTP clock: ptp_ns = t + shift + (t - last_sync) * freq_scale,
 // t being mono_ns(). Call whenever the servo updates.
 void vg_dante_set_clock(int64_t last_sync, int64_t shift, double freq_scale);
+// The PTP clock leader's EUI-64 identity (8 bytes), or NULL when there is
+// none. Dante Controller shows it (and the sync state) in its clock status.
+void vg_dante_set_clock_master(const uint8_t* id);
 // Stops the device and releases the rings.
 // 1 while running normally, 0 after a crash of any of its threads.
 int vg_dante_healthy(void* handle);

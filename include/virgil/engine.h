@@ -59,6 +59,7 @@ class Engine {
  private:
   void tick_loop();
   void reclaim_clients(int64_t now);
+  void report_clock_master();
   void clear_rings();
   static void on_clock(const ClockModel& m, void* self);
 
@@ -80,6 +81,8 @@ class Engine {
   // and drained by take_peaks().
   std::array<std::atomic<uint32_t>, kMaxChannels> tx_peak_{};
   std::array<bool, kMaxTxClients> client_stalled_{};  // tick thread only
+  bool reported_master_ = false;  // tick thread only
+  uint8_t reported_id_[8] = {};
   std::array<std::atomic<uint32_t>, kMaxChannels> rx_peak_{};
 };
 

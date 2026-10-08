@@ -44,6 +44,7 @@ pub use crate::common::{Clock, ClockDiff, Sample};
 pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
 pub use crate::ring_buffer::{new_owned, ExternalBufferParameters, PositionReportDestination, RBInput};
 pub use settings::Settings;
+pub use info_mcast_server::set_clock_master;
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 use channels_subscriber::{ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering};

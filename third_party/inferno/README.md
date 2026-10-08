@@ -43,3 +43,7 @@ Changes for Virgil:
    processed add-flow, set-channels or stop commands: receivers got only
    the first channel and stopping the engine hung. It is now clamped to one
    interval ahead.
+8. `info_mcast_server.rs`: `set_clock_master()` lets the embedding program
+   report the PTP clock leader. Inferno otherwise takes it from a
+   `/tmp/clock-stats.*` file written by its statime fork, which Virgil does not
+   use, so Dante Controller showed the sync status red with no clock details.

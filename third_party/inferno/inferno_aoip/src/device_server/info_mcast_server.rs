@@ -25,6 +25,35 @@ const SEND_BUFFER_SIZE: usize = 1500;
 const DST_PORT_HEARTBEAT: u16 = 8708;
 const DST_PORT_DEVICE_INFO: u16 = 8702;
 
+// Virgil patch: the clock leader as reported by an in-process PTP follower.
+// Takes precedence over the /tmp/clock-stats.* file written by Inferno's
+// statime fork, which does not exist when another PTP implementation is used
+// (or on Windows).
+static CLOCK_MASTER: std::sync::Mutex<Option<[u8; 8]>> = std::sync::Mutex::new(None);
+
+/// Set (or clear) the EUI-64 clock identity of the current PTP leader, which
+/// Dante Controller shows in its clock status view.
+pub fn set_clock_master(id: Option<[u8; 8]>) {
+  *CLOCK_MASTER.lock().unwrap() = id;
+}
+
+fn read_clock_stats_file(required_prefix: &str) -> Option<Vec<u8>> {
+  let readdir = std::fs::read_dir("/tmp").ok()?;
+  for entry in readdir.flatten() {
+    if entry.file_name().to_string_lossy().starts_with(required_prefix) {
+      if let Ok(content) = std::fs::read_to_string(entry.path()) {
+        let content = content.trim_ascii();
+        if content.len() >= 16 {
+          if let Ok(master_id) = hex::decode(&content[0..16]) {
+            return Some(master_id);
+          }
+        }
+      }
+    }
+  }
+  None
+}
+
 pub type PeaksCallback = Box<dyn FnMut() -> (Vec<u8>, Vec<u8>) + Send + Sync>;
 
 struct Multicaster<'s> {
@@ -306,23 +335,9 @@ impl<'s> Multicaster<'s> {
       return;
     };
     let required_prefix = format!("clock-stats.{}0000", hex::encode(self.self_info.mac_address.octets()));
-    let mut master_clock = None;
-    if let Ok(readdir) = std::fs::read_dir("/tmp") {
-      for entry in readdir {
-        if let Ok(entry) = entry {
-          if entry.file_name().to_string_lossy().starts_with(&required_prefix) {
-            if let Ok(content) = std::fs::read_to_string(entry.path()) {
-              let content = content.trim_ascii();
-              if content.len() >= 12 {
-                if let Ok(master_id) = hex::decode(&content[0..16]) {
-                  master_clock = Some(master_id);
-                  break;
-                }
-              }
-            }
-          }
-        }
-      }
+    let mut master_clock = CLOCK_MASTER.lock().unwrap().map(|id| id.to_vec());
+    if master_clock.is_none() {
+      master_clock = read_clock_stats_file(&required_prefix);
     }
     if let Some(mc) = master_clock {
       assert_eq!(mc.len(), 8);

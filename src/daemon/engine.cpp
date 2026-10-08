@@ -200,7 +200,11 @@ void Engine::stop() {
     return;
   }
   if (tick_thread_.joinable()) tick_thread_.join();
-  if (dante_) vg_dante_stop(dante_);
+  if (dante_) {
+    vg_dante_set_clock_master(nullptr);
+    reported_master_ = false;
+    vg_dante_stop(dante_);
+  }
   dante_ = nullptr;
   if (hdr_) hdr_->state.store(kStateStopped, std::memory_order_release);
   clock_.reset();
@@ -331,10 +335,33 @@ void Engine::tick_loop() {
 
     if (now - last_reclaim > 1000000000LL) {
       reclaim_clients(now);
+      report_clock_master();
       last_reclaim = now;
     }
     next += P;
   }
+}
+
+// Dante Controller's clock status needs the leader's identity. PTPv1 uses
+// 6-byte clock UUIDs; Dante shows them as EUI-64 (ff:fe in the middle).
+void Engine::report_clock_master() {
+  if (!dante_) return;
+  const uint32_t st = clock_->state();
+  unsigned b[6];
+  const std::string gm = clock_->grandmaster();
+  const bool have = (st == kStatePtpLocked || st == kStatePtpMaster) &&
+                    std::sscanf(gm.c_str(), "%x:%x:%x:%x:%x:%x", &b[0], &b[1], &b[2], &b[3],
+                                &b[4], &b[5]) == 6;
+  uint8_t id[8] = {};
+  if (have) {
+    id[0] = uint8_t(b[0]); id[1] = uint8_t(b[1]); id[2] = uint8_t(b[2]);
+    id[3] = 0xff; id[4] = 0xfe;
+    id[5] = uint8_t(b[3]); id[6] = uint8_t(b[4]); id[7] = uint8_t(b[5]);
+  }
+  if (have == reported_master_ && std::memcmp(id, reported_id_, 8) == 0) return;
+  reported_master_ = have;
+  std::memcpy(reported_id_, id, 8);
+  vg_dante_set_clock_master(have ? id : nullptr);
 }
 
 void Engine::reclaim_clients(int64_t now) {

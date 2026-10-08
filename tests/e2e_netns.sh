@@ -79,6 +79,9 @@ done
 sleep 5
 grep -E "ptp|locked|up on" "$work/a.log" "$work/b.log" | head -20 || true
 
+echo "--- clock status as Dante Controller asks for it"
+ip netns exec vg-c python3 "$(dirname "$0")/clock_status_probe.py" 10.77.0.1 10.77.0.3
+
 if [ -z "$netaudio" ]; then
   echo "network up. Controller namespace: sudo ip netns exec vg-c <dante tool>"
   echo "logs: $work. Ctrl+C to stop."
