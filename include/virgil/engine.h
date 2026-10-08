@@ -79,6 +79,7 @@ class Engine {
   // Peak meters: float bits of |sample|, max-accumulated by the tick thread
   // and drained by take_peaks().
   std::array<std::atomic<uint32_t>, kMaxChannels> tx_peak_{};
+  std::array<bool, kMaxTxClients> client_stalled_{};  // tick thread only
   std::array<std::atomic<uint32_t>, kMaxChannels> rx_peak_{};
 };
 

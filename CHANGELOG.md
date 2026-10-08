@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.3.4
+- Fixed network output going silent for good while input kept working. After a long hiccup (or a moment where the engine was mid-update) the ASIO driver could stop feeding Virgil, or Virgil could mute the app, until the app reopened the driver. The driver now realigns itself, and the engine never mutes a connected app.
+- After *Restart engine* or a settings change, connected apps realign to the new clock straight away.
+- The log notes when an app stops sending audio and when it resumes.
+
 ## 0.3.3
 - Fixed Virgil showing up in Dante Controller without details and missing from the routing page (0.3.2 had changed a protocol identifier field that Dante Controller checks).
 

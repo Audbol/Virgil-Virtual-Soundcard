@@ -283,6 +283,11 @@ class VirgilAsio : public IASIO {
     ASIOTime time_info{};
     uint64_t steps = client_.header()->clock_steps.load();
     bool reset_requested = false;
+    // How far the next callback may sit from "now" before we realign: a
+    // couple of buffers ahead, a quarter ring behind.
+    const uint64_t max_ahead = 2 * uint64_t(B) + client_.sample_rate() / 20;
+    const uint64_t max_behind = client_.ring_frames() / 4;
+    const int64_t max_sleep_ns = 20000000;
 
     while (running_) {
       // virgild gone for >2 s (settings changed the soundcard layout, or it was
@@ -295,15 +300,33 @@ class VirgilAsio : public IASIO {
         reset_requested = true;
       }
       virgil::ClockAnchor a;
-      if (!client_.anchor(&a)) break;
+      if (!client_.anchor(&a)) {
+        // The daemon is mid-update (its tick thread was preempted while
+        // publishing): try again shortly. Leaving the loop here would end
+        // playback for good while the host keeps waiting for callbacks.
+        virgil::sleep_until_ns(virgil::mono_ns() + 1000000);
+        continue;
+      }
+      const int64_t now_ns = virgil::mono_ns();
+      const double now_frame = a.frame_at(now_ns);
       const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_relaxed);
-      if (cur_steps != steps) {
-        // PTP relock moved the timeline: realign and tell the host.
+      // Realign when the timeline moved (PTP relock, engine restarted with a
+      // new clock) or when we are far off it for any other reason: a
+      // callback that is due years from now, or one so late that the rings
+      // have wrapped, would otherwise silence playback until the host
+      // restarts the driver.
+      if (cur_steps != steps || double(t) > now_frame + double(max_ahead) ||
+          double(t) + double(max_behind) < now_frame) {
         steps = cur_steps;
-        t = (uint64_t(a.frame_at(virgil::mono_ns())) / B + 1) * B;
+        t = (uint64_t(now_frame) / B + 1) * B;
         if (callbacks_->asioMessage) callbacks_->asioMessage(kAsioResyncRequest, 0, nullptr, nullptr);
       }
       const int64_t deadline = a.host_ns_at(double(t));
+      if (deadline - now_ns > max_sleep_ns) {
+        // Never commit to a long sleep: the anchor may change under us.
+        virgil::sleep_until_ns(now_ns + max_sleep_ns);
+        continue;
+      }
       virgil::sleep_until_ns(deadline, 50000);
       if (!running_) break;
 

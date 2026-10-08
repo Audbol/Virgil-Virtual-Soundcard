@@ -242,6 +242,10 @@ void Engine::tick_loop() {
   const int64_t spin = int64_t(cfg_.spin_us) * 1000;
   const int64_t resync_ns = std::max<int64_t>(50000000, 4 * period_ns);
 
+  // A new engine (reload) may run on a different timeline than the one
+  // connected drivers were following: tell them to realign.
+  hdr_->clock_steps.fetch_add(1, std::memory_order_relaxed);
+
   ClockModel m = clock_->model();
   uint64_t next = (ptp_ns_to_frames(m.ptp_at(mono_ns()), rate) / P + 1) * P;
   int64_t last_reclaim = 0;
@@ -342,8 +346,21 @@ void Engine::reclaim_clients(int64_t now) {
       VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, s.name, pid);
       s.active.store(0, std::memory_order_release);
       s.pid.store(0, std::memory_order_release);
-    } else if (now - s.heartbeat_ns.load(std::memory_order_relaxed) > 5000000000LL) {
-      s.active.store(0, std::memory_order_release);
+      client_stalled_[i] = false;
+      continue;
+    }
+    // A client whose heartbeat stalled stays active: its ring is consumed
+    // every tick, so it contributes silence until it resumes. (Deactivating
+    // it here used to mute an app for good after a long hiccup, since only
+    // the app sets `active` again, on its next start.) Just say so.
+    const bool stalled = s.active.load(std::memory_order_acquire) != 0 &&
+                         now - s.heartbeat_ns.load(std::memory_order_relaxed) > 2000000000LL;
+    if (stalled != client_stalled_[i]) {
+      if (stalled)
+        VIRGIL_LOG_WARN("client slot %u (%s, pid %u) stopped sending audio", i, s.name, pid);
+      else
+        VIRGIL_LOG_INFO("client slot %u (%s, pid %u) is sending audio again", i, s.name, pid);
+      client_stalled_[i] = stalled;
     }
   }
 }
