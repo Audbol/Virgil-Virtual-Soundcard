@@ -210,11 +210,13 @@ cmake -S . -B build && cmake --build build -j && ctest --test-dir build
 | Windows installer + zip | `ASIO_SDK_DIR=… packaging/windows/build-installer.sh` | `g++-mingw-w64-x86-64`, `nsis`, `zip` (runs on Linux) |
 | macOS `.pkg` + zip | `packaging/macos/build-pkg.sh` | Xcode command-line tools |
 
-Output goes to `dist/`. The **Release** GitHub workflow builds all of them on
-every push to `main`, keeping them as workflow artifacts. When you push a tag
-such as `v0.2.0`, or run the workflow by hand with a version, it publishes them
-as a GitHub Release, together with
-`SHA256SUMS` and the notes from `packaging/release-notes.md`.
+Output goes to `dist/`. The **Release** GitHub workflow builds them and
+publishes a GitHub Release, with `SHA256SUMS` and the notes from
+`packaging/release-notes.md`, when you push a tag such as `v0.2.0` or run it by
+hand with a version. Run by hand, its **platforms** choice (all, windows,
+macos, linux, raspberry-pi) builds and releases only that platform, for a fix
+that only concerns one; the release notes then say so. The **CI** workflow
+builds and tests every platform on each push.
 
 * **macOS signing and notarisation:** set `VIRGIL_CODESIGN_ID`,
   `VIRGIL_INSTALLER_ID` and `VIRGIL_NOTARY_PROFILE`, or the matching repository

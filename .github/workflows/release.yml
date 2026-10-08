@@ -1,12 +1,12 @@
 name: Release
 
-# Builds every download on each push (kept as workflow artifacts) and
-# publishes them as a GitHub Release when a version tag (v1.2.3) is pushed,
-# or when run by hand with a version: the tag is then created on the
-# commit the run was started from.
+# Builds the downloads and publishes them as a GitHub Release when a version
+# tag (v1.2.3) is pushed, or when run by hand with a version (the tag is then
+# created on the commit the run was started from). Run by hand, `platforms`
+# limits the build and the release to one platform, e.g. while fixing an
+# issue that only affects that one. Branch pushes are covered by CI.
 on:
   push:
-    branches: [main, "claude/**"]
     tags: ["v*"]
   workflow_dispatch:
     inputs:
@@ -14,12 +14,18 @@ on:
         description: "Publish a release with this tag (e.g. v0.2.0); empty = build only"
         required: false
         default: ""
+      platforms:
+        description: "Which platforms to build and release"
+        type: choice
+        options: [all, windows, macos, linux, raspberry-pi]
+        default: all
 
 permissions:
   contents: write
 
 jobs:
   linux-packages:
+    if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'linux' }}
     # Oldest supported runner, so the packages install on Debian 12 /
     # Ubuntu 22.04 and newer (libc6 >= 2.34, libasound2).
     runs-on: ubuntu-22.04
@@ -32,6 +38,7 @@ jobs:
         with: { name: linux-packages, path: "dist/*" }
 
   linux-portable:
+    if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'linux' }}
     # Oldest supported runner: the tarball then runs on glibc 2.35 and newer.
     runs-on: ubuntu-22.04
     timeout-minutes: 60
@@ -43,6 +50,7 @@ jobs:
         with: { name: linux-portable, path: "dist/*.tar.gz" }
 
   raspberry-pi:
+    if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'raspberry-pi' }}
     # 64-bit ARM .deb and tarball, cross-built on the oldest supported runner
     # so they install on Raspberry Pi OS 12 (bookworm) 64-bit and newer.
     runs-on: ubuntu-22.04
@@ -58,6 +66,7 @@ jobs:
         with: { name: raspberry-pi, path: "dist/*" }
 
   windows:
+    if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'windows' }}
     # Cross-built with MinGW-w64 + NSIS, the toolchain the installer was
     # developed and tested with; binaries are statically linked.
     runs-on: ubuntu-24.04
@@ -95,6 +104,7 @@ jobs:
         with: { name: windows, path: "dist/*" }
 
   macos:
+    if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'macos' }}
     runs-on: macos-14
     timeout-minutes: 60
     steps:
@@ -110,7 +120,11 @@ jobs:
         with: { name: macos, path: "dist/*" }
 
   publish:
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))
+    # Runs when every selected platform built; platforms left out are skipped.
+    if: >-
+      ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
+          (startsWith(github.ref, 'refs/tags/v') ||
+           (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))) }}
     needs: [linux-packages, linux-portable, raspberry-pi, windows, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
@@ -124,10 +138,21 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.version || github.ref_name }}
+          PLATFORMS: ${{ github.event.inputs.platforms || 'all' }}
         run: |
+          notes=packaging/release-notes.md
+          if [ "$PLATFORMS" != all ]; then
+            case "$PLATFORMS" in
+              windows) label=Windows ;; macos) label=macOS ;; linux) label=Linux ;;
+              raspberry-pi) label="Raspberry Pi" ;; *) label=$PLATFORMS ;;
+            esac
+            { echo "> **This release only contains the $label downloads.** For other platforms, use the latest release that has them."
+              echo; cat packaging/release-notes.md; } > "$RUNNER_TEMP/notes.md"
+            notes=$RUNNER_TEMP/notes.md
+          fi
           prerelease=""
           case "$TAG" in v0.*) prerelease="--prerelease" ;; esac
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
-            --title "Virgil $TAG" --notes-file packaging/release-notes.md --generate-notes \
+            --title "Virgil $TAG" --notes-file "$notes" --generate-notes \
             $prerelease
