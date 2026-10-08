@@ -1,5 +1,8 @@
 # Changelog
 
+## 0.4.2
+- Raspberry Pi installer: the window no longer closes the moment it finishes or fails. It waits for Enter, says which step went wrong, and saves its output to `~/virgil-install.log`.
+
 ## 0.4.1
 - One-step Raspberry Pi installer (`Virgil-<ver>-raspberry-pi-installer.sh`): installs Virgil, gives the device a unique Dante name, picks the wired network port, keeps the CPU at full speed for low latency and starts the service. `get-virgil.sh` fetches and runs it in one line once the repository is public.
 
