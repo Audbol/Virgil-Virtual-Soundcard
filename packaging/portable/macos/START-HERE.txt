@@ -1,8 +1,8 @@
 Virgil Virtual Soundcard - portable for macOS 11+ (Apple silicon and Intel)
 =======================================================================
 
-Dante virtual soundcard with a Core Audio device: the Mac shows up in Dante
-Controller as a Dante device named "Virgil"; route it there.
+Virtual soundcard for Dante networks with a Core Audio device: the Mac appears in Dante
+Controller as a device named "Virgil"; route it there.
 
 This download is not notarised. Before the first start, open Terminal in
 this folder and run:      xattr -dr com.apple.quarantine .
@@ -25,6 +25,8 @@ use the installer Virgil-<version>-macos.pkg instead.
 Remove the driver: sudo rm -rf /Library/Audio/Plug-Ins/HAL/VirgilAudio.driver
 and then: sudo killall coreaudiod
 
-Unofficial: Virgil is built on Inferno, an independent open-source Dante
-implementation, and is not affiliated with or approved by Audinate.
-License: GPLv3 (see LICENSE).
+Independent project: Virgil is built on Inferno, an independent open-source
+project, and is not affiliated with, authorized or endorsed by Audinate.
+Dante is a registered trademark of Audinate Pty Ltd. ASIO is a trademark and
+software of Steinberg Media Technologies GmbH. See NOTICE.md.
+License: GPLv3 (see LICENSE). No warranty.

@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(virgil VERSION 0.3.1 LANGUAGES C CXX)
+project(virgil VERSION 0.3.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -122,7 +122,7 @@ endif()
 
 install(TARGETS virgild virgil-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
 install(TARGETS virgil-control RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR} BUNDLE DESTINATION .)
-install(FILES README.md LICENSE config/virgil.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
+install(FILES README.md LICENSE NOTICE.md config/virgil.conf.example DESTINATION ${CMAKE_INSTALL_DOCDIR})
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   configure_file(packaging/linux/virgild.service.in ${CMAKE_BINARY_DIR}/virgild.service @ONLY)
   install(FILES ${CMAKE_BINARY_DIR}/virgild.service DESTINATION lib/systemd/system)
@@ -157,7 +157,7 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
       "Low-latency Dante-compatible virtual soundcard (unofficial)")
   set(CPACK_PACKAGE_DESCRIPTION
-      "Virgil appears on the network as a Dante device and exposes its channels as an ALSA soundcard. Dante support comes from Inferno, an independent open-source implementation; Virgil is not affiliated with Audinate.")
+      "Virgil joins Dante networks as an audio device and exposes its channels as an ALSA soundcard. Network compatibility comes from Inferno, an independent open-source project. Virgil is not affiliated with or endorsed by Audinate; Dante is a registered trademark of Audinate Pty Ltd.")
   set(CPACK_PACKAGE_HOMEPAGE_URL "https://github.com/audbol/virgil-dante-soundcard-virtual")
 
   set(CPACK_DEBIAN_FILE_NAME DEB-DEFAULT)

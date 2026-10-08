@@ -1,5 +1,6 @@
-# VirgilAsio.dll - ASIO driver. The Steinberg ASIO SDK is not redistributed;
-# download it from https://www.steinberg.net/asiosdk and pass ASIO_SDK_DIR.
+# VirgilAsio.dll - ASIO driver. The Steinberg ASIO SDK is not included in this
+# repository; download it from https://www.steinberg.net/asiosdk and pass
+# ASIO_SDK_DIR. Releases use the SDK under its GPLv3 option (see NOTICE.md).
 if(NOT ASIO_SDK_DIR OR NOT EXISTS "${ASIO_SDK_DIR}/common/asio.h")
   message(WARNING "ASIO_SDK_DIR not set or invalid; skipping the ASIO driver")
   return()

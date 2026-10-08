@@ -54,7 +54,26 @@ jobs:
           curl -fsSL -o asiosdk.zip https://www.steinberg.net/asiosdk
           unzip -q asiosdk.zip -d asio
           echo "ASIO_SDK_DIR=$(find "$PWD/asio" -maxdepth 3 -name asio.h -path '*/common/*' -printf '%h\n' | head -1 | xargs dirname)" >> "$GITHUB_ENV"
+      # The ASIO driver is distributed under the GPLv3 option of the ASIO SDK
+      # licence: refuse to build a release from an SDK that does not offer it.
+      - name: Check the ASIO SDK licence
+        run: |
+          lic=$(grep -rlis "GNU GENERAL PUBLIC LICENSE" asio | head -1 || true)
+          if [ -z "$lic" ]; then
+            echo "::error::The downloaded ASIO SDK does not offer the GPLv3; not building a distributable ASIO driver."
+            exit 1
+          fi
+          echo "GPLv3 licence text found in the ASIO SDK: $lic"
+          head -20 "$lic"
       - run: packaging/windows/build-installer.sh
+      # GPL corresponding source for the parts of the ASIO SDK compiled into
+      # VirgilAsio.dll (three headers), with Steinberg's licence files.
+      - name: Package ASIO SDK source used by the driver
+        run: |
+          mkdir -p asio-src
+          cp "$ASIO_SDK_DIR"/common/asio.h "$ASIO_SDK_DIR"/common/asiosys.h "$ASIO_SDK_DIR"/common/iasiodrv.h asio-src/
+          find asio -maxdepth 3 -type f \( -iname '*licen*' -o -iname '*copying*' -o -iname 'readme*' \) -exec cp {} asio-src/ \;
+          (cd asio-src && zip -q ../dist/asio-sdk-headers-source.zip *)
       - uses: actions/upload-artifact@v4
         with: { name: windows, path: "dist/*" }
 

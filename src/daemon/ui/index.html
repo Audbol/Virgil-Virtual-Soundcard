@@ -280,7 +280,7 @@ function render(st) {
   renderMeters($("m-rx"), st.meters.rx, S.holds.rx, d.rx_channels, "Capture channel");
 
   $("cfgpath").textContent = st.config_path ? "Saved to " + st.config_path : "";
-  $("footer").textContent = `Virgil ${st.version} · unofficial, not affiliated with Audinate · control panel on this computer only (127.0.0.1)`;
+  $("footer").textContent = `Virgil ${st.version} · GPLv3, no warranty · not affiliated with or endorsed by Audinate; Dante is a registered trademark of Audinate Pty Ltd · control panel on this computer only (127.0.0.1)`;
 }
 
 // ---------- settings form <-> config text ----------

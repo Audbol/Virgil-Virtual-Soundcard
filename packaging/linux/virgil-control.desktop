@@ -2,7 +2,7 @@
 Type=Application
 Name=Virgil Control
 GenericName=Network soundcard control panel
-Comment=Status, meters and settings of the Virgil Dante virtual soundcard
+Comment=Status, meters and settings of the Virgil virtual soundcard
 Exec=virgil-control
 Icon=virgil
 Terminal=false

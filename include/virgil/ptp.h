@@ -1,5 +1,5 @@
 // PTPv1 (IEEE 1588-2002) ordinary clock over UDP/IPv4: the clock protocol
-// native Dante devices use (subdomain "_DFLT").
+// Dante devices use (subdomain "_DFLT").
 //
 // Follower: E2E delay mechanism, two-step ("assist") and one-step masters,
 // best master chosen from the properties carried in Sync messages, software

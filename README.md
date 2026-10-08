@@ -1,11 +1,12 @@
 <p align="center"><img src="branding/virgil-256.png" width="160" alt="Virgil logo: a flame of audio meter bars inside a laurel wreath"></p>
 
-# Virgil: a low-latency Dante virtual soundcard
+# Virgil: a low-latency virtual soundcard for Dante® networks
 
 <p align="center"><em><b>V</b>irtual <b>I</b>nterface <b>R</b>outing <b>G</b>ateway for <b>I</b>nferno-based <b>L</b>ow-latency audio</em></p>
 
-Virgil turns a computer into a **Dante device**. In Dante Controller it shows up
-next to your other Dante gear, with its own transmit and receive channels. You
+Virgil lets a computer join a **Dante network** as an audio device. In Dante
+Controller it shows up next to your other gear, with its own transmit and
+receive channels. You
 route it like any other device, and your audio apps see an ordinary soundcard:
 
 | OS      | Driver                         | Apps see it as                   |
@@ -19,10 +20,12 @@ Virgil (Dante's guide through the *Inferno*) is built on
 implementation of the Dante protocol by Teodor Woźniak and contributors. Inferno
 is vendored in `third_party/inferno` with a few patches; see its README.
 
-> **Unofficial.** Virgil and Inferno are reverse-engineered and are not
-> affiliated with, authorized or approved by Audinate. "Dante" is a trademark
-> of Audinate. Expect rough edges compared with Audinate's Dante Virtual
-> Soundcard. Virgil is licensed under the GPLv3 (see `LICENSE`).
+> **Independent project.** Virgil is not affiliated with, authorized,
+> endorsed or certified by Audinate, and contains no Audinate software,
+> firmware or documentation. Dante® is a registered trademark of Audinate Pty
+> Ltd., used here only to say which networks Virgil works with. Virgil is free
+> software under the GPLv3 (see `LICENSE`) and comes with no warranty. See
+> [`NOTICE.md`](NOTICE.md) for all trademarks and third-party licences.
 
 ## Using it with Dante Controller
 
@@ -40,8 +43,7 @@ talk to each other, set `master_capable = true` in `[ptp]` on one of them.
 
 Latency: Virgil's **receive latency** (`latency_us`, default 4 ms) works like
 the device latency in Dante Controller. Its **transmit latency**
-(`tx_latency_us`, default 4 ms) works like Dante Virtual Soundcard's latency
-setting: Virgil timestamps its audio that far ahead, so receivers get it in
+(`tx_latency_us`, default 4 ms): Virgil timestamps its audio that far ahead, so receivers get it in
 time whatever their own latency (even 0.25 ms on hardware). Playback through
 Virgil therefore reaches the network `tx_latency_us` plus the receiver's
 latency after the app plays it. Lower

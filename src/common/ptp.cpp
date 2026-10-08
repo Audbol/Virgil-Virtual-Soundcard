@@ -370,13 +370,13 @@ void PtpClock::note_sender(const Endpoint& from, const uint8_t* p, size_t n, boo
   }
   ptp1::Header h;
   if (!ptp1::parse_header(p, n, &h)) {
-    VIRGIL_LOG_INFO("ptp: %s sent an unrecognised %zu-byte packet on port %d", ip.c_str(), n,
+    VIRGIL_LOG_INFO("ptp: %s sent an unrecognised %u-byte packet on port %d", ip.c_str(), unsigned(n),
                     event_port ? 319 : 320);
     return;
   }
   char sub[17] = {};
   std::memcpy(sub, h.subdomain, 16);
-  VIRGIL_LOG_INFO("ptp: hearing %s (clock %s, subdomain %s, message %u, %zu bytes)", ip.c_str(),
+  VIRGIL_LOG_INFO("ptp: hearing %s (clock %s, subdomain %s, message %u, %u bytes)", ip.c_str(),
                   ptp1::format_uuid(h.source.uuid).c_str(), sub, unsigned(h.control), n);
 }
 

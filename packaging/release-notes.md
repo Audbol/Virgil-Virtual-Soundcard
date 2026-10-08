@@ -1,43 +1,10 @@
-**0.3.1:** Virgil now has a full name: **V**irtual **I**nterface **R**outing **G**ateway for **I**nferno-based **L**ow-latency audio.
-
-**0.3.0:** new native Virgil Control for Windows.
-- Lives in the notification area and starts with Windows. Hover for the clock status; click for the window; right-click for settings, engine restart, the log and quit.
-- The window shows level meters for every channel to and from the network, the clock state and which apps are playing. REAPER and other ASIO hosts now appear by name.
-- Native settings dialog: device name, network interface, sample rate, channels, latencies and clock.
-- Notifications when the service stops or the Dante clock is lost.
-- The installer closes Virgil Control before updating and removes the start-at-login entry when uninstalled.
-
-**0.2.8:** reliability and diagnostics.
-- The log file is written immediately. On Windows the last moments before a problem were held in a buffer and missing from `virgild.log`.
-- A crash inside the Dante stack is now logged (thread and location), and the audio engine restarts automatically instead of going silent.
-
-**0.2.7:** fixes Dante transmit getting stuck after Virgil locks to the network clock. Receivers got only the first channel, new subscriptions and reroutes were refused, and "Restart audio engine" or stopping the service hung. Cause: the clock jump when Virgil locks to a Dante master stalled Inferno's transmitter, so it stopped handling requests.
-
-**0.2.6:** fixes receivers with low latency settings (for example a WING at 1 ms) dropping Virgil's audio. Only one channel arrived, and the WING kept re-requesting the stream and eventually gave up. Virgil now timestamps outgoing audio one transmit latency (4 ms by default) ahead, like Dante Virtual Soundcard, so it arrives in time for any receiver.
-
-**0.2.5:** Virgil has a logo: Virgil's laurel wreath around an Inferno flame made of audio meter bars. It appears on the Windows programs and installer, the macOS app, the Linux menu entry and the control panel.
-
-**0.2.4:** fixes from the second real-network log.
-- Automatic interface choice no longer picks a Hyper-V/WSL, VPN or other virtual adapter; it prefers wired over Wi-Fi. The control panel marks virtual adapters.
-- Clock: uses the least-delayed of every 4 Sync messages, so late receive timestamps on Windows no longer cause the ±1 ms clock jumps.
-- Dante messages are logged from a separate thread, and bursts of the same message become one line per second. A flood of "send returned error" lines could stall the transmitter.
-
-**0.2.3:** Windows timing and clock fixes from the first real Dante network test.
-- Fixes frequent "tx lag … dropout" errors: Windows 11 throttled the Virgil service's timers because it has no window. Virgil now opts out, and Inferno's transmit thread runs in the "Pro Audio" scheduling class.
-- One late clock packet no longer makes the clock jump by about 1 ms and back.
-- The log now names every PTP clock source Virgil hears, and warns if no Dante clock master shows up within 15 s.
-
-**0.2.2:** the Windows installer can now update the ASIO driver while a DAW has it loaded. Previously it failed with "Error opening file for writing".
-
-**0.2.1:** fixes the ASIO driver on Windows. DAWs such as REAPER showed Virgil with no inputs or outputs ("device closed"), because the driver asked Windows for more access to the shared soundcard than ordinary, non-administrator apps get.
-
-**Virgil** (formerly DSV) is now a native Dante device. It appears in Dante Controller with its own transmit and receive channels, and you route it there like any other Dante device. AES67 mode is no longer needed or used. Dante support comes from [Inferno](https://github.com/teodly/inferno), an independent open-source implementation of the protocol.
+**Virgil** (**V**irtual **I**nterface **R**outing **G**ateway for **I**nferno-based **L**ow-latency audio) is a free, open-source virtual soundcard for Dante® networks. It appears as a device that Dante-compatible routing software can route, and your audio apps see an ordinary soundcard (ASIO, Core Audio, ALSA). Network compatibility comes from [Inferno](https://github.com/teodly/inferno), an independent open-source project. See [CHANGELOG.md](CHANGELOG.md) for what changed.
 
 ## Downloads
 
 | You have | Download | Then |
 |---|---|---|
-| **Windows 10/11** | `Virgil-*-win64-setup.exe` | Run it. Open **Virgil Control** from the Start menu or desktop and pick your Dante network interface. Choose *Virgil* as the ASIO device in your DAW. |
+| **Windows 10/11** | `Virgil-*-win64-setup.exe` | Run it. **Virgil Control** opens and stays in the notification area; pick your network interface in Settings. Choose *Virgil* as the ASIO device in your DAW. |
 | Windows, no install | `Virgil-*-windows-x64-portable.zip` | Unzip. Run `register-asio-driver.cmd` as administrator, then double-click `virgil-control.exe`. |
 | **macOS 11+** | `Virgil-*-macos.pkg` | Run it. Open **Virgil Control** from Applications. Pick *Virgil Virtual Soundcard* in System Settings › Sound. |
 | macOS, no install | `Virgil-*-macos-portable.zip` | Unzip, then follow `START-HERE.txt`. |
@@ -45,8 +12,8 @@
 | **Fedora / RHEL** | `virgil-*.x86_64.rpm` | `sudo dnf install ./virgil-*.x86_64.rpm`, then run `virgil-control`. |
 | Linux, no install | `Virgil-*-linux-x86_64.tar.gz` | Extract, `./setup-alsa.sh`, then `./virgil-control`. |
 
-Then, in **Dante Controller**, subscribe Virgil's receive channels to your Dante transmitters (and other devices to Virgil's transmit channels).
+Then, in your routing software, subscribe Virgil's receive channels to your transmitters (and other devices to Virgil's transmit channels).
 
-**Upgrading from DSV 0.1:** Virgil installs alongside DSV under new names. Uninstall DSV first, because both use the PTP ports. Old `dsv.conf` files are not migrated; the settings that still apply are name, interface, sample rate, channels and latency.
+**Independent project, no warranty.** Virgil is not affiliated with, authorized, endorsed or certified by Audinate. It contains no Audinate software, firmware or documentation. The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will ask you to confirm the first time you run them. Licensed under the GPLv3; see `NOTICE.md` for trademarks and third-party licences.
 
-**Unofficial:** Virgil is not affiliated with, authorized or approved by Audinate. It has been tested between Virgil devices with an open-source Dante controller, **but not yet against Audinate hardware or Dante Controller itself**. The installers are unsigned, so Windows SmartScreen and macOS Gatekeeper will ask you to confirm the first time you run them. Licensed under the GPLv3.
+Dante® is a registered trademark of Audinate Pty Ltd. ASIO is a trademark and software of Steinberg Media Technologies GmbH.

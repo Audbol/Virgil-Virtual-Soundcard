@@ -1,8 +1,8 @@
 Virgil Virtual Soundcard - portable for Windows (x64)
 =================================================
 
-Dante virtual soundcard with an ASIO driver: the PC shows up in Dante
-Controller as a Dante device named "Virgil"; route it there.
+Virtual soundcard for Dante networks with an ASIO driver: the PC appears in Dante
+Controller as a device named "Virgil"; route it there.
 
 1. Register the ASIO driver (once):
    right-click "register-asio-driver.cmd" > Run as administrator.
@@ -23,6 +23,8 @@ virgild keeps running in the background; stop it from Task Manager.
 For an always-on setup (Windows service, starts at boot, works for every
 user account) use the installer Virgil-<version>-win64-setup.exe instead.
 
-Unofficial: Virgil is built on Inferno, an independent open-source Dante
-implementation, and is not affiliated with or approved by Audinate.
-License: GPLv3 (see LICENSE).
+Independent project: Virgil is built on Inferno, an independent open-source
+project, and is not affiliated with, authorized or endorsed by Audinate.
+Dante is a registered trademark of Audinate Pty Ltd. ASIO is a trademark and
+software of Steinberg Media Technologies GmbH. See NOTICE.md.
+License: GPLv3 (see LICENSE). No warranty.

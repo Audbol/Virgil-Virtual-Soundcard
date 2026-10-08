@@ -23,7 +23,7 @@ cp "$build/virgild" "$build/virgil-latency-probe" "$root/usr/local/bin/"
 cp -R "$build/drivers/coreaudio/VirgilAudio.driver" "$root/Library/Audio/Plug-Ins/HAL/"
 cp packaging/macos/org.virgil.virgild.plist "$root/Library/LaunchDaemons/"
 cp packaging/virgil.conf "$support/virgil.conf.default"
-cp config/virgil.conf.example README.md LICENSE "$support/"
+cp config/virgil.conf.example README.md LICENSE NOTICE.md "$support/"
 install -m 755 packaging/macos/uninstall.sh "$support/uninstall.sh"
 chmod 755 packaging/macos/scripts/*
 
@@ -59,7 +59,7 @@ mkdir -p "$port"
 cp "$root/usr/local/bin/virgild" "$root/usr/local/bin/virgil-latency-probe" "$port/"
 cp -R "$root/Applications/Virgil Control.app" "$root/Library/Audio/Plug-Ins/HAL/VirgilAudio.driver" "$port/"
 cp packaging/virgil.conf "$port/virgil.conf"
-cp README.md LICENSE config/virgil.conf.example packaging/portable/macos/START-HERE.txt "$port/"
+cp README.md LICENSE NOTICE.md config/virgil.conf.example packaging/portable/macos/START-HERE.txt "$port/"
 install -m 755 packaging/portable/macos/install-driver.command "$port/"
 ditto -c -k --sequesterRsrc --keepParent "$port" "dist/Virgil-$version-macos-portable.zip"
 

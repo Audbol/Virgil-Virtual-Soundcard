@@ -23,7 +23,7 @@ port="build-win-release/Virgil-$version-windows-x64"
 rm -rf "$port" && mkdir -p "$port"
 cp "$bin"/virgild.exe "$bin"/virgil-control.exe "$bin"/virgil-latency-probe.exe "$bin"/VirgilAsio.dll "$port/"
 cp packaging/virgil.conf "$port/virgil.conf"
-cp README.md LICENSE config/virgil.conf.example packaging/portable/windows/* "$port/"
+cp README.md LICENSE NOTICE.md config/virgil.conf.example packaging/portable/windows/* "$port/"
 (cd build-win-release && rm -f "../dist/Virgil-$version-windows-x64-portable.zip" &&
 	zip -qr "../dist/Virgil-$version-windows-x64-portable.zip" "Virgil-$version-windows-x64")
 ls -l dist/Virgil-*-setup.exe dist/Virgil-*-portable.zip

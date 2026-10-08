@@ -92,7 +92,7 @@ const unsigned kBg = 0x15171A, kPanel = 0x1B1E22, kLine = 0x2A2E34, kText = 0xE9
 const wchar_t* kWindowClass = L"VirgilControlWindow";
 const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3;
 const UINT kTrayId = 1;
-enum { ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER };
+enum { ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT };
 
 HINSTANCE g_inst;
 HWND g_hwnd;
@@ -640,6 +640,7 @@ void tray_menu() {
   AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING | (autostart_enabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
+  AppendMenuW(m, MF_STRING, ID_ABOUT, L"About Virgil\u2026");
   AppendMenuW(m, MF_STRING, ID_QUIT, L"Quit Virgil Control");
   SetMenuDefaultItem(m, ID_OPEN, FALSE);
   POINT pt;
@@ -658,6 +659,23 @@ void command(int id) {
     case ID_LOG: ShellExecuteW(g_hwnd, L"open", log_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_AUTOSTART: set_autostart(!autostart_enabled()); break;
     case ID_QUIT: DestroyWindow(g_hwnd); break;
+    case ID_ABOUT: {
+      std::string ver;
+      {
+        std::lock_guard<std::mutex> l(g_mutex);
+        ver = g_status.version;
+      }
+      const std::wstring msg =
+          L"Virgil " + widen(ver) +
+          L"\nVirtual Interface Routing Gateway for Inferno-based Low-latency audio\n\n"
+          L"Free software under the GNU GPL v3, with no warranty. Network compatibility comes "
+          L"from Inferno, an independent open-source project.\n\n"
+          L"Virgil is not affiliated with, authorized or endorsed by Audinate. Dante is a "
+          L"registered trademark of Audinate Pty Ltd. ASIO is a trademark and software of "
+          L"Steinberg Media Technologies GmbH. See NOTICE.md in the install folder.";
+      MessageBoxW(g_hwnd, msg.c_str(), L"About Virgil", MB_ICONINFORMATION);
+      break;
+    }
   }
 }
 

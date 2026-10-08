@@ -124,7 +124,8 @@ fn create_self_info(
     model_name: app_name.to_owned(),
     factory_device_id: devid,
     process_id,
-    vendor_string: "Audinate Dante-compatible".to_owned(),
+    // Virgil patch: do not announce a third-party vendor name.
+    vendor_string: "Virgil".to_owned(),
     factory_hostname: format!("{short_app_name}-{}", hex::encode(devid)),
     friendly_hostname,
     model_number: "_000000000000000b".to_owned(),

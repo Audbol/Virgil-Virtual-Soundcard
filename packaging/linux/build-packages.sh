@@ -38,7 +38,7 @@ if [ "$what" = portable ]; then
 		build-portable/drivers/alsa/libasound_module_pcm_virgil.so "$port/"
 	strip "$port/virgild" "$port/virgil-control" "$port/virgil-latency-probe" "$port/libasound_module_pcm_virgil.so"
 	cp packaging/virgil.conf "$port/virgil.conf"
-	cp README.md LICENSE config/virgil.conf.example packaging/portable/linux/START-HERE.txt "$port/"
+	cp README.md LICENSE NOTICE.md config/virgil.conf.example packaging/portable/linux/START-HERE.txt "$port/"
 	install -m 755 packaging/portable/linux/setup-alsa.sh "$port/"
 	tar -C build-portable -czf "dist/$name.tar.gz" "$name"
 fi

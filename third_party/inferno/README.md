@@ -35,9 +35,11 @@ Changes for Virgil:
    Virgil sets it to its TX latency so packets are stamped later than they
    are sent and arrive in time for receivers with any latency setting
    (a WING at 1 ms dropped Virgil's packets otherwise).
-6. `util/os.rs`: on Windows the real-time threads also join the MMCSS
+6. `device_server/settings.rs`: the device announces the vendor string
+   "Virgil" instead of a third-party company name.
+7. `util/os.rs`: on Windows the real-time threads also join the MMCSS
    "Pro Audio" class.
-7. `flows_tx.rs`: when the media clock steps backwards (e.g. the first lock
+8. `flows_tx.rs`: when the media clock steps backwards (e.g. the first lock
    to a Dante master, whose time counts from power-on), the transmitter's
    next command-processing time lay decades ahead, so it never again
    processed add-flow, set-channels or stop commands: receivers got only

@@ -46,11 +46,14 @@ VIAddVersionKey "LegalCopyright" "Virgil Project"
 !define MUI_ICON "${SRC_DIR}\branding\virgil.ico"
 !define MUI_UNICON "${SRC_DIR}\branding\virgil.ico"
 !define MUI_WELCOMEPAGE_TEXT "This installs Virgil (Virtual Interface Routing Gateway for Inferno-based Low-latency audio):$\r$\n$\r$\n\
-  - virgild, a background service that appears in Dante Controller as a Dante device \
-(unofficial; built on the open-source Inferno project)$\r$\n\
+  - virgild, a background service that appears in Dante Controller as an audio device \
+(independent; built on the open-source Inferno project)$\r$\n\
   - an ASIO driver named $\"${PRODUCT}$\" for your DAW$\r$\n$\r$\n\
 After installing, open Virgil Control (Start menu or desktop) to pick the \
-network interface and the streams to receive."
+network interface.$\r$\n$\r$\n\
+Virgil is not affiliated with or endorsed by Audinate. Dante is a registered \
+trademark of Audinate Pty Ltd. ASIO is a trademark and software of Steinberg \
+Media Technologies GmbH."
 !define MUI_FINISHPAGE_SHOWREADME "$INSTDIR\README.md"
 !define MUI_FINISHPAGE_SHOWREADME_TEXT "Open the README"
 !define MUI_FINISHPAGE_RUN
@@ -138,6 +141,7 @@ Section "Virgil" SecMain
   File "${BIN_DIR}\virgil-control.exe"
   File "${SRC_DIR}\README.md"
   File "${SRC_DIR}\LICENSE"
+  File "${SRC_DIR}\NOTICE.md"
   File "${SRC_DIR}\config\virgil.conf.example"
   File "${SRC_DIR}\packaging\windows\restart-virgil.cmd"
 
@@ -234,6 +238,7 @@ Section "Uninstall"
   Delete "$DESKTOP\Virgil Control.lnk"
   Delete /REBOOTOK "$INSTDIR\README.md"
   Delete /REBOOTOK "$INSTDIR\LICENSE"
+  Delete /REBOOTOK "$INSTDIR\NOTICE.md"
   Delete /REBOOTOK "$INSTDIR\virgil.conf.example"
   Delete /REBOOTOK "$INSTDIR\restart-virgil.cmd"
   Delete /REBOOTOK "$INSTDIR\uninstall.exe"
