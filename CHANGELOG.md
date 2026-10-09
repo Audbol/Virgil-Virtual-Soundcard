@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.5.0
+- **Native Virgil Control on macOS (menu bar app) and Linux / Raspberry Pi (GTK app with tray icon)**, with the same window as on Windows: clock state, meters, playing apps, settings.
+- **Fewer dropouts from clock corrections.** Once locked, Virgil no longer jumps its clock by ~1 ms (and back) when software timestamps or the path delay are briefly disturbed; a jump needs five agreeing measurements. The path delay is measured from the cleanest samples and changes slowly. On Linux (Raspberry Pi), kernel receive timestamps are converted without preemption errors.
+- Dante Controller: sample rate and encoding are reported (Device Config), the software version shows Virgil's version, and the link speed is reported where the operating system does not give one.
+- Robustness from a review of the whole code: values in shared memory are no longer trusted by the service or the drivers; settings that could hang or crash the engine are rejected; a second Virgil no longer takes over a running one's soundcard; on Windows a change of channel counts with a DAW open no longer hides the soundcard; settings are saved atomically; command-line options survive engine restarts.
+- Drivers: ALSA streams recover from clock changes instead of stalling; stopping and restarting playback no longer replays old audio (ALSA, ASIO); ASIO hosts are no longer reset on every settings change; Core Audio reconnects when Virgil restarts.
+- Installers: the Raspberry Pi installer upgrades cleanly over an edited configuration; macOS: the package always installs to the system folders and the uninstaller removes Virgil Control; Windows: the configuration stays editable after saving from Virgil Control; Linux: `apt purge` removes Virgil's state and service account.
+
 ## 0.4.6 (Raspberry Pi only)
 - Fixed "cannot write /etc/virgil/virgil.conf" when saving settings from the control panel on Linux / Raspberry Pi. The service now runs as a `virgil` system account (created by the package) that owns `/etc/virgil`. The same fix reaches the regular Linux packages with the next full release.
 

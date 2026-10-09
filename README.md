@@ -11,9 +11,24 @@ route it like any other device, and your audio apps see an ordinary soundcard:
 
 | OS      | Driver                         | Apps see it as                   |
 |---------|--------------------------------|----------------------------------|
-| Linux   | ALSA external PCM plugin       | `virgil` ALSA device (JACK, PipeWire, aplay, …) |
-| macOS   | CoreAudio AudioServerPlugIn    | "Virgil Virtual Soundcard" system device |
-| Windows | ASIO driver (COM in-proc)      | "Virgil" ASIO device |
+| Windows 10/11 | ASIO driver              | "Virgil" ASIO device (REAPER, Cubase, …) |
+| macOS 11+ | Core Audio AudioServerPlugIn | "Virgil Virtual Soundcard" system device |
+| Linux, Raspberry Pi | ALSA plugin          | `virgil` ALSA device (REAPER, JACK, PipeWire, aplay, …) |
+
+<p align="center"><img src="docs/virgil-control.png" width="520" alt="Virgil Control: device name, clock locked to the Dante leader, level meters for the channels from and to the network, and Settings and Restart engine buttons"></p>
+
+**What you get**
+
+- Up to 64 channels each way at 44.1–96 kHz, routed in Dante Controller like
+  any other device, with receive and transmit latency down to a few
+  milliseconds.
+- **Virgil Control**, a native app on every platform (tray / menu bar icon,
+  meters, clock state, settings), plus a browser panel for headless machines.
+- Follows the Dante clock leader (PTPv1), or leads the clock itself when
+  there is no Dante hardware.
+- Several apps can play at once; they are mixed.
+- Installers for Windows, macOS, Debian/Ubuntu, Fedora and a one-step
+  installer for the Raspberry Pi; portable versions that need no install.
 
 Virgil (Dante's guide through the *Inferno*) is built on
 [**Inferno**](https://github.com/teodly/inferno), an independent open-source
@@ -129,26 +144,30 @@ desktop; raise the latencies if you hear dropouts.
 
 ## Virgil Control
 
-**Windows:** Virgil Control is a native app that lives in the notification
-area (system tray) and starts with Windows. Hover the icon for the clock
-status; click it for the window with level meters for every channel to and
-from the network (input on top, output below), the clock state and the apps
-that are playing. Right-click
-for *Settings…*, *Restart audio engine*, *Open log*, *Start with Windows*
-and *Quit*. Closing the window keeps the tray icon; Virgil itself (the
-service) runs either way. It warns with a notification when the service
-stops or the Dante clock is lost.
+Virgil Control is a native app on every platform, with the same window: the
+device name and address, the clock state, level meters for every channel from
+the network (on top) and to the network (below), the apps that are playing,
+and *Settings…* and *Restart engine* buttons.
 
-**macOS and Linux:** Virgil Control opens the same controls in your browser
-(http://127.0.0.1:8480/ while `virgild` runs). It shows:
+- **Windows:** lives in the notification area (system tray) and starts with
+  Windows. Right-click the icon for *Settings…*, *Restart audio engine*,
+  *Open log*, *Start with Windows* and *Quit*.
+- **macOS:** lives in the menu bar (*Virgil Control* in Applications).
+  The menu has the same entries plus *Start at login*; the log opens in
+  Console.
+- **Linux and Raspberry Pi:** a GTK app with a tray icon (AppIndicator /
+  StatusNotifier, or the classic system tray) that starts at login on desktop
+  systems; *Show log* displays the service journal. Without a tray, closing
+  the window quits it.
 
-- **Status:** clock state (locked, clock master or free-running) with its
-  offset, format and latencies, and which apps are connected and playing.
-- **Meters:** per-channel peak meters for what arrives from the network
-  (what apps record) and, below it, what apps send to the network.
-- **Settings:** device name, network interface, sample rate, channel counts,
-  receive and transmit latency and clock source. An advanced editor gives you
-  the raw configuration file.
+Closing the window keeps the icon; Virgil itself (the service) runs either
+way, and you are notified when the service stops or the Dante clock is lost.
+The settings: device name, network interface, sample rate, channel counts,
+receive and transmit latency and clock source.
+
+The same controls are also available in a browser at http://127.0.0.1:8480/
+(*Open control panel in browser* in the menu), which is handy on a headless
+Raspberry Pi over SSH. It also has an editor for the raw configuration file.
 
 Routing is done in Dante Controller (or any Dante routing tool).
 
@@ -256,8 +275,9 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 | Linux packages | `.deb` installed in a container; portable tarball used as a user would |
 | Windows installer | In use on Windows 11; also run silently under Wine in development |
 | ASIO driver | In use with REAPER on Windows 11; test host under Wine |
-| Raspberry Pi (arm64) | Cross-built; unit and loopback tests run under QEMU in CI. **Not yet run on a real Pi** |
-| CoreAudio driver, macOS `.pkg` | Built by CI on macOS; **not yet run on a real Mac** |
+| Raspberry Pi (arm64) | In use with REAPER on a Raspberry Pi (64-bit Raspberry Pi OS); unit and loopback tests also run under QEMU in CI |
+| CoreAudio driver, macOS `.pkg`, Virgil Control for macOS | Built by CI on macOS; **not yet run on a real Mac** |
+| Virgil Control (Linux / Pi) | Run under X11 with a live daemon: meters, settings dialog and apply |
 
 Known limitations:
 
