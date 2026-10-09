@@ -111,7 +111,7 @@ bash ~/Downloads/Virgil-*-raspberry-pi-installer.sh     # optional: --name "Stag
 Or, once the repository is public, in one line straight from GitHub:
 
 ```sh
-curl -fsSL https://raw.githubusercontent.com/Audbol/DSV-Dante-Soundcard-Virtual/HEAD/packaging/raspberry-pi/get-virgil.sh | sh
+curl -fsSL https://raw.githubusercontent.com/Audbol/Virgil-Virtual-Soundcard/HEAD/packaging/raspberry-pi/get-virgil.sh | sh
 ```
 
 The installer installs Virgil and its dependencies, names the device

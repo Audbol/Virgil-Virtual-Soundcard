@@ -1,10 +1,10 @@
 #!/bin/sh
 # Download the newest Virgil Raspberry Pi installer from GitHub and run it:
-#   curl -fsSL https://raw.githubusercontent.com/Audbol/DSV-Dante-Soundcard-Virtual/HEAD/packaging/raspberry-pi/get-virgil.sh | sh
+#   curl -fsSL https://raw.githubusercontent.com/Audbol/Virgil-Virtual-Soundcard/HEAD/packaging/raspberry-pi/get-virgil.sh | sh
 # Options after "sh -s --" go to the installer (--name, --interface).
 # While the repository is private, set GITHUB_TOKEN to a token that can read it.
 set -eu
-repo=${VIRGIL_REPO:-Audbol/DSV-Dante-Soundcard-Virtual}
+repo=${VIRGIL_REPO:-Audbol/Virgil-Virtual-Soundcard}
 api="https://api.github.com/repos/$repo/releases?per_page=20"
 tmp=$(mktemp -d)
 trap 'rm -rf "$tmp"' EXIT
