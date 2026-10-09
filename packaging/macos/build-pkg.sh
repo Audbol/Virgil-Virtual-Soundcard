@@ -45,7 +45,9 @@ fi
 pkgbuild --analyze --root "$root" "$stage/components.plist"
 i=0
 while /usr/libexec/PlistBuddy -c "Print :$i" "$stage/components.plist" >/dev/null 2>&1; do
-	/usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$stage/components.plist"
+	# Not every inferred entry carries the key, so replace rather than Set.
+	/usr/libexec/PlistBuddy -c "Delete :$i:BundleIsRelocatable" "$stage/components.plist" >/dev/null 2>&1 || true
+	/usr/libexec/PlistBuddy -c "Add :$i:BundleIsRelocatable bool false" "$stage/components.plist"
 	i=$((i + 1))
 done
 pkgbuild --root "$root" --scripts packaging/macos/scripts --component-plist "$stage/components.plist" \
