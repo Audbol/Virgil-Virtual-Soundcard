@@ -88,8 +88,17 @@ target_link_libraries(virgil-latency-probe PRIVATE virgil_client)
 
 # Virgil Control: opens the control panel (starts a portable virgild if needed).
 if(APPLE)
-  set_source_files_properties(branding/virgil.icns PROPERTIES MACOSX_PACKAGE_LOCATION Resources)
-  add_executable(virgil-control MACOSX_BUNDLE tools/virgil_control.cpp branding/virgil.icns)
+  # Native menu bar app (AppKit) with the same window as on Windows/Linux.
+  enable_language(OBJCXX)
+  set_source_files_properties(branding/virgil.icns branding/virgil-256.png PROPERTIES
+                              MACOSX_PACKAGE_LOCATION Resources)
+  add_executable(virgil-control MACOSX_BUNDLE tools/control_mac/main.mm tools/control_common/api.cpp
+                 tools/control_common/settings_model.cpp tools/control_common/view.cpp
+                 branding/virgil.icns branding/virgil-256.png)
+  target_include_directories(virgil-control PRIVATE tools/control_common)
+  target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
+  target_compile_options(virgil-control PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+  target_link_libraries(virgil-control PRIVATE "-framework AppKit")
   set_target_properties(virgil-control PROPERTIES
     MACOSX_BUNDLE_ICON_FILE virgil.icns
     OUTPUT_NAME "Virgil Control"
