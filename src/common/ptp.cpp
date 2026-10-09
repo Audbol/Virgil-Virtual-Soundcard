@@ -529,7 +529,7 @@ void PtpClock::handle_general(const uint8_t* p, size_t n) {
     delays_[delay_count_ % 9] = d;
     ++delay_count_;
     const int k = std::min(delay_count_, 9);
-    int64_t sorted[9];
+    int64_t sorted[9] = {};
     std::copy(delays_, delays_ + k, sorted);
     std::sort(sorted, sorted + k);
     // Delays only grow from scheduling noise: take the lower quartile, not
