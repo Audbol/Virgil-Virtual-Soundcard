@@ -39,7 +39,16 @@ else
 	codesign --force -s - "$root/Applications/Virgil Control.app"
 fi
 
-pkgbuild --root "$root" --scripts packaging/macos/scripts \
+# Bundles must install where the package puts them: by default pkgbuild marks
+# them relocatable, and Installer would then update a copy found elsewhere
+# (e.g. the portable zip in ~/Downloads) instead.
+pkgbuild --analyze --root "$root" "$stage/components.plist"
+i=0
+while /usr/libexec/PlistBuddy -c "Print :$i" "$stage/components.plist" >/dev/null 2>&1; do
+	/usr/libexec/PlistBuddy -c "Set :$i:BundleIsRelocatable false" "$stage/components.plist"
+	i=$((i + 1))
+done
+pkgbuild --root "$root" --scripts packaging/macos/scripts --component-plist "$stage/components.plist" \
 	--identifier org.virgil.soundcard --version "$version" --install-location / \
 	--ownership recommended "$stage/virgil-component.pkg"
 

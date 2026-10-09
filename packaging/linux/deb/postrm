@@ -4,6 +4,10 @@ if [ "$1" = "remove" ] || [ "$1" = "purge" ]; then
 	rm -f /etc/systemd/system/virgil-cpu-performance.service
 	rm -f /etc/alsa/conf.d/99-virgil-default.conf  # Raspberry Pi installer option
 fi
+if [ "$1" = "purge" ]; then
+	rm -rf /var/lib/virgil /var/lib/private/virgil /etc/virgil
+	if getent passwd virgil >/dev/null 2>&1; then userdel virgil >/dev/null 2>&1 || true; fi
+fi
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || true
 fi

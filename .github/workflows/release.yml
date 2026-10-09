@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: .github/apt-install.sh libasound2-dev rpm dpkg-dev
+      - run: .github/apt-install.sh libasound2-dev libgtk-3-dev rpm dpkg-dev
       - run: packaging/linux/build-packages.sh all
       - uses: actions/upload-artifact@v4
         with: { name: linux-packages, path: "dist/*" }
@@ -44,7 +44,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: .github/apt-install.sh libasound2-dev
+      - run: .github/apt-install.sh libasound2-dev libgtk-3-dev
       - run: packaging/linux/build-packages.sh portable
       - uses: actions/upload-artifact@v4
         with: { name: linux-portable, path: "dist/*.tar.gz" }

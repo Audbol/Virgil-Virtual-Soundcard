@@ -117,7 +117,9 @@ fn create_self_info(
     netmask,
     gateway,
     mac_address,
-    link_speed: speed.clamp(0, 10000).try_into().unwrap(),
+    // Virgil patch: some systems (Windows adapters, virtual NICs) do not
+    // report a speed; Dante Controller then shows the link as down.
+    link_speed: if speed == 0 { 1000 } else { speed.clamp(0, 10000).try_into().unwrap() },
 
     board_name: "Inferno-AoIP".to_owned(),
     manufacturer: "Inferno-AoIP".to_owned(),

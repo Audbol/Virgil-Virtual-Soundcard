@@ -1,4 +1,4 @@
-// Virgil Control (Windows): talking to virgild's local control API.
+// Virgil Control (all platforms): talking to virgild's local control API.
 #pragma once
 
 #include <map>

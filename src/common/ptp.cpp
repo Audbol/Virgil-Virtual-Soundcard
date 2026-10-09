@@ -163,6 +163,14 @@ std::string format_uuid(const Uuid& u) {
 
 // ---- Servo ----------------------------------------------------------------
 
+// While samples are being rejected, keep the phase and run at the estimated
+// frequency only: the proportional term was meant for one interval.
+void PiServo::hold(int64_t local, int64_t est) {
+  m_.base_local = local;
+  m_.base_ptp = est;
+  m_.ratio = 1.0 + drift_ppb_ * 1e-9;
+}
+
 PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   if (!init_) {
     m_ = ClockModel{local, master, m_.ratio > 0 ? m_.ratio : 1.0};
@@ -185,32 +193,70 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   if (dt <= 0 && first_local_ != 0) return kOutlier;
 
   if (std::llabs(err) > step_threshold_ns) {
-    // Once tracking, one late software timestamp (a descheduled receive
-    // thread on Windows) must not step the clock: only a run of them does.
-    if (count_ > 0 && ++big_ < 3) return kOutlier;
-    big_ = 0;
-    m_.base_local = local;
-    m_.base_ptp = master;
-    count_ = 0;
+    // Before tracking (first lock, master change) step at once. Once
+    // tracking, a disturbance in the software timestamps or the path delay
+    // can look like a jump for a few seconds; stepping to it and then back
+    // costs two dropouts. Step only when several windows agree.
+    if (count_ > 0) {
+      const bool agrees = nbig_ > 0 && ((err > 0) == (big_errs_[0] > 0)) &&
+                          std::llabs(err - big_errs_[0]) < std::max<int64_t>(200000, std::llabs(big_errs_[0]) / 4);
+      if (!agrees) nbig_ = 0;
+      big_errs_[nbig_ % 8] = err;
+      if (++nbig_ < confirm_windows) {
+        hold(local, est);
+        return kOutlier;
+      }
+      int64_t sorted[8];
+      const int k = std::min(nbig_, 8);
+      std::copy(big_errs_, big_errs_ + k, sorted);
+      std::nth_element(sorted, sorted + k / 2, sorted + k);
+      last_err_ = sorted[k / 2];
+      m_.base_local = local;
+      m_.base_ptp = est - sorted[k / 2];
+    } else {
+      m_.base_local = local;
+      m_.base_ptp = master;
+    }
+    nbig_ = 0;
+    // Keep the frequency estimate and stay in tracking mode, so the next
+    // windows are judged with the same care.
+    count_ = count_ > 0 ? 1 : 0;
     good_ = 0;
     locked_ = false;
     rms_ = 0;
-    last_local_ = first_local_ = local;
-    first_master_ = master;
+    rejects_ = 0;
+    m_.ratio = 1.0 + drift_ppb_ * 1e-9;
+    last_local_ = local;
+    if (count_ == 0) {
+      first_local_ = local;
+      first_master_ = master;
+    }
     return kStep;
   }
+  nbig_ = 0;
   // Software timestamps occasionally catch a scheduling hiccup; once tracking,
-  // ignore samples far outside the recent error envelope.
-  if (locked_ && std::fabs(double(err)) > 6.0 * rms_ + 20000.0) return kOutlier;
+  // ignore samples far outside the recent error envelope. A run of them is a
+  // real change (or a too-tight envelope): accept it then, so the gate can
+  // never shut for good.
+  if (locked_ && std::fabs(double(err)) > 6.0 * rms_ + 20000.0) {
+    if (++rejects_ < 4) {
+      hold(local, est);
+      return kOutlier;
+    }
+    rms_ = std::min(std::fabs(double(err)), 200000.0);
+  }
+  rejects_ = 0;
 
   big_ = 0;
   last_local_ = local;
   ++count_;
-  if (count_ == 16 && local - first_local_ > 1000000000LL) {
-    // Seed the integrator with the raw frequency offset so lock does not
-    // have to wait for the slow integral term.
+  if (!seeded_ && count_ == 16 && local - first_local_ > 1000000000LL) {
+    // Seed the integrator with the raw frequency offset so the first lock
+    // does not have to wait for the slow integral term (only once: after a
+    // step the running estimate is better than a 16-window measurement).
     const double raw = double(master - first_master_) / double(local - first_local_);
     drift_ppb_ = (raw - 1.0) * 1e9;
+    seeded_ = true;
   } else {
     drift_ppb_ -= ki * double(err) / dt;
   }
@@ -364,7 +410,7 @@ void PtpClock::note_sender(const Endpoint& from, const uint8_t* p, size_t n, boo
   if (sender_count_ >= int(sizeof senders_ / sizeof senders_[0])) return;
   senders_[sender_count_++] = from.addr;
   const std::string ip = ipv4_to_string(from.addr);
-  if (n >= 2 && (p[0] & 0x0f) == 2) {
+  if (n >= 2 && (p[1] & 0x0f) == 2) {  // PTPv2: versionPTP is the low nibble of byte 1
     VIRGIL_LOG_WARN("ptp: %s sends PTPv2 (ignored; Dante clocking uses PTPv1)", ip.c_str());
     return;
   }
@@ -430,6 +476,9 @@ void PtpClock::handle_event(const uint8_t* p, size_t n, int64_t rx_ns) {
     consider_master(h.source, props, mono_ns());
     if (is_master_ || !have_master_ || h.source != master_) return;
     if (h.flags & ptp1::kFlagAssist) {
+      // The same Sync can arrive twice (two interfaces on one LAN); keep the
+      // first, earliest copy.
+      if (sync_pending_ && h.sequence == sync_seq_) return;
       sync_seq_ = h.sequence;
       sync_rx_ns_ = rx_ns;
       sync_pending_ = true;
@@ -469,7 +518,10 @@ void PtpClock::handle_general(const uint8_t* p, size_t n) {
     if (req != self_ || req_seq != delay_seq_ || !delay_pending_) return;
     delay_pending_ = false;
     const int64_t t4 = receipt.ns();
-    int64_t d = ((last_t2_ - last_t1_) + (t4 - delay_tx_ns_)) / 2;
+    // Master-to-us leg from the least-delayed Sync of the last window (a late
+    // software receive timestamp only ever adds delay).
+    const int64_t ms = have_best_ms_ ? last_best_ms_ : last_t2_ - last_t1_;
+    int64_t d = (ms + (t4 - delay_tx_ns_)) / 2;
     // Software send timestamps are taken just after sendto(), so on fast
     // links the estimate can dip slightly below zero: clamp, don't discard.
     if (d < -1000000 || d > 10000000) return;  // not a LAN path
@@ -479,8 +531,16 @@ void PtpClock::handle_general(const uint8_t* p, size_t n) {
     const int k = std::min(delay_count_, 9);
     int64_t sorted[9];
     std::copy(delays_, delays_ + k, sorted);
-    std::nth_element(sorted, sorted + k / 2, sorted + k);
-    mean_path_delay_ = sorted[k / 2];
+    std::sort(sorted, sorted + k);
+    // Delays only grow from scheduling noise: take the lower quartile, not
+    // the median, and once settled move at most 5 us per update so a burst
+    // of late timestamps cannot shift the clock by its size.
+    const int64_t target = sorted[k / 4];
+    if (delay_count_ <= 9) {
+      mean_path_delay_ = target;
+    } else {
+      mean_path_delay_ += std::clamp<int64_t>(target - mean_path_delay_, -5000, 5000);
+    }
   }
 }
 
@@ -497,8 +557,13 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   window_count_ = 0;
   t1 = best_t1_;
   t2 = best_t2_;
+  last_best_ms_ = t2 - t1;
+  have_best_ms_ = true;
   const auto r = servo_.sample(t2, t1 + mean_path_delay_);
-  if (r == PiServo::kOutlier) return;
+  if (r == PiServo::kOutlier) {
+    publish(servo_.model());  // held at the estimated frequency
+    return;
+  }
   if (r == PiServo::kStep)
     VIRGIL_LOG_WARN("ptp: stepped clock by %.3f ms", double(servo_.last_error_ns()) / 1e6);
   publish(servo_.model());

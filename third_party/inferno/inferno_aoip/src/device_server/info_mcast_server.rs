@@ -37,6 +37,14 @@ pub fn set_clock_master(id: Option<[u8; 8]>) {
   *CLOCK_MASTER.lock().unwrap() = id;
 }
 
+// Virgil patch: the version Dante Controller shows as the device's software
+// version (Inferno's own crate version otherwise).
+static PRODUCT_VERSION: std::sync::Mutex<Option<(u8, u8, u16)>> = std::sync::Mutex::new(None);
+
+pub fn set_product_version(major: u8, minor: u8, patch: u16) {
+  *PRODUCT_VERSION.lock().unwrap() = Some((major, minor, patch));
+}
+
 fn read_clock_stats_file(required_prefix: &str) -> Option<Vec<u8>> {
   let readdir = std::fs::read_dir("/tmp").ok()?;
   for entry in readdir.flatten() {
@@ -70,6 +78,7 @@ struct Multicaster<'s> {
   channels_subscriber: Option<Arc<ChannelsSubscriber>>,
   get_peaks: PeaksCallback,
   had_clock: bool,
+  unknown_logged: Vec<u64>,
 }
 
 impl<'s> Multicaster<'s> {
@@ -105,7 +114,11 @@ impl<'s> Multicaster<'s> {
       channels_subscriber: None,
       get_peaks,
       had_clock: false,
+      unknown_logged: vec![],
     };
+    if let Some((major, minor, patch)) = *PRODUCT_VERSION.lock().unwrap() {
+      r.product_version_bytes = [major, minor, H(patch), L(patch)];
+    }
     write_str_to_buffer(&mut r.vendor, 0, 8, &self_info.vendor_string);
     return r;
   }
@@ -328,6 +341,31 @@ impl<'s> Multicaster<'s> {
     ]).await; */
   }
 
+  // Virgil patch: answer to 0738008100000064 (sample rate and encoding, shown
+  // in Dante Controller's Device Config). Layout as captured from hardware
+  // (see the commented-out reply in send_heartbeat); only the configured rate
+  // is offered, since Virgil's rate is set in its own settings.
+  async fn send_sample_rate_info(&mut self) {
+    let rate = self.self_info.sample_rate;
+    let mut bytes = ByteBuffer::new();
+    bytes.set_endian(bytebuffer::Endian::BigEndian);
+    bytes.write_bytes(&[0x00, 0x18, 0x00, 0x04]);
+    bytes.write_u32(rate); // current
+    bytes.write_u32(rate); // pending (after reboot)
+    bytes.write_bytes(&[0x00, 0x02, 0x00, 0x00]);
+    for _ in 0..4 {
+      bytes.write_u32(rate); // supported rates
+    }
+    self
+      .send(
+        self.device_info_destination,
+        0xffff,
+        [0x07, 0x2a, 0x00, 0x80, 0x00, 0x00, 0x00, 0x00],
+        bytes.as_bytes(),
+      )
+      .await;
+  }
+
   async fn send_clock_stats(&mut self) {
     let freq_offset = if let Some(f) = self.get_freq_offset_ppb() {
       f
@@ -420,11 +458,16 @@ pub async fn run_server(
         }
         let opcode = &request_buf[24..32];
         match opcode {
-          [0x07, _, 0, 0x61, 0, 0, 0, 0] => {
+          // Virgil patch: Dante Controller also sends these with a
+          // non-zero last byte (e.g. ...0064); answer those too.
+          [0x07, _, 0, 0x61, 0, 0, 0, _] => {
             mcaster.send_board_info().await;
           },
-          [0x07, _, 0, 0xc1, 0, 0, 0, 0] => {
+          [0x07, _, 0, 0xc1, 0, 0, 0, _] => {
             mcaster.send_product_info().await;
+          },
+          [0x07, _, 0, 0x81, 0, 0, 0, _] => {
+            mcaster.send_sample_rate_info().await;
           },
           [0x07, _ /* was 0x38 */, 0, 0x21, 0, 0, 0, _ /* was 0x64 */] => {
             mcaster.send_clock_stats().await;
@@ -439,8 +482,13 @@ pub async fn run_server(
             ).await;
           }
           _ => {
-            warn!("unknown request to multicast port: opcode: {}", hex::encode(opcode));
-            warn!("raw udp payload: {}", hex::encode(request_buf));
+            // Log each unanswered request type once, not every second.
+            let key = u64::from_be_bytes(opcode.try_into().unwrap_or([0; 8])) & !0xff;
+            if !mcaster.unknown_logged.contains(&key) {
+              mcaster.unknown_logged.push(key);
+              info!("multicast request not implemented (logged once): opcode {}", hex::encode(opcode));
+              debug!("raw udp payload: {}", hex::encode(request_buf));
+            }
           }
         };
       },

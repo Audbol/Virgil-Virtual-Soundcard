@@ -28,6 +28,21 @@ while time.time() < deadline:
     leader = body[20:28]
     print("clock status from %s: leader %s, freq offset %d ppb"
           % (dev, ":".join("%02x" % b for b in leader), struct.unpack(">i", body[8:12])[0]))
-    sys.exit(0 if any(leader) else 1)
+    if not any(leader):
+        sys.exit(1)
+    # Sample rate / encoding (Device Config in Dante Controller).
+    req2 = req[:24] + bytes([0x07, 0x38, 0x00, 0x81, 0, 0, 0, 0x64])
+    end = time.time() + 5
+    while time.time() < end:
+        tx.sendto(req2, (dev, 8700))
+        try:
+            data, src = rx.recvfrom(2048)
+        except socket.timeout:
+            continue
+        if src[0] == dev and data[24:28] == bytes([0x07, 0x2a, 0x00, 0x80]):
+            print("sample rate info from %s: %d Hz" % (dev, struct.unpack(">I", data[36:40])[0]))
+            sys.exit(0)
+    print("no sample rate reply from", dev)
+    sys.exit(1)
 print("no clock status reply from", dev)
 sys.exit(1)

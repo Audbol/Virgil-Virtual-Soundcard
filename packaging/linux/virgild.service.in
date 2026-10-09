@@ -17,8 +17,9 @@ Group=virgil
 # Inferno keeps Dante subscriptions and the device identity under $HOME.
 StateDirectory=virgil
 Environment=HOME=/var/lib/virgil XDG_STATE_HOME=/var/lib/virgil
-# The shared-memory soundcard must be reachable by desktop users.
-UMask=0000
+# The shared-memory soundcard is made accessible explicitly (fchmod); other
+# files the service writes (settings, Dante state) stay private-writable.
+UMask=0022
 
 [Install]
 WantedBy=multi-user.target

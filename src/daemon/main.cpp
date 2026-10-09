@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <stdexcept>
 #include <string>
 
 #include "virgil/client.h"
@@ -14,6 +15,11 @@
 #include "virgil/shm.h"
 #include "virgil/shm_layout.h"
 #include "control.h"
+#include "virgil/dante_bridge.h"
+
+#ifndef VIRGIL_VERSION
+#define VIRGIL_VERSION "dev"
+#endif
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
@@ -64,7 +70,7 @@ int status() {
   const virgil::ShmHeader* h = c.header();
   static const char* states[] = {"stopped", "free-run", "ptp-locked", "ptp-master"};
   const uint32_t st = h->state.load();
-  std::printf("device       %s\n", h->device_name);
+  std::printf("device       %s\n", std::string(h->device_name, strnlen(h->device_name, sizeof h->device_name)).c_str());
   std::printf("alive        %s\n", c.daemon_alive() ? "yes" : "NO");
   std::printf("clock        %s (offset %+.1f us)\n", st < 4 ? states[st] : "?",
               h->ptp_offset_ns.load() / 1000.0);
@@ -77,7 +83,7 @@ int status() {
   for (uint32_t i = 0; i < virgil::kMaxTxClients; ++i) {
     const auto& s = h->clients[i];
     if (s.pid.load())
-      std::printf("client %u     pid %u %s%s\n", i, s.pid.load(), s.name,
+      std::printf("client %u     pid %u %s%s\n", i, s.pid.load(), virgil::slot_name(s).c_str(),
                   s.active.load() ? " (playing)" : "");
   }
   return 0;
@@ -90,6 +96,11 @@ int status() {
 int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   if (on_started) on_started();
   virgil::tune_process_timers();
+  {
+    unsigned major = 0, minor = 0, patch = 0;
+    if (std::sscanf(VIRGIL_VERSION, "%u.%u.%u", &major, &minor, &patch) >= 2)
+      vg_dante_set_version(major, minor, patch);
+  }
 
   virgil::ControlServer control(&ctx);
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);
@@ -142,7 +153,13 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       virgil::clear_last_error();
       engine = std::make_unique<virgil::Engine>(cfg);
       engine->set_shared_memory(&soundcard);
-      if (engine->start()) {
+      bool started = false;
+      try {
+        started = engine->start();
+      } catch (const std::exception& e) {  // e.g. bad_alloc for an oversized ring
+        VIRGIL_LOG_ERROR("audio engine failed to start: %s", e.what());
+      }
+      if (started) {
         std::lock_guard<std::mutex> l(ctx.mutex);
         ctx.engine = engine.get();
         ctx.cfg = engine->config();  // with defaults filled in by validation
@@ -191,6 +208,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       std::string err;
       if (!path.empty() && virgil::load_config(path, &fresh, &err)) {
         std::lock_guard<std::mutex> l(ctx.mutex);
+        if (ctx.overrides) ctx.overrides(fresh);
         fresh.control_port = ctx.cfg.control_port;  // the panel stays where it is
         ctx.cfg = fresh;
         VIRGIL_LOG_INFO("reloaded configuration %s", path.c_str());
@@ -299,11 +317,14 @@ int main(int argc, char** argv) {
       return 2;
     }
   }
-  if (!iface_override.empty()) cfg.interface = iface_override;
-  if (!name_override.empty()) cfg.device_name = name_override;
-  if (free_run) cfg.clock = "free";
-  if (latency) cfg.latency_us = latency;
-  if (tx_latency) cfg.tx_latency_us = tx_latency;
+  g_ctx.overrides = [=](virgil::Config& c) {
+    if (!iface_override.empty()) c.interface = iface_override;
+    if (!name_override.empty()) c.device_name = name_override;
+    if (free_run) c.clock = "free";
+    if (latency) c.latency_us = latency;
+    if (tx_latency) c.tx_latency_us = tx_latency;
+  };
+  g_ctx.overrides(cfg);
   if (control_port >= 0 && control_port <= 65535) cfg.control_port = uint32_t(control_port);
   g_ctx.config_path = config_path;
 

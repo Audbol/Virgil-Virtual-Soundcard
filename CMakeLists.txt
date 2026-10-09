@@ -99,9 +99,9 @@ if(APPLE)
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION})
 elseif(WIN32)
   # Native tray app with a Direct2D status window and a settings dialog.
-  add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_win/api.cpp
+  add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_common/api.cpp
                  tools/control_win/control.rc)
-  target_include_directories(virgil-control PRIVATE tools/control_win branding)
+  target_include_directories(virgil-control PRIVATE tools/control_win tools/control_common branding)
   if(MINGW)
     target_link_options(virgil-control PRIVATE -municode)
   elseif(MSVC)
@@ -110,8 +110,28 @@ elseif(WIN32)
   target_link_libraries(virgil-control PRIVATE d2d1 dwrite windowscodecs dwmapi comctl32 ole32
                         ws2_32 shell32 user32 gdi32 advapi32)
 else()
-  add_executable(virgil-control tools/virgil_control.cpp)
+  # Native GTK 3 window with tray icon; without GTK (headless builds) the
+  # small launcher that opens the browser panel instead.
+  option(VIRGIL_BUILD_GTK_CONTROL "Build the GTK 3 Virgil Control app (Linux)" ON)
+  if(VIRGIL_BUILD_GTK_CONTROL)
+    find_package(PkgConfig)
+  endif()
+  if(VIRGIL_BUILD_GTK_CONTROL AND PKG_CONFIG_FOUND)
+    pkg_check_modules(GTK3 IMPORTED_TARGET gtk+-3.0)
+  endif()
+  if(GTK3_FOUND)
+    add_executable(virgil-control tools/control_linux/main.cpp tools/control_common/api.cpp
+                   tools/control_common/settings_model.cpp tools/control_common/view.cpp)
+    target_include_directories(virgil-control PRIVATE tools/control_common)
+    target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
+    target_link_libraries(virgil-control PRIVATE PkgConfig::GTK3 ${CMAKE_DL_LIBS})
+  else()
+    message(STATUS "GTK 3 not found: virgil-control opens the browser control panel")
+    add_executable(virgil-control tools/virgil_control.cpp)
+  endif()
   install(FILES packaging/linux/virgil-control.desktop DESTINATION ${CMAKE_INSTALL_DATADIR}/applications)
+  install(FILES packaging/linux/virgil-control-autostart.desktop DESTINATION /etc/xdg/autostart
+          RENAME virgil-control.desktop)
   install(FILES branding/virgil.svg DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/scalable/apps)
   install(FILES branding/virgil-256.png DESTINATION ${CMAKE_INSTALL_DATADIR}/icons/hicolor/256x256/apps
           RENAME virgil.png)

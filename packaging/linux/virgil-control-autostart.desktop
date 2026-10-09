@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=Virgil Control
+Comment=Virgil virtual soundcard status in the system tray
+Exec=virgil-control --tray
+Icon=virgil
+Terminal=false
+NoDisplay=true
+X-GNOME-Autostart-enabled=true

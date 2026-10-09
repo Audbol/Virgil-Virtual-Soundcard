@@ -202,12 +202,40 @@ TEST(servo_ignores_single_late_timestamp) {
   CHECK(servo.sample(local + 1500000, master) == PiServo::kOutlier);
   local += 250000000LL, master += 250000000LL;
   CHECK(servo.sample(local, master) != PiServo::kStep);
-  for (int i = 0; i < 3; ++i) {
+  for (int i = 0; i < 5; ++i) {
     local += 250000000LL, master += 250000000LL;
     const auto r = servo.sample(local, master + 5000000);
-    if (i < 2) CHECK(r == PiServo::kOutlier);
+    if (i < 4) CHECK(r == PiServo::kOutlier);
     else CHECK(r == PiServo::kStep);
   }
+}
+
+TEST(servo_rides_through_transient_ms_offset) {
+  // Three windows see the master 1.1 ms off (path-delay or timestamp
+  // disturbance), then it is back: no step either way (each would be a
+  // dropout), and the model stays where it was.
+  PiServo servo;
+  int64_t local = 1000000000LL, master = 1700000000000000000LL;
+  for (int i = 0; i < 80; ++i, local += 250000000LL, master += 250000000LL) servo.sample(local, master);
+  CHECK(servo.locked());
+  int steps = 0;
+  for (int i = 0; i < 3; ++i, local += 250000000LL, master += 250000000LL)
+    steps += servo.sample(local, master + 1100000) == PiServo::kStep;
+  for (int i = 0; i < 20; ++i, local += 250000000LL, master += 250000000LL)
+    steps += servo.sample(local, master) == PiServo::kStep;
+  CHECK(steps == 0);
+  CHECK(std::llabs(servo.model().ptp_at(local) - master) < 50000);
+}
+
+TEST(servo_gate_recovers_from_lasting_shift) {
+  // A real 80 us phase change just outside the outlier envelope must be
+  // followed (not rejected forever while the model drifts).
+  PiServo servo;
+  int64_t local = 1000000000LL, master = 1700000000000000000LL;
+  for (int i = 0; i < 80; ++i, local += 250000000LL, master += 250000000LL) servo.sample(local, master);
+  CHECK(servo.locked());
+  for (int i = 0; i < 200; ++i, local += 250000000LL, master += 250000000LL) servo.sample(local, master + 80000);
+  CHECK(std::llabs(servo.model().ptp_at(local) - (master + 80000)) < 10000);
 }
 
 TEST(config_parse) {

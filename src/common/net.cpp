@@ -134,7 +134,9 @@ std::vector<InterfaceInfo> list_interfaces() {
     WideCharToMultiByte(CP_UTF8, 0, a->FriendlyName, -1, fname, sizeof fname, nullptr, nullptr);
     WideCharToMultiByte(CP_UTF8, 0, a->Description, -1, desc, sizeof desc, nullptr, nullptr);
     const bool virt = looks_virtual(fname) || looks_virtual(desc);
-    int score = a->IfType == IF_TYPE_ETHERNET_CSMACD ? 4 : a->IfType == IF_TYPE_IEEE80211 ? 2 : 1;
+    // Wired always outranks Wi-Fi, even on a link-local (169.254) Dante network
+    // against a Wi-Fi network with a gateway.
+    int score = a->IfType == IF_TYPE_ETHERNET_CSMACD ? 6 : a->IfType == IF_TYPE_IEEE80211 ? 2 : 1;
     if (a->FirstGatewayAddress) score += 1;
     if (virt) score -= 10;
     for (auto* u = a->FirstUnicastAddress; u; u = u->Next) {
@@ -162,6 +164,8 @@ std::vector<InterfaceInfo> list_interfaces() {
     // Wired names first (eth*, en* on Linux and macOS's en0), Wi-Fi next.
     info.score = (info.name.compare(0, 2, "wl") == 0) ? 2 : 4;
     if (info.virtual_adapter) info.score -= 10;
+    // Up but no carrier (cable unplugged): last resort only.
+    if (!info.loopback && !(i->ifa_flags & IFF_RUNNING)) info.score -= 5;
     info.score += link_local_penalty(info.addr);
     out.push_back(info);
   }
@@ -325,7 +329,16 @@ int UdpSocket::recv_from(void* buf, size_t len, Endpoint* from, int64_t* rx_mono
           std::memcpy(&ts, CMSG_DATA(c), sizeof ts);
           // Kernel stamps on CLOCK_REALTIME; move it onto the monotonic clock.
           const int64_t rt = int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-          *rx_mono_ns = after_mono - (realtime_ns() - rt);
+          // Read the realtime-to-monotonic offset with both clocks read back
+          // to back; retry if we were preempted in between (an offset taken
+          // across a preemption makes the timestamp early by that long).
+          int64_t offset = 0;
+          for (int tries = 0; tries < 4; ++tries) {
+            const int64_t r1 = realtime_ns(), m = mono_ns(), r2 = realtime_ns();
+            offset = (r1 + (r2 - r1) / 2) - m;
+            if (r2 - r1 < 5000) break;
+          }
+          *rx_mono_ns = rt - offset;
           break;
         }
       }

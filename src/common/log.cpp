@@ -43,7 +43,13 @@ void log_message(int level, const char* fmt, ...) {
   va_end(ap);
   std::time_t t = std::time(nullptr);
   char ts[32];
-  std::strftime(ts, sizeof ts, "%H:%M:%S", std::localtime(&t));
+  std::tm tmv{};
+#if defined(_WIN32)
+  localtime_s(&tmv, &t);
+#else
+  localtime_r(&t, &tmv);
+#endif
+  std::strftime(ts, sizeof ts, "%H:%M:%S", &tmv);
   std::lock_guard<std::mutex> l(m);
   std::fprintf(stderr, "%s [%s] %s\n", ts, tags[level < 0 ? 0 : level > 3 ? 3 : level], msg);
   // stderr may be redirected to a (buffered) file: never keep lines back,

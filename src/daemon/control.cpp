@@ -13,8 +13,10 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#include <windows.h>
 #else
 #include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #ifndef VIRGIL_VERSION
@@ -226,7 +228,7 @@ HttpResponse ControlServer::status_json() {
       const ClientSlot& s = h->clients[i];
       const uint32_t pid = s.pid.load();
       if (!pid) continue;
-      j.begin_obj().kv("slot", i).kv("pid", pid).kv("name", std::string(s.name));
+      j.begin_obj().kv("slot", i).kv("pid", pid).kv("name", slot_name(s));
       j.kvb("active", s.active.load() != 0).end_obj();
     }
   }
@@ -300,14 +302,26 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
   make_parent_dirs(path);
   const std::string tmp = path + ".new";
   {
-    std::ofstream f(tmp, std::ios::binary | std::ios::trunc);
-    if (!f || !(f << r.body) || !f.flush())
+    // Written to disk before it replaces the old file, which is replaced in
+    // one step: a crash or power cut leaves either the old or the new file.
+    FILE* f = std::fopen(tmp.c_str(), "wb");
+    bool ok = f && std::fwrite(r.body.data(), 1, r.body.size(), f) == r.body.size() && std::fflush(f) == 0;
+#if !defined(_WIN32)
+    if (ok) ok = fsync(fileno(f)) == 0;
+#endif
+    if (f && std::fclose(f) != 0) ok = false;
+    if (!ok) {
+      std::remove(tmp.c_str());
       return json_error(500, "cannot write " + path +
                                  " (permission denied? the service needs write access)");
+    }
   }
-  std::remove(path.c_str());  // Windows rename does not replace
-  if (std::rename(tmp.c_str(), path.c_str()) != 0)
+#if defined(_WIN32)
+  if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
     return json_error(500, "cannot replace " + path);
+#else
+  if (std::rename(tmp.c_str(), path.c_str()) != 0) return json_error(500, "cannot replace " + path);
+#endif
   VIRGIL_LOG_INFO("control: configuration saved to %s; restarting engine", path.c_str());
   ctx_->reload = true;
   Json j;

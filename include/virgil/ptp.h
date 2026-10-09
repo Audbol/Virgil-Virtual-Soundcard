@@ -114,6 +114,9 @@ class PiServo {
     big_ = 0;
     locked_ = false;
     rms_ = 0;
+    rejects_ = 0;
+    nbig_ = 0;
+    seeded_ = false;
     first_local_ = last_local_ = 0;
   }
   bool locked() const { return locked_; }
@@ -122,14 +125,23 @@ class PiServo {
   double kp = 0.03;
   double ki = 0.0006;
   int64_t step_threshold_ns = 1000000;  // 1 ms
+  // Once tracking, an error beyond the threshold steps only after this many
+  // consecutive windows agree on it (a passing timestamp disturbance must
+  // not step the clock and then step it back).
+  int confirm_windows = 5;
 
  private:
+  void hold(int64_t local, int64_t est);
   ClockModel m_;
   bool init_ = false;
   bool locked_ = false;
   int count_ = 0;
   int good_ = 0;
-  int big_ = 0;  // consecutive samples beyond the step threshold
+  int big_ = 0;  // unused (kept for layout); see big_errs_
+  int nbig_ = 0;  // consecutive windows beyond the step threshold
+  int64_t big_errs_[8] = {};
+  int rejects_ = 0;  // consecutive samples rejected by the envelope gate
+  bool seeded_ = false;  // frequency seeded from a raw measurement
   double drift_ppb_ = 0;
   double rms_ = 0;
   int64_t last_local_ = 0;
@@ -209,6 +221,8 @@ class PtpClock : public ClockSource {
   int64_t last_t1_ = 0, last_t2_ = 0;
   bool have_pair_ = false;
   int64_t best_t1_ = 0, best_t2_ = 0;  // least-delayed Sync in the current window
+  int64_t last_best_ms_ = 0;            // its t2 - t1, from the last full window
+  bool have_best_ms_ = false;
   int window_count_ = 0;
 
   // Delay measurement.

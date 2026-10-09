@@ -12,9 +12,16 @@ launchctl bootout system/org.virgil.virgild 2>/dev/null || \
 rm -f /Library/LaunchDaemons/org.virgil.virgild.plist
 rm -f /usr/local/bin/virgild /usr/local/bin/virgil-latency-probe
 rm -rf /Library/Audio/Plug-Ins/HAL/VirgilAudio.driver
+rm -rf "/Applications/Virgil Control.app"
+# Per-user "start at login" entries made by Virgil Control.
+for home in /Users/*; do
+	rm -f "$home/Library/LaunchAgents/org.virgil.control.plist" 2>/dev/null || true
+done
 rm -f "/Library/Application Support/Virgil/virgil.conf.default" \
 	"/Library/Application Support/Virgil/virgil.conf.example" \
-	"/Library/Application Support/Virgil/README.md"
+	"/Library/Application Support/Virgil/README.md" \
+	"/Library/Application Support/Virgil/LICENSE" \
+	"/Library/Application Support/Virgil/NOTICE.md"
 if [ "${1:-}" = "--purge" ]; then
 	rm -rf "/Library/Application Support/Virgil" /Library/Logs/Virgil
 fi

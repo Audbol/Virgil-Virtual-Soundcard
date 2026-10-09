@@ -10,6 +10,8 @@
 #pragma once
 
 #include <atomic>
+#include <cstring>
+#include <string>
 #include <cstddef>
 #include <cstdint>
 #include <cstring>
@@ -102,6 +104,30 @@ inline size_t rx_ring_floats(const ShmHeader* h) {
 inline size_t shm_total_bytes(uint32_t ring_frames, uint32_t tx_channels, uint32_t rx_channels) {
   return kShmHeaderBytes +
          sizeof(float) * size_t(ring_frames) * (size_t(tx_channels) * kMaxTxClients + rx_channels);
+}
+
+// Names a soundcard may use: the base name, then generations for when the
+// previous segment is still held open by apps (Windows keeps a section alive
+// while any process maps it, so a layout change cannot reuse the name).
+inline std::string shm_generation_name(const std::string& base, int gen) {
+  return gen == 0 ? base : base + "." + std::to_string(gen + 1);
+}
+constexpr int kShmGenerations = 4;
+
+// A client slot's name, bounded (the shared copy may lack its terminator).
+inline std::string slot_name(const ClientSlot& s) {
+  return std::string(s.name, strnlen(s.name, sizeof s.name));
+}
+
+// Ring addresses from a layout the caller validated and keeps itself. The
+// segment is writable by every local user, so code that indexes the rings
+// must not re-read the geometry from the header.
+inline float* tx_ring_at(void* base, uint32_t ring_frames, uint32_t tx_channels, uint32_t slot) {
+  return reinterpret_cast<float*>(static_cast<uint8_t*>(base) + kShmHeaderBytes) +
+         size_t(ring_frames) * tx_channels * slot;
+}
+inline float* rx_ring_at(void* base, uint32_t ring_frames, uint32_t tx_channels) {
+  return tx_ring_at(base, ring_frames, tx_channels, kMaxTxClients);
 }
 
 inline float* tx_ring(ShmHeader* h, uint32_t slot) {

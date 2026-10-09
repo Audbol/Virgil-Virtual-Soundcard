@@ -1,5 +1,7 @@
 #include "http_server.h"
 
+#include "virgil/platform.h"
+
 #include <cctype>
 #include <cstring>
 
@@ -141,7 +143,12 @@ void HttpServer::serve(intptr_t fd) {
   std::string buf;
   char chunk[4096];
   size_t header_end = std::string::npos;
+  // One overall deadline per connection: a client trickling bytes must not
+  // hold the (single) server thread, or stop() waiting for it, for long.
+  const int64_t deadline = mono_ns() + 5000000000LL;
+  auto expired = [&] { return mono_ns() > deadline || !running_; };
   while (header_end == std::string::npos) {
+    if (expired()) return;
     const int n = int(recv(sfd, chunk, sizeof chunk, 0));
     if (n <= 0) return;
     buf.append(chunk, size_t(n));
@@ -180,6 +187,7 @@ void HttpServer::serve(intptr_t fd) {
   } else {
     req.body = buf.substr(header_end + 4);
     while (req.body.size() < want) {
+      if (expired()) return;
       const int n = int(recv(sfd, chunk, sizeof chunk, 0));
       if (n <= 0) return;
       req.body.append(chunk, size_t(n));

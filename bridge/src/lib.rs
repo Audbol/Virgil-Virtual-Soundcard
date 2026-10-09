@@ -184,6 +184,16 @@ pub extern "C" fn vg_dante_set_clock(last_sync: i64, shift: i64, freq_scale: f64
     usrvclock::publish(Some(usrvclock::ClockOverlay { clock_id: 1, last_sync, shift, freq_scale }));
 }
 
+/// Version shown as the device's software version in Dante Controller.
+#[no_mangle]
+pub extern "C" fn vg_dante_set_version(major: u32, minor: u32, patch: u32) {
+    inferno_aoip::device_server::set_product_version(
+        major.min(255) as u8,
+        minor.min(255) as u8,
+        patch.min(65535) as u16,
+    );
+}
+
 static LAST_ERROR: std::sync::Mutex<Option<CString>> = std::sync::Mutex::new(None);
 
 fn set_last_error(msg: &str) {
@@ -329,6 +339,9 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
             log_line(0, &format!("dante: start failed: {e}"));
             set_last_error(&e);
             let _ = thread.join();
+            // Inferno threads that already took the ring views may outlive
+            // this one: they must stop touching the rings the caller frees.
+            *valid.write().unwrap() = false;
             std::ptr::null_mut()
         }
         Err(_) => {

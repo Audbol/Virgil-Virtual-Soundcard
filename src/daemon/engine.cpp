@@ -63,7 +63,9 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   bool reused = false;
   if (shm_ext_ && shm_.is_open() && shm_.size() >= bytes) {
     const auto* old = static_cast<const ShmHeader*>(shm_.data());
-    const bool same_name = shm_.name() == shm_name
+    bool gen_name = false;
+    for (int gen = 0; gen < kShmGenerations; ++gen) gen_name |= shm_.name() == shm_generation_name(shm_name, gen);
+    const bool same_name = gen_name
 #if defined(_WIN32)
                            || (cfg_.shm_name.empty() && shm_.name() == kFallbackShmName)
 #endif
@@ -71,7 +73,8 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     reused = same_name && old->magic == kShmMagic && old->version == kShmVersion &&
              old->total_bytes == bytes && old->sample_rate == cfg_.sample_rate &&
              old->tx_channels == cfg_.tx_channels && old->rx_channels == cfg_.rx_channels &&
-             old->ring_frames == cfg_.ring_frames;
+             old->ring_frames == cfg_.ring_frames && old->period_frames == cfg_.period_frames() &&
+             old->tx_lead_frames == cfg_.tx_lead_frames() && old->rx_latency_frames == cfg_.rx_latency_frames();
   }
   bool created = reused;
   if (reused) {
@@ -83,7 +86,26 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
       static_cast<ShmHeader*>(shm_.data())->state.store(kStateStopped);
       shm_.close();
     }
-    created = shm_.create(shm_name, bytes);
+    // Another live virgild already serves one of our names: do not touch it
+    // (on POSIX, re-creating would unlink the soundcard under its apps).
+    for (int gen = 0; gen < kShmGenerations; ++gen) {
+      SharedMemory probe;
+      if (!probe.open(shm_generation_name(shm_name, gen)) || probe.size() < kShmHeaderBytes) continue;
+      const auto* h = static_cast<const ShmHeader*>(probe.data());
+      if (h->magic == kShmMagic && h->state.load() != kStateStopped &&
+          mono_ns() - h->heartbeat_ns.load() < 1000000000LL) {
+        VIRGIL_LOG_ERROR("another virgild is running (soundcard '%s' is live); not starting a second one",
+                         shm_generation_name(shm_name, gen).c_str());
+        return false;
+      }
+    }
+    for (int gen = 0; gen < kShmGenerations && !created; ++gen) {
+      created = shm_.create(shm_generation_name(shm_name, gen), bytes);
+      if (created && gen > 0)
+        VIRGIL_LOG_INFO("previous soundcard still open in apps; using '%s' until they reconnect",
+                        shm_.name().c_str());
+    }
+    if (created) shm_name = shm_.name();
   }
 #if defined(_WIN32)
   if (!created && cfg_.shm_name.empty() && !std::getenv("VIRGIL_SHM_NAME")) {
@@ -224,9 +246,10 @@ bool Engine::dante_healthy() const {
 }
 
 void Engine::clear_rings() {
+  const size_t txf = size_t(cfg_.ring_frames) * cfg_.tx_channels, rxf = size_t(cfg_.ring_frames) * cfg_.rx_channels;
   for (uint32_t i = 0; i < kMaxTxClients; ++i)
-    std::memset(tx_ring(hdr_, i), 0, tx_ring_floats(hdr_) * sizeof(float));
-  std::memset(rx_ring(hdr_), 0, rx_ring_floats(hdr_) * sizeof(float));
+    std::memset(tx_ring_at(hdr_, cfg_.ring_frames, cfg_.tx_channels, i), 0, txf * sizeof(float));
+  std::memset(rx_ring_at(hdr_, cfg_.ring_frames, cfg_.tx_channels), 0, rxf * sizeof(float));
 }
 
 // ---------------------------------------------------------------------------
@@ -238,18 +261,19 @@ void Engine::clear_rings() {
 //      ring (Inferno has finished them: it writes at arrival + rx_latency and
 //      fills gaps with silence up to "now")
 void Engine::tick_loop() {
-  const uint32_t P = hdr_->period_frames;
+  // Geometry from our own configuration, never from the shared header.
+  const uint32_t P = cfg_.period_frames();
   const uint32_t rate = cfg_.sample_rate;
   const int64_t period_ns = int64_t(P) * 1000000000LL / rate;
   if (!set_realtime_priority(cfg_.rt_priority, period_ns))
     VIRGIL_LOG_WARN("could not get real-time scheduling; expect higher jitter (see README)");
 
-  const uint32_t ring = hdr_->ring_frames;
+  const uint32_t ring = cfg_.ring_frames;
   const uint64_t mask = ring - 1;
   const uint64_t dmask = dring_ - 1;
-  const uint32_t txch = hdr_->tx_channels;
-  const uint32_t rxch = hdr_->rx_channels;
-  float* rx = rx_ring(hdr_);
+  const uint32_t txch = cfg_.tx_channels;
+  const uint32_t rxch = cfg_.rx_channels;
+  float* rx = rx_ring_at(hdr_, ring, txch);
   const int64_t spin = int64_t(cfg_.spin_us) * 1000;
   const int64_t resync_ns = std::max<int64_t>(50000000, 4 * period_ns);
 
@@ -295,7 +319,7 @@ void Engine::tick_loop() {
       for (uint32_t i = 0; i < kMaxTxClients; ++i) {
         ClientSlot& s = hdr_->clients[i];
         if (s.pid.load(std::memory_order_acquire) == 0) continue;
-        float* cring = tx_ring(hdr_, i);
+        float* cring = tx_ring_at(hdr_, ring, txch, i);
         const bool active = s.active.load(std::memory_order_acquire) != 0;
         for (uint32_t f = 0; f < P; ++f) {
           float* src = cring + size_t((start + f) & mask) * txch;
@@ -377,7 +401,7 @@ void Engine::reclaim_clients(int64_t now) {
     const uint32_t pid = s.pid.load(std::memory_order_acquire);
     if (pid == 0) continue;
     if (!process_alive(pid)) {
-      VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, s.name, pid);
+      VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, slot_name(s).c_str(), pid);
       s.active.store(0, std::memory_order_release);
       s.pid.store(0, std::memory_order_release);
       client_stalled_[i] = false;
@@ -391,9 +415,9 @@ void Engine::reclaim_clients(int64_t now) {
                          now - s.heartbeat_ns.load(std::memory_order_relaxed) > 2000000000LL;
     if (stalled != client_stalled_[i]) {
       if (stalled)
-        VIRGIL_LOG_WARN("client slot %u (%s, pid %u) stopped sending audio", i, s.name, pid);
+        VIRGIL_LOG_WARN("client slot %u (%s, pid %u) stopped sending audio", i, slot_name(s).c_str(), pid);
       else
-        VIRGIL_LOG_INFO("client slot %u (%s, pid %u) is sending audio again", i, s.name, pid);
+        VIRGIL_LOG_INFO("client slot %u (%s, pid %u) is sending audio again", i, slot_name(s).c_str(), pid);
       client_stalled_[i] = stalled;
     }
   }

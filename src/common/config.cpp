@@ -167,15 +167,23 @@ bool validate_config(Config* c, std::string* error) {
   if (c->ptp_subdomain.empty() || c->ptp_subdomain.size() > 15)
     return fail("ptp subdomain must be 1 to 15 characters");
 
-  // Ring: comfortably larger than every latency in play.
+  if (c->tx_lead_us > 40000) return fail("tx_lead_us must be at most 40000");
+  if (c->spin_us >= c->tick_us) return fail("spin_us must be smaller than tick_us");
+
+  // Ring: comfortably larger than every latency in play (all bounded above,
+  // so this stays far below 2^20 frames).
+  const uint64_t need = 8ull * (uint64_t(c->us_to_frames(c->latency_us)) + c->us_to_frames(c->tx_latency_us) +
+                                c->tx_lead_frames() + 4ull * c->period_frames());
+  const uint32_t kMaxRing = 1u << 20;
   if (c->ring_frames == 0) {
-    const uint32_t need = 8 * (c->us_to_frames(c->latency_us) + c->us_to_frames(c->tx_latency_us) +
-                               c->tx_lead_frames() + 4 * c->period_frames());
     uint32_t r = 8192;
-    while (r < need) r <<= 1;
+    while (r < need && r < kMaxRing) r <<= 1;
     c->ring_frames = r;
   }
   if (c->ring_frames & (c->ring_frames - 1)) return fail("ring_frames must be a power of two");
+  if (c->ring_frames < need || c->ring_frames > kMaxRing)
+    return fail("ring_frames must be a power of two between " + std::to_string(need) + " and " +
+                std::to_string(kMaxRing));
   return true;
 }
 

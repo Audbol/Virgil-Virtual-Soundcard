@@ -110,6 +110,7 @@ class VirgilAsio : public IASIO {
     if (running_) return ASE_OK;
     if (!client_.daemon_alive()) return ASE_HWMalfunction;
     running_ = true;
+    client_.clear_pending_tx();  // nothing from before the last stop may replay
     client_.set_tx_active(true);
     thread_ = std::thread([this] { run(); });
     return ASE_OK;
@@ -117,7 +118,12 @@ class VirgilAsio : public IASIO {
 
   ASIOError stop() override {
     running_ = false;
-    if (thread_.joinable()) thread_.join();
+    if (thread_.joinable()) {
+      // A host may handle our reset/resync message synchronously and call
+      // stop() from the buffer thread itself; it ends on its own then.
+      if (std::this_thread::get_id() == thread_.get_id()) thread_.detach();
+      else thread_.join();
+    }
     if (client_.is_open()) client_.set_tx_active(false);
     return ASE_OK;
   }
@@ -294,7 +300,7 @@ class VirgilAsio : public IASIO {
       // restarted): ask the host to re-initialise us so init() reconnects.
       // Shorter gaps (settings applied with the same layout) ride through on
       // the extrapolated clock.
-      if (!reset_requested && !client_.daemon_alive(2000000000LL) && callbacks_->asioMessage &&
+      if (!reset_requested && !client_.heartbeat_fresh(2000000000LL) && callbacks_->asioMessage &&
           callbacks_->asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr)) {
         callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
         reset_requested = true;

@@ -10,7 +10,7 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
-      - run: .github/apt-install.sh libasound2-dev
+      - run: .github/apt-install.sh libasound2-dev libgtk-3-dev
       - run: cmake -S . -B build -DCMAKE_BUILD_TYPE=Release
       - run: cmake --build build -j
       - run: ctest --test-dir build --output-on-failure

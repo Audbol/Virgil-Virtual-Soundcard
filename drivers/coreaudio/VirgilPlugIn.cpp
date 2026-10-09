@@ -16,9 +16,11 @@
 
 #include <algorithm>
 #include <atomic>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <thread>
 
 #include "virgil/client.h"
 #include "virgil/platform.h"
@@ -59,10 +61,20 @@ struct State {
 
   // Clock: sample time 0 == media frame `base_frame`.
   uint64_t base_frame = 0;
-  bool free_running = false;  // daemon absent: synthesize from host clock
+  // Daemon absent: synthesize from the host clock. Set by StartIO or by the
+  // IO thread when it loses the daemon; while it is set the IO thread does
+  // not touch `client`, so the watcher thread may (re)attach it.
+  std::atomic<bool> free_running{false};
   int64_t free_base_ns = 0;
   std::atomic<UInt64> seed{1};
   uint64_t last_steps = 0;
+  // Last good anchor, used when a read races the daemon publishing a new one.
+  virgil::ClockAnchor last_anchor;
+  bool have_anchor = false;
+  // Reconnects to virgild (restarted, or started after IO began).
+  std::thread watcher;
+  std::atomic<bool> watch_run{false};
+  std::atomic<int64_t> lost_ns{0};  // when the IO thread went free-running
 };
 
 State g;
@@ -412,10 +424,15 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
         return put<AudioObjectID>(inDataSize, outDataSize, outData, kObjectID_PlugIn);
       case kAudioObjectPropertyName: {
         virgil::Client c;
-        CFStringRef name = (c.open() && c.header()->device_name[0])
-                               ? CFStringCreateWithCString(nullptr, c.header()->device_name,
-                                                           kCFStringEncodingUTF8)
-                               : CFSTR("Virgil Virtual Soundcard");
+        CFStringRef name = nullptr;
+        if (c.open() && c.header()->device_name[0]) {
+          char buf[sizeof c.header()->device_name];
+          std::memcpy(buf, c.header()->device_name, sizeof buf);
+          buf[sizeof buf - 1] = 0;
+          name = CFStringCreateWithCString(nullptr, buf, kCFStringEncodingUTF8);
+        }
+        // Invalid UTF-8 (cut inside a character) gives NULL: never hand that out.
+        if (!name) name = CFSTR("Virgil Virtual Soundcard");
         return put<CFStringRef>(inDataSize, outDataSize, outData, name);
       }
       case kAudioObjectPropertyManufacturer:
@@ -573,28 +590,63 @@ bool attach_daemon_locked() {
   return true;
 }
 
+// Called with g.mutex held while free_running is set (the IO thread is not
+// using the client): attach and switch the IO path over to the daemon.
+bool go_live_locked() {
+  double now = 0;
+  if (!attach_daemon_locked() || !g.client.frame_now(&now)) return false;
+  g.base_frame = uint64_t(now);
+  g.have_anchor = false;
+  ++g.seed;
+  g.free_running.store(false, std::memory_order_release);
+  return true;
+}
+
+void watch_daemon() {
+  while (g.watch_run.load()) {
+    for (int i = 0; i < 10 && g.watch_run.load(); ++i) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    if (!g.watch_run.load() || !g.free_running.load(std::memory_order_acquire)) continue;
+    // Give an IO cycle that began before the switch time to finish.
+    if (virgil::mono_ns() - g.lost_ns.load() < 300000000LL) continue;
+    // The IO thread switched to free-running at least one wait ago and no
+    // longer touches the client.
+    std::lock_guard<std::mutex> l(g.mutex);
+    if (g.io_count > 0 && g.free_running.load()) go_live_locked();
+  }
+}
+
 OSStatus StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32) {
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  std::lock_guard<std::mutex> l(g.mutex);
+  std::unique_lock<std::mutex> l(g.mutex);
   if (g.io_count++ > 0) return kAudioHardwareNoError;
-  double now = 0;
-  if (attach_daemon_locked() && g.client.frame_now(&now)) {
-    g.free_running = false;
-    g.base_frame = uint64_t(now);
-  } else {
-    g.free_running = true;
-    g.free_base_ns = virgil::mono_ns();
-  }
-  ++g.seed;
+  g.free_running.store(true);
+  g.free_base_ns = virgil::mono_ns();
+  if (!go_live_locked()) ++g.seed;
+  if (!g.watch_run.exchange(true)) g.watcher = std::thread(watch_daemon);
   return kAudioHardwareNoError;
 }
 
 OSStatus StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32) {
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
-  std::lock_guard<std::mutex> l(g.mutex);
+  std::unique_lock<std::mutex> l(g.mutex);
   if (g.io_count == 0) return kAudioHardwareIllegalOperationError;
-  if (--g.io_count == 0) g.client.close();
+  if (--g.io_count == 0) {
+    g.watch_run = false;
+    l.unlock();
+    if (g.watcher.joinable()) g.watcher.join();
+    l.lock();
+    if (g.io_count == 0) g.client.close();
+  }
   return kAudioHardwareNoError;
+}
+
+// IO thread: the daemon went away (stopped, restarted with another layout).
+void lose_daemon(int64_t now_ns) {
+  g.free_base_ns = now_ns;
+  g.have_anchor = false;
+  ++g.seed;
+  g.lost_ns.store(now_ns);
+  g.free_running.store(true, std::memory_order_release);
 }
 
 OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32,
@@ -602,7 +654,22 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
   const int64_t now_ns = virgil::mono_ns();
   virgil::ClockAnchor a;
-  if (!g.free_running && g.client.is_open() && g.client.anchor(&a)) {
+  bool live = !g.free_running.load(std::memory_order_acquire) && g.client.is_open();
+  if (live && !g.client.heartbeat_fresh(2000000000LL)) {
+    lose_daemon(now_ns);  // the watcher reconnects
+    live = false;
+  }
+  if (live) {
+    if (g.client.anchor(&a)) {
+      g.last_anchor = a;
+      g.have_anchor = true;
+    } else if (g.have_anchor) {
+      a = g.last_anchor;  // a read raced the daemon's update: keep the timeline
+    } else {
+      live = false;
+    }
+  }
+  if (live) {
     // Clock steps (PTP relock) move the media timeline: start a new one.
     const uint64_t steps = g.client.header()->clock_steps.load(std::memory_order_relaxed);
     if (steps != g.last_steps) {
@@ -640,7 +707,7 @@ OSStatus DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID, Audio
                        void* ioMainBuffer, void*) {
   if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
   float* buf = static_cast<float*>(ioMainBuffer);
-  const bool live = !g.free_running && g.client.is_open();
+  const bool live = !g.free_running.load(std::memory_order_acquire) && g.client.is_open();
 
   if (op == kAudioServerPlugInIOOperationReadInput && stream == kObjectID_Stream_Input) {
     const UInt32 ch = g.in_channels;

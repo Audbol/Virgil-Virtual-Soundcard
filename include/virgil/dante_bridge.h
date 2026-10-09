@@ -30,6 +30,8 @@ typedef struct VgDanteConfig {
 
 // Starts the Dante device. Returns an opaque handle, or NULL on failure.
 void* vg_dante_start(const VgDanteConfig* config);
+// Software version Dante Controller shows for the device.
+void vg_dante_set_version(unsigned major, unsigned minor, unsigned patch);
 // Why the last vg_dante_start() failed (NULL if unknown).
 const char* vg_dante_last_error(void);
 // Publishes the PTP clock: ptp_ns = t + shift + (t - last_sync) * freq_scale,

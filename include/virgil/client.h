@@ -25,15 +25,23 @@ class Client {
 
   // True if the daemon ticked within the last `timeout_ns`.
   bool daemon_alive(int64_t timeout_ns = 250000000) const;
+  // Heartbeat only: also true while the daemon briefly marks the soundcard
+  // stopped during a settings reload that keeps the layout.
+  bool heartbeat_fresh(int64_t timeout_ns) const;
+  // Zero this client's playback ring from the horizon on, so a restart does
+  // not replay audio written before the last stop.
+  void clear_pending_tx();
 
   const ShmHeader* header() const { return hdr_; }
-  uint32_t sample_rate() const { return hdr_->sample_rate; }
-  uint32_t tx_channels() const { return hdr_->tx_channels; }
-  uint32_t rx_channels() const { return hdr_->rx_channels; }
-  uint32_t ring_frames() const { return hdr_->ring_frames; }
-  uint32_t period_frames() const { return hdr_->period_frames; }
-  uint32_t rx_latency_frames() const { return hdr_->rx_latency_frames; }
-  uint32_t tx_lead_frames() const { return hdr_->tx_lead_frames; }
+  // Layout as validated in open(); the shared header is writable by any local
+  // user, so it is never re-read for indexing.
+  uint32_t sample_rate() const { return rate_; }
+  uint32_t tx_channels() const { return txch_; }
+  uint32_t rx_channels() const { return rxch_; }
+  uint32_t ring_frames() const { return ring_; }
+  uint32_t period_frames() const { return period_; }
+  uint32_t rx_latency_frames() const { return rx_lat_; }
+  uint32_t tx_lead_frames() const { return tx_lead_; }
 
   bool anchor(ClockAnchor* out) const { return read_anchor(hdr_, out); }
   // Interpolated media frame "now". Returns false if no clock yet.
@@ -50,7 +58,7 @@ class Client {
   // Anything older has been (or is being) consumed by the daemon; writing it
   // would leave stale audio in the ring that replays one ring later.
   uint64_t tx_horizon() const {
-    return hdr_->now_frames.load(std::memory_order_acquire) + hdr_->period_frames;
+    return hdr_->now_frames.load(std::memory_order_acquire) + period_;
   }
 
   // Interleaved float I/O at absolute media frame positions. Channels beyond
@@ -62,10 +70,10 @@ class Client {
   // Per-frame access for drivers that convert formats on the fly. The pointer
   // addresses tx_channels() / rx_channels() contiguous floats.
   float* tx_frame(uint64_t frame) {
-    return tx_ + size_t(frame & mask_) * hdr_->tx_channels;
+    return tx_ + size_t(frame & mask_) * txch_;
   }
   const float* rx_frame(uint64_t frame) const {
-    return rx_ + size_t(frame & mask_) * hdr_->rx_channels;
+    return rx_ + size_t(frame & mask_) * rxch_;
   }
 
  private:
@@ -75,6 +83,7 @@ class Client {
   const float* rx_ = nullptr;
   uint64_t mask_ = 0;
   int slot_ = -1;
+  uint32_t rate_ = 0, txch_ = 0, rxch_ = 0, ring_ = 0, period_ = 0, rx_lat_ = 0, tx_lead_ = 0;
 };
 
 std::string default_shm_name();

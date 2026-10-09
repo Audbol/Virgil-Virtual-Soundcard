@@ -33,6 +33,7 @@ struct VirgilPcm {
   bool running = false;
   bool xrun = false;
   uint64_t start_frame = 0;  // media frame of stream position 0
+  uint64_t clock_steps = 0;  // daemon's clock_steps when the stream started
   uint64_t hw = 0;           // frames consumed (playback) / produced (capture)
   uint64_t appl = 0;         // frames written (playback) / read (capture)
   uint32_t lead = 0;         // playback: start offset ahead of the media clock
@@ -112,6 +113,12 @@ bool update_hw(VirgilPcm* p) {
   if (!p->running) return !p->xrun;
   uint64_t now;
   if (!p->client.daemon_alive() || !media_now(p, &now)) return false;
+  // The timeline moved (PTP lock, master change, engine restart): positions
+  // from before are meaningless, so report an xrun and let the app restart.
+  if (p->client.header()->clock_steps.load(std::memory_order_relaxed) != p->clock_steps) {
+    p->xrun = true;
+    return false;
+  }
   p->client.touch();
   if (p->io.stream == SND_PCM_STREAM_PLAYBACK) {
     // A frame counts as consumed once its media time is within one daemon
@@ -132,7 +139,9 @@ int virgil_start(snd_pcm_ioplug_t* io) {
   uint64_t now;
   if (!ensure_client(p) || !media_now(p, &now)) return -ENODEV;
   const uint32_t ch = device_channels(p);
+  p->clock_steps = p->client.header()->clock_steps.load(std::memory_order_relaxed);
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
+    p->client.clear_pending_tx();  // nothing from before the last stop may replay
     p->lead = p->client.tx_lead_frames() + p->client.period_frames();
     p->start_frame = now + p->lead;
     // Flush the prefill into the ring at its final media positions.
@@ -221,7 +230,8 @@ int virgil_prepare(snd_pcm_ioplug_t* io) {
 // capture reads trail it by buffer_size + latency; both must stay inside half
 // the ring.
 uint32_t max_buffer_frames(const virgil::Client& c) {
-  return c.ring_frames() / 2 - 8 * c.period_frames() - c.rx_latency_frames();
+  const int64_t m = int64_t(c.ring_frames() / 2) - 8 * int64_t(c.period_frames()) - int64_t(c.rx_latency_frames());
+  return m > 64 ? uint32_t(std::min<int64_t>(m, 1 << 20)) : 64;
 }
 
 int virgil_hw_params(snd_pcm_ioplug_t* io, snd_pcm_hw_params_t*) {

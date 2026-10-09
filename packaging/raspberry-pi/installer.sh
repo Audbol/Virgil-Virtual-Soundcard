@@ -145,12 +145,12 @@ say "1/4  Installing Virgil and the libraries it needs..."
 _apt_ok=0
 _apt_dir="$tmp/apt"
 mkdir -p "$_apt_dir"
-if DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$tmp/virgil.deb" >"$_apt_dir/log" 2>&1; then
+if DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$tmp/virgil.deb" >"$_apt_dir/log" 2>&1; then
 	_apt_ok=1
 else
 	say "     refreshing the package lists and trying again..."
 	if DEBIAN_FRONTEND=noninteractive apt-get update -q >>"$_apt_dir/log" 2>&1 &&
-		DEBIAN_FRONTEND=noninteractive apt-get install -y -q "$tmp/virgil.deb" >>"$_apt_dir/log" 2>&1; then
+		DEBIAN_FRONTEND=noninteractive apt-get install -y -q -o Dpkg::Options::=--force-confdef -o Dpkg::Options::=--force-confold "$tmp/virgil.deb" >>"$_apt_dir/log" 2>&1; then
 		_apt_ok=1
 	fi
 fi
@@ -298,6 +298,6 @@ say "  from a computer on the same network:"
 say "                  ssh -L 8480:127.0.0.1:8480 $user@$host.local"
 say "                  then open http://127.0.0.1:8480/ in that computer's browser"
 say ""
-say "Uninstall: sudo apt remove virgil   (sudo apt purge virgil also deletes the settings)"
+say "Uninstall: sudo apt remove virgil   (sudo apt purge virgil also deletes the settings and Dante routes)"
 exit 0
 __VIRGIL_PACKAGE_BELOW__

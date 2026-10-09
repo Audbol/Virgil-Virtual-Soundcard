@@ -85,7 +85,9 @@ Function un.onInit
 FunctionEnd
 
 Function OpenControl
-  Exec '"$INSTDIR\virgil-control.exe"'
+  ; Through Explorer, so the tray app runs as the signed-in user rather than
+  ; with the installer's administrator rights (its settings go to that user).
+  Exec '"$WINDIR\explorer.exe" "$INSTDIR\virgil-control.exe"'
 FunctionEnd
 
 ;; Stop the service and wait (up to ~20 s) until it has really exited, so its
@@ -152,6 +154,9 @@ Section "Virgil" SecMain
     File "/oname=virgil.conf" "${SRC_DIR}\packaging\virgil.conf"
   ${EndIf}
   ; Let local users edit the configuration without elevation.
+  ; Users may edit the configuration; inherited by files the service writes
+  ; later (saving from Virgil Control replaces the file).
+  nsExec::Exec '"$SYSDIR\icacls.exe" "$ConfDir" /grant *S-1-5-32-545:(OI)(CI)M'
   nsExec::Exec '"$SYSDIR\icacls.exe" "$ConfDir\virgil.conf" /grant *S-1-5-32-545:M'
   Pop $0
 

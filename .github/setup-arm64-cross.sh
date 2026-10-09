@@ -21,5 +21,5 @@ deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $codename-updates main uni
 deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports $codename-security main universe
 SRC
 sudo dpkg --add-architecture arm64
-"$(dirname "$0")/apt-install.sh" g++-aarch64-linux-gnu libasound2-dev:arm64 libstdc++6:arm64 dpkg-dev
+"$(dirname "$0")/apt-install.sh" g++-aarch64-linux-gnu libasound2-dev:arm64 libgtk-3-dev:arm64 libstdc++6:arm64 dpkg-dev pkg-config
 rustup target add aarch64-unknown-linux-gnu
