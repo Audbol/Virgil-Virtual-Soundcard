@@ -13,7 +13,9 @@
 
 #if defined(_WIN32)
 #include <direct.h>
+#define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#undef interface  // objbase.h macro; clashes with Config::interface
 #else
 #include <sys/stat.h>
 #include <unistd.h>
