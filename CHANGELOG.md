@@ -1,12 +1,19 @@
 # Changelog
 
 ## 0.6.0
+- **Stop and start Virgil** from Virgil Control (Windows, macOS, Linux), the tray / menu bar menu and the browser panel. Stopped, Virgil leaves the network completely (no Dante device, no network ports in use) and stays stopped across restarts until you start it again; the service keeps running so the controls keep working.
 - **Dropout diagnostics.** Virgil now notices and explains dropouts: audio from the network that arrived too late for the receive latency or never arrived, apps that did not deliver their audio in time, the computer keeping Virgil's engine waiting, and clock trouble. Virgil Control shows how many dropouts the last hour had; *Dropouts…* opens the event list with a chart of the last hour, suggestions (for example the receive latency that would have covered the late audio) and *Download report*, a text file with the setup, the events and the recent log for bug reports.
 - **Channel names.** Name channels in Virgil's settings or in Dante Controller (both stay in step, and the names are saved in the configuration). ASIO and Core Audio apps show them as channel names.
 - macOS: the Virgil device now has the channel count, sample rate and latency set in Virgil. It used to keep 8 channels when Core Audio started before the Virgil service (as at boot) until Core Audio was restarted, so apps such as Live Professor saw 8 of 32 channels. It also follows later changes by itself.
 - Virgil as the clock leader (*Become clock leader when no Dante device provides one*, e.g. on a network of its own) is now synchronised and routable in Dante Controller. It used a made-up clock identity that Dante Controller could not match to any device; it now uses the network adapter's hardware address, as Dante devices do.
 - **Dante Controller on the same computer** (and other Dante software there, such as Dante Virtual Soundcard's services) no longer leaves Virgil "not routable". That software listens on the standard Dante control ports, so its requests to Virgil were answered back into Virgil itself. Virgil now notices and uses control ports 24440–24443, which Dante Controller finds by itself (`ports = auto`, the default; `standard` or a port number to choose).
 - With *Clock: Local clock only* selected, Virgil Control and the log say so (Dante devices do not sync with Virgil then), instead of a plain "Free-running".
+- Fixes from a review of the whole code:
+  - Malformed Dante control packets from the network could restart Virgil's Dante engine; they are now refused.
+  - Clock: a new clock leader is followed without a long relock, the path delay follows drift, and Virgil no longer keeps claiming the leader role after a better leader appears.
+  - Audio from an app that stops sending no longer repeats old audio half a second later; NaN samples from an app become silence instead of a full-scale click.
+  - Settings: comments after a value in the configuration file are handled, duplicate keys no longer add up, and saving keeps the file's permissions; renames from Dante Controller with names that are not allowed are refused.
+  - Engine shutdown can no longer hang when a channel is renamed at the same moment; a closed browser connection no longer stops the service on Linux and macOS.
 - The drivers and the service must be the same version (the shared-memory layout changed); the installers update both.
 
 ## 0.5.2
