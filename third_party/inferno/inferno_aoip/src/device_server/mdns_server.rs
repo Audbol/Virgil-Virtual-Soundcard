@@ -103,8 +103,14 @@ impl DeviceMDNSResponder {
       .get(&index)
       .map(|p| format!("b.{}={}", p.bundle_id, p.channel_in_bundle + 1));
     let service = |ch_name: &str, default: bool| {
-      let name =
-        Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+      // Virgil patch: a name that is not a valid DNS label is skipped, not a panic.
+      let name = match Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]) {
+        Ok(n) => n,
+        Err(e) => {
+          log::error!("cannot advertise TX channel {ch_name:?}: {e:?}");
+          return None;
+        }
+      };
       let mut b = ServiceBuilder::new(service_type("_netaudio-chan"), name, self_info.flows_control_port)
         .unwrap()
         .add_ip_address(IpAddr::V4(self_info.ip_address))
@@ -125,17 +131,21 @@ impl DeviceMDNSResponder {
       if let Some(s) = &bundle {
         b = b.add_txt_truncated(s.clone());
       }
-      b.build().unwrap()
+      Some(b.build().unwrap())
     };
     let txch = &self_info.tx_channels[index];
     let handle = self.handle.read().unwrap();
     match handle.as_ref() {
       Some(handle) => {
-        handle.add_service(service(&txch.factory_name, true)).log_and_forget();
+        if let Some(s) = service(&txch.factory_name, true) {
+          handle.add_service(s).log_and_forget();
+        }
         let friendly_name_locked = txch.friendly_name.read();
         let friendly_name = friendly_name_locked.unwrap();
         if txch.factory_name != *friendly_name {
-          handle.add_service(service(&friendly_name, false)).log_and_forget();
+          if let Some(s) = service(&friendly_name, false) {
+            handle.add_service(s).log_and_forget();
+          }
         }
       }
       None => {
@@ -147,8 +157,10 @@ impl DeviceMDNSResponder {
   pub fn remove_tx_channel(&self, index: usize) {
     let self_info = &*self.self_info;
     let remove = |ch_name: &str| {
-      let name =
-        Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]).unwrap();
+      let name = match Name::from_labels([format!("{}@{}", ch_name, self_info.friendly_hostname).as_bytes()]) {
+        Ok(n) => n,
+        Err(_) => return,  // was never advertised
+      };
       match self.handle.read().unwrap().as_ref() {
         Some(handle) => {
           handle.remove_named_service(service_type("_netaudio-chan"), name).log_and_forget();

@@ -61,8 +61,13 @@ void set_timeout(intptr_t fd, int ms) {
 bool send_all(intptr_t fd, const std::string& data) {
   size_t off = 0;
   while (off < data.size()) {
+#if defined(MSG_NOSIGNAL)
+    const int flags = MSG_NOSIGNAL;  // a client that hung up must not kill virgild (SIGPIPE)
+#else
+    const int flags = 0;
+#endif
     const int n = int(send(decltype(socket(0, 0, 0))(fd), data.data() + off,
-                           int(data.size() - off), 0));
+                           int(data.size() - off), flags));
     if (n <= 0) return false;
     off += size_t(n);
   }

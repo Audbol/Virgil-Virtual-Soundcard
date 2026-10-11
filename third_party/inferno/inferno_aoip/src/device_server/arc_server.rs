@@ -238,7 +238,10 @@ pub async fn run_server(
             match read_0term_str_from_buffer(content, name_offset) {
               Ok(new_name) => {
                 let index = (channel_id - 1) as usize;
-                if index < self_info.tx_channels.len() {
+                if !super::saved_settings::valid_channel_name(new_name) {
+                  error!("refusing to rename TX channel id {channel_id}: invalid name {new_name:?}");
+                  None
+                } else if index < self_info.tx_channels.len() {
                   info!("renaming TX channel id {channel_id} to {new_name}");
                   mdns_server.remove_tx_channel(index);
                   saved_channels.rename_tx_channel(index, new_name.to_owned());
@@ -280,7 +283,10 @@ pub async fn run_server(
             match read_0term_str_from_buffer(content, name_offset) {
               Ok(new_name) => {
                 let index = (channel_id - 1) as usize;
-                if index < self_info.rx_channels.len() {
+                if !super::saved_settings::valid_channel_name(new_name) {
+                  error!("refusing to rename RX channel id {channel_id}: invalid name {new_name:?}");
+                  None
+                } else if index < self_info.rx_channels.len() {
                   info!("renaming RX channel id {channel_id} to {new_name}");
                   saved_channels.rename_rx_channel(index, new_name.to_owned());
                   renamed_any = true;

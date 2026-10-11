@@ -281,13 +281,20 @@ void Engine::stop() {
     return;
   }
   if (tick_thread_.joinable()) tick_thread_.join();
+  // Until Inferno stops it keeps sending from the ring: silence, not the
+  // last ring of audio.
+  std::fill(dtx_.begin(), dtx_.end(), 0);
+  bool was_current = false;
   {
     std::lock_guard<std::mutex> l(g_engine_mutex);
     if (g_engine == this) {
-      vg_dante_set_rename_callback(nullptr);
-      g_engine = nullptr;
+      g_engine = nullptr;  // on_rename checks it: late renames are dropped
+      was_current = true;
     }
   }
+  // Outside g_engine_mutex: clearing takes the bridge's locks, which a
+  // rename in flight holds while it waits for g_engine_mutex.
+  if (was_current) vg_dante_set_rename_callback(nullptr);
   if (dante_) {
     vg_dante_set_clock_master(nullptr);
     reported_master_ = false;
@@ -343,7 +350,6 @@ void Engine::tick_loop() {
 
   ClockModel m = clock_->model();
   uint64_t next = (ptp_ns_to_frames(m.ptp_at(mono_ns()), rate) / P + 1) * P;
-  int64_t last_reclaim = 0;
 
   while (running_) {
     m = clock_->model();
@@ -357,6 +363,7 @@ void Engine::tick_loop() {
       next = (ptp_ns_to_frames(m.ptp_at(now), rate) / P + 1) * P;
       clear_rings();
       std::fill(drx_.begin(), drx_.end(), 0);
+      std::fill(dtx_.begin(), dtx_.end(), 0);  // nothing of the old timeline may go out
       continue;
     }
     sleep_until_ns(deadline, spin);
@@ -446,12 +453,15 @@ void Engine::tick_loop() {
       for (uint32_t f = 0; f < P; ++f)
         std::memset(rx + size_t((z + f) & mask) * rxch, 0, sizeof(float) * rxch);
     }
-
-    if (now - last_reclaim > 1000000000LL) {
-      reclaim_clients(now);
-      report_clock_master();
-      last_reclaim = now;
+    if (txch) {
+      // Inferno reads the transmit ring by media time and never clears it:
+      // silence the slots half a ring ahead, so a stalled tick sends
+      // silence, not audio from a ring ago.
+      const uint64_t z = next + dring_ / 2 - P;
+      for (uint32_t f = 0; f < P; ++f)
+        std::memset(dtx_.data() + size_t((z + f) & dmask) * txch, 0, sizeof(int32_t) * txch);
     }
+
     next += P;
   }
 }
@@ -568,6 +578,14 @@ void Engine::publish_names_locked() {
     }
   }
   hdr_->names_seq.fetch_add(1, std::memory_order_release);
+}
+
+// Once a second from the daemon's main loop: never on the tick thread, which
+// must not log (a slow log file or journal would stall the audio) or lock.
+void Engine::housekeeping() {
+  if (!running_ || !hdr_) return;
+  reclaim_clients(mono_ns());
+  report_clock_master();
 }
 
 EngineCounters Engine::counters() {

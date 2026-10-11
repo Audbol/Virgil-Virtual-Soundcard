@@ -8,6 +8,7 @@ namespace virgil {
 inline int32_t float_to_int(float x, int32_t full_scale) {
   // Clamp then round; full_scale is 2^(bits-1).
   float s = x * float(full_scale);
+  if (!(s == s)) return 0;  // NaN (a broken DSP chain) is silence, not -full scale
   if (s >= float(full_scale - 1)) return full_scale - 1;
   if (s <= -float(full_scale)) return -full_scale;
   return int32_t(s < 0 ? s - 0.5f : s + 0.5f);
@@ -39,6 +40,7 @@ inline float l16_to_float(const uint8_t* in) {
 // Driver-side helpers (host-endian integers).
 inline int32_t float_to_s32(float x) {
   double s = double(x) * 2147483648.0;
+  if (!(s == s)) return 0;  // NaN: silence (int32_t(NaN) is undefined, -2^31 on x86)
   if (s >= 2147483647.0) return 2147483647;
   if (s <= -2147483648.0) return int32_t(-2147483647 - 1);
   return int32_t(s);

@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -70,6 +71,10 @@ bool validate_config(Config* c, std::string* error);
 std::string channel_name_problem(const std::string& name);
 // Default name of a channel (1-based), as the device shows it unnamed.
 std::string default_channel_name(bool tx, uint32_t number);
+// Replace the configuration file at `path` with `text` safely (see .cpp).
+// Hold config_file_mutex() while calling it; the editors below take it.
+bool write_config_file(const std::string& path, const std::string& text, std::string* error);
+std::mutex& config_file_mutex();
 // Set (or with an empty value, remove) `key` in `[section]` of the file at
 // `path`, keeping everything else (comments, layout, other keys).
 bool set_config_value(const std::string& path, const std::string& section, const std::string& key,

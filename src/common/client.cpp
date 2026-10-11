@@ -37,26 +37,47 @@ bool Client::open(const std::string& name) {
 #endif
   if (!ok) return false;
   auto* h = static_cast<ShmHeader*>(shm_.data());
-  if (shm_.size() < kShmHeaderBytes || h->magic != kShmMagic || h->version != kShmVersion ||
-      h->total_bytes > shm_.size() || h->ring_frames == 0 ||
-      (h->ring_frames & (h->ring_frames - 1)) != 0 || h->tx_channels > kMaxChannels ||
-      h->rx_channels > kMaxChannels ||
-      shm_total_bytes(h->ring_frames, h->tx_channels, h->rx_channels) > shm_.size() ||
-      h->sample_rate == 0 || h->sample_rate > 384000 || h->period_frames == 0 ||
-      h->period_frames >= h->ring_frames / 4 || h->rx_latency_frames >= h->ring_frames / 4 ||
-      h->tx_lead_frames >= h->ring_frames / 4) {
+  if (shm_.size() < kShmHeaderBytes) {
+    shm_.close();
+    return false;
+  }
+  // Any local user can write the header: take one copy of the layout and
+  // validate and keep exactly that (reading the fields again after the
+  // checks let a racing writer slip in an unchecked geometry).
+  struct Layout {
+    uint32_t magic, version;
+    uint64_t total_bytes;
+    uint32_t rate, tx, rx, ring, period, rx_lat, tx_lead;
+  } v;
+  {
+    volatile const ShmHeader* vh = h;
+    v.magic = vh->magic;
+    v.version = vh->version;
+    v.total_bytes = vh->total_bytes;
+    v.rate = vh->sample_rate;
+    v.tx = vh->tx_channels;
+    v.rx = vh->rx_channels;
+    v.ring = vh->ring_frames;
+    v.period = vh->period_frames;
+    v.rx_lat = vh->rx_latency_frames;
+    v.tx_lead = vh->tx_lead_frames;
+  }
+  if (v.magic != kShmMagic || v.version != kShmVersion || v.total_bytes > shm_.size() || v.ring == 0 ||
+      (v.ring & (v.ring - 1)) != 0 || v.tx > kMaxChannels || v.rx > kMaxChannels ||
+      shm_total_bytes(v.ring, v.tx, v.rx) > shm_.size() || v.rate == 0 || v.rate > 384000 || v.period == 0 ||
+      v.period >= v.ring / 4 || v.rx_lat >= v.ring / 4 || v.tx_lead >= v.ring / 4) {
     shm_.close();
     return false;
   }
   hdr_ = h;
   // Keep the validated layout; never index with values re-read from the header.
-  rate_ = h->sample_rate;
-  txch_ = h->tx_channels;
-  rxch_ = h->rx_channels;
-  ring_ = h->ring_frames;
-  period_ = h->period_frames;
-  rx_lat_ = h->rx_latency_frames;
-  tx_lead_ = h->tx_lead_frames;
+  rate_ = v.rate;
+  txch_ = v.tx;
+  rxch_ = v.rx;
+  ring_ = v.ring;
+  period_ = v.period;
+  rx_lat_ = v.rx_lat;
+  tx_lead_ = v.tx_lead;
   mask_ = ring_ - 1;
   rx_ = rx_ring_at(h, ring_, txch_);
   return true;

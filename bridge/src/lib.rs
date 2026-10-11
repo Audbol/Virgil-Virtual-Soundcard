@@ -235,7 +235,11 @@ pub unsafe extern "C" fn vg_dante_set_clock_master(id: *const u8) {
 static RENAME_CB: RwLock<Option<extern "C" fn(i32, u32, *const c_char)>> = RwLock::new(None);
 
 fn forward_rename(is_tx: bool, index: usize, name: &str) {
-    if let (Some(cb), Ok(c)) = (*RENAME_CB.read().unwrap(), CString::new(name)) {
+    // Copy the pointer out first: calling it under the lock deadlocked with
+    // Engine::stop clearing it (Dante thread: lock -> engine mutex; main
+    // thread: engine mutex -> lock).
+    let cb = *RENAME_CB.read().unwrap();
+    if let (Some(cb), Ok(c)) = (cb, CString::new(name)) {
         cb(is_tx as i32, index as u32, c.as_ptr());
     }
 }

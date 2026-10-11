@@ -4,12 +4,17 @@
 #include <cctype>
 #include <fstream>
 #include <cstdio>
+#include <mutex>
 #include <sstream>
 
 #if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #undef interface
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #endif
 
 #include "virgil/platform.h"
@@ -24,6 +29,21 @@ static std::string trim(const std::string& s) {
   while (e > b && std::isspace(uint8_t(s[e - 1]))) --e;
   return s.substr(b, e - b);
 }
+
+// The line without its comment (';' or '#', not inside a quoted value).
+static std::string strip_comment(const std::string& line) {
+  bool in_quotes = false;
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == '"') in_quotes = !in_quotes;
+    else if (!in_quotes && (line[i] == ';' || line[i] == '#')) return line.substr(0, i);
+  }
+  return line;
+}
+
+// Editors (Virgil Control, Dante Controller renames, Stop/Start) and the
+// control panel's save run on different threads: one file write at a time.
+static std::mutex g_file_mutex;
+std::mutex& config_file_mutex() { return g_file_mutex; }
 
 static std::string lower(std::string s) {
   for (auto& c : s) c = char(std::tolower(uint8_t(c)));
@@ -60,16 +80,10 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
   };
   while (std::getline(in, line)) {
     ++lineno;
+    // A UTF-8 byte order mark (Notepad "UTF-8 with BOM", PowerShell 5).
+    if (lineno == 1 && line.compare(0, 3, "\xEF\xBB\xBF") == 0) line.erase(0, 3);
     // Strip comments, but not ';' / '#' inside a quoted value.
-    bool in_quotes = false;
-    for (size_t i = 0; i < line.size(); ++i) {
-      if (line[i] == '"') in_quotes = !in_quotes;
-      else if (!in_quotes && (line[i] == ';' || line[i] == '#')) {
-        line.resize(i);
-        break;
-      }
-    }
-    line = trim(line);
+    line = trim(strip_comment(line));
     if (line.empty()) continue;
     if (line.front() == '[') {
       if (line.back() != ']') return fail("bad section header");
@@ -235,9 +249,13 @@ bool validate_config(Config* c, std::string* error) {
 
 static bool replace_file(const std::string& from, const std::string& to);
 
-// Same one-step replacement as saving from the control panel.
-static bool write_file_atomic(const std::string& path, const std::string& text, std::string* error) {
+// Written to disk before it replaces the old file, which is replaced in one
+// step: a crash or power cut leaves either the old or the new file. On POSIX
+// the new file keeps the old one's mode and owner (macOS: 664 root:admin so
+// administrators can edit it). Hold config_file_mutex().
+bool write_config_file(const std::string& path, const std::string& text, std::string* error) {
   const std::string tmp = path + ".new";
+#if defined(_WIN32)
   {
     std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
     o << text;
@@ -248,6 +266,30 @@ static bool write_file_atomic(const std::string& path, const std::string& text, 
       return false;
     }
   }
+#else
+  struct stat st{};
+  const bool had = ::stat(path.c_str(), &st) == 0;
+  const int fd = ::open(tmp.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, had ? (st.st_mode & 07777) : 0644);
+  bool ok = fd >= 0;
+  if (ok && had) {
+    (void)::fchmod(fd, st.st_mode & 07777);  // regardless of the umask
+    if (::fchown(fd, st.st_uid, st.st_gid) != 0) {
+      // Only root may give a file away; the service owns its directory anyway.
+    }
+  }
+  for (size_t off = 0; ok && off < text.size();) {
+    const ssize_t n = ::write(fd, text.data() + off, text.size() - off);
+    if (n <= 0) ok = false;
+    else off += size_t(n);
+  }
+  if (ok) ok = ::fsync(fd) == 0;
+  if (fd >= 0 && ::close(fd) != 0) ok = false;
+  if (!ok) {
+    if (error) *error = "cannot write " + tmp;
+    std::remove(tmp.c_str());
+    return false;
+  }
+#endif
   if (!replace_file(tmp, path)) {
     if (error) *error = "cannot replace " + path;
     std::remove(tmp.c_str());
@@ -292,6 +334,7 @@ std::string host_device_name() {
 }
 
 bool replace_stock_name(const std::string& path, const std::string& name, std::string* error) {
+  std::lock_guard<std::mutex> lock(g_file_mutex);
   std::ifstream in(path, std::ios::binary);
   if (!in) return false;
   std::stringstream ss;
@@ -306,7 +349,7 @@ bool replace_stock_name(const std::string& path, const std::string& name, std::s
     end = end == std::string::npos ? text.size() : end + 1;
     std::string line = text.substr(pos, end - pos);
     pos = end;
-    const std::string t = trim(line);
+    const std::string t = trim(strip_comment(line));
     if (!t.empty() && t.front() == '[' && t.back() == ']') section = lower(trim(t.substr(1, t.size() - 2)));
     const size_t eq = t.find('=');
     if (!changed && (section.empty() || section == "device" || section == "network") && eq != std::string::npos &&
@@ -322,11 +365,12 @@ bool replace_stock_name(const std::string& path, const std::string& name, std::s
     out += line;
   }
   if (!changed) return false;
-  return write_file_atomic(path, out, error);
+  return write_config_file(path, out, error);
 }
 
 bool set_config_value(const std::string& path, const std::string& section_name, const std::string& key,
                       const std::string& value, std::string* error) {
+  std::lock_guard<std::mutex> lock(g_file_mutex);
   std::string text;
   {
     std::ifstream in(path, std::ios::binary);
@@ -354,7 +398,7 @@ bool set_config_value(const std::string& path, const std::string& section_name, 
     end = end == std::string::npos ? text.size() : end + 1;
     std::string line = text.substr(pos, end - pos);
     pos = end;
-    const std::string t = trim(line);
+    const std::string t = trim(strip_comment(line));
     if (!t.empty() && t.front() == '[' && t.back() == ']') {
       if (in_section && !done) {  // end of the section: add the key there
         out += entry;
@@ -363,10 +407,12 @@ bool set_config_value(const std::string& path, const std::string& section_name, 
       section = lower(trim(t.substr(1, t.size() - 2)));
       in_section = section == section_name;
       have_section |= in_section;
-    } else if (in_section && !done) {
+    } else if (in_section) {
       const size_t eq = t.find('=');
       if (eq != std::string::npos && lower(trim(t.substr(0, eq))) == key) {
-        out += entry;  // replace (or drop, for an empty value)
+        // Replace the first (or drop it, for an empty value); drop later
+        // copies, which would otherwise win when the file is read.
+        if (!done) out += entry;
         done = true;
         continue;
       }
@@ -378,7 +424,7 @@ bool set_config_value(const std::string& path, const std::string& section_name, 
     if (!have_section) out += nl + "[" + section_name + "]" + nl;
     out += entry;
   }
-  return write_file_atomic(path, out, error);
+  return write_config_file(path, out, error);
 }
 
 bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,

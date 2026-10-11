@@ -28,6 +28,19 @@ static CURRENT: Mutex<(Vec<String>, Vec<String>)> = Mutex::new((Vec::new(), Vec:
 pub type RenameHook = fn(is_tx: bool, index: usize, name: &str);
 static HOOK: Mutex<Option<RenameHook>> = Mutex::new(None);
 
+/// Virgil patch: whether a channel name from the network can be used. Longer
+/// names made the mDNS registration panic ("name@device" is one DNS label of
+/// at most 63 bytes) on every start once saved; control characters and the
+/// characters Dante uses as separators are refused too (same rules as
+/// Virgil's configuration).
+pub fn valid_channel_name(name: &str) -> bool {
+  !name.is_empty()
+    && name.len() <= 31
+    && !name.starts_with(' ')
+    && !name.ends_with(' ')
+    && name.bytes().all(|b| (0x20..=0x7e).contains(&b) && !b"=.@\"\\".contains(&b))
+}
+
 /// Names for the next device start: `None` keeps the saved (or default) name.
 pub fn set_name_overrides(tx: Vec<Option<String>>, rx: Vec<Option<String>>) {
   *OVERRIDES.lock().unwrap() = (tx, rx);
@@ -97,7 +110,11 @@ impl SavedChannelsSettings {
   }
   fn load_and_init(src: &mut Vec<ChannelSettings>, dst: &Vec<device_info::Channel>, is_tx: bool) {
     for (index, cs) in src.iter().enumerate().take(dst.len()) {
-      if cs.id == 0 || cs.friendly_name.is_empty() || name_override(is_tx, index).is_some() {
+      if cs.id == 0
+        || cs.friendly_name.is_empty()
+        || !valid_channel_name(&cs.friendly_name)
+        || name_override(is_tx, index).is_some()
+      {
         continue;
       }
       if index != (cs.id - 1) {
@@ -124,7 +141,8 @@ impl SavedChannelsSettings {
     Self::rename(&mut self.rx_channels.channels, &self.self_info.rx_channels, index, name.clone());
     self.state_storage.save("rx_channels", &self.rx_channels).log_and_forget();
     publish(false, &self.self_info.rx_channels);
-    if let Some(h) = *HOOK.lock().unwrap() {
+    let hook = *HOOK.lock().unwrap();  // not called under the lock
+    if let Some(h) = hook {
       h(false, index, &name);
     }
   }
@@ -132,7 +150,8 @@ impl SavedChannelsSettings {
     Self::rename(&mut self.tx_channels.channels, &self.self_info.tx_channels, index, name.clone());
     self.state_storage.save("tx_channels", &self.tx_channels).log_and_forget();
     publish(true, &self.self_info.tx_channels);
-    if let Some(h) = *HOOK.lock().unwrap() {
+    let hook = *HOOK.lock().unwrap();  // not called under the lock
+    if let Some(h) = hook {
       h(true, index, &name);
     }
   }

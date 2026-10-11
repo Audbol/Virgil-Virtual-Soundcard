@@ -330,6 +330,12 @@ HttpResponse ControlServer::set_running(bool on) {
       if (!saved) VIRGIL_LOG_WARN("could not save %s state: %s", on ? "started" : "stopped", err.c_str());
     }
   }
+  {
+    // Kept by the file: later edits of `enabled` there (Settings, by hand)
+    // must win again. Only an unsaved state stays in memory.
+    std::lock_guard<std::mutex> l(ctx_->mutex);
+    if (saved) ctx_->run_override = -1;
+  }
   ctx_->diag.note(Diagnostics::Kind::Service, on ? "Virgil was started" : "Virgil was stopped", wall_ms());
   VIRGIL_LOG_INFO("control: %s", on ? "starting Virgil" : "stopping Virgil");
   ctx_->reload = true;
@@ -373,28 +379,12 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
     path = ctx_->config_path;
   }
   make_parent_dirs(path);
-  const std::string tmp = path + ".new";
   {
-    // Written to disk before it replaces the old file, which is replaced in
-    // one step: a crash or power cut leaves either the old or the new file.
-    FILE* f = std::fopen(tmp.c_str(), "wb");
-    bool ok = f && std::fwrite(r.body.data(), 1, r.body.size(), f) == r.body.size() && std::fflush(f) == 0;
-#if !defined(_WIN32)
-    if (ok) ok = fsync(fileno(f)) == 0;
-#endif
-    if (f && std::fclose(f) != 0) ok = false;
-    if (!ok) {
-      std::remove(tmp.c_str());
-      return json_error(500, "cannot write " + path +
-                                 " (permission denied? the service needs write access)");
-    }
+    std::lock_guard<std::mutex> lock(config_file_mutex());
+    std::string err;
+    if (!write_config_file(path, r.body, &err))
+      return json_error(500, err + " (permission denied? the service needs write access to " + path + ")");
   }
-#if defined(_WIN32)
-  if (!MoveFileExA(tmp.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH))
-    return json_error(500, "cannot replace " + path);
-#else
-  if (std::rename(tmp.c_str(), path.c_str()) != 0) return json_error(500, "cannot replace " + path);
-#endif
   VIRGIL_LOG_INFO("control: configuration saved to %s; restarting engine", path.c_str());
   ctx_->reload = true;
   Json j;

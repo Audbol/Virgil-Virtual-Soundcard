@@ -82,6 +82,9 @@ class Engine {
   // Picks up names the device published or that were changed from the
   // network, and hands them to the drivers. Call about once a second.
   void sync_channel_names();
+  // Releases slots of apps that died, reports the clock leader to Inferno.
+  // Call about once a second, not from the tick thread.
+  void housekeeping();
   struct Rename {
     bool tx;
     uint32_t index;
@@ -120,8 +123,8 @@ class Engine {
   // Peak meters: float bits of |sample|, max-accumulated by the tick thread
   // and drained by take_peaks().
   std::array<std::atomic<uint32_t>, kMaxChannels> tx_peak_{};
-  std::array<bool, kMaxTxClients> client_stalled_{};  // tick thread only
-  bool reported_master_ = false;  // tick thread only
+  std::array<bool, kMaxTxClients> client_stalled_{};  // housekeeping() only
+  bool reported_master_ = false;  // housekeeping() only
   uint8_t reported_id_[8] = {};
   std::array<std::atomic<uint32_t>, kMaxChannels> rx_peak_{};
   static void on_rename(int is_tx, uint32_t index, const char* name);

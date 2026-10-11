@@ -193,6 +193,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       if (engine && !ctx.reload) {
         // Once a second: diagnostics, and channel names changed from the
         // network (Dante Controller), which the configuration keeps.
+        engine->housekeeping();
         engine->sync_channel_names();
         const virgil::Config& ec = engine->config();
         ctx.diag.sample(engine->counters(), ec, virgil::wall_ms());
@@ -349,6 +350,9 @@ int main(int argc, char** argv) {
 
   std::signal(SIGINT, on_signal);
   std::signal(SIGTERM, on_signal);
+#if !defined(_WIN32)
+  std::signal(SIGPIPE, SIG_IGN);  // a peer that hung up is an error return, not death
+#endif
 
   if (do_status) return status();
 
