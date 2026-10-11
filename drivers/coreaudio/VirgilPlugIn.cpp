@@ -75,6 +75,11 @@ struct State {
   std::thread watcher;
   std::atomic<bool> watch_run{false};
   std::atomic<int64_t> lost_ns{0};  // when the IO thread went free-running
+  // Follows virgild's format (channels, rate, latency): virgild may start
+  // after coreaudiod loaded us, or be reconfigured; the device then changes
+  // through the host's configuration-change protocol.
+  bool format_watcher = false;
+  std::atomic<int64_t> change_requested_ns{0};  // 0 = none pending
 };
 
 State g;
@@ -92,15 +97,38 @@ UInt64 ns_to_host(int64_t ns) {
   return UInt64((__uint128_t)ns * tb.denom / tb.numer);
 }
 
-void load_format_from_daemon() {
+struct Format {
+  Float64 sample_rate;
+  UInt32 in_channels, out_channels, period_frames, rx_latency_frames, tx_lead_frames;
+  bool operator==(const Format& o) const {
+    return sample_rate == o.sample_rate && in_channels == o.in_channels && out_channels == o.out_channels &&
+           period_frames == o.period_frames && rx_latency_frames == o.rx_latency_frames &&
+           tx_lead_frames == o.tx_lead_frames;
+  }
+};
+
+// The running daemon's format; false if no daemon is ticking.
+bool daemon_format(Format* f) {
   virgil::Client c;
-  if (!c.open()) return;
-  g.sample_rate = c.sample_rate();
-  g.in_channels = c.rx_channels() ? c.rx_channels() : 1;
-  g.out_channels = c.tx_channels() ? c.tx_channels() : 1;
-  g.period_frames = c.period_frames();
-  g.rx_latency_frames = c.rx_latency_frames();
-  g.tx_lead_frames = c.tx_lead_frames();
+  if (!c.open() || !c.daemon_alive(1000000000LL)) return false;
+  *f = {Float64(c.sample_rate()), c.rx_channels() ? c.rx_channels() : 1, c.tx_channels() ? c.tx_channels() : 1,
+        c.period_frames(), c.rx_latency_frames(), c.tx_lead_frames()};
+  return true;
+}
+Format current_format() {
+  return {g.sample_rate, g.in_channels, g.out_channels, g.period_frames, g.rx_latency_frames, g.tx_lead_frames};
+}
+void apply_format(const Format& f) {
+  g.sample_rate = f.sample_rate;
+  g.in_channels = f.in_channels;
+  g.out_channels = f.out_channels;
+  g.period_frames = f.period_frames;
+  g.rx_latency_frames = f.rx_latency_frames;
+  g.tx_lead_frames = f.tx_lead_frames;
+}
+void load_format_from_daemon() {
+  Format f;
+  if (daemon_format(&f)) apply_format(f);
 }
 
 // ---- helpers ----------------------------------------------------------------
@@ -155,8 +183,8 @@ OSStatus CreateDevice(AudioServerPlugInDriverRef, CFDictionaryRef, const AudioSe
 OSStatus DestroyDevice(AudioServerPlugInDriverRef, AudioObjectID) { return kAudioHardwareUnsupportedOperationError; }
 OSStatus AddDeviceClient(AudioServerPlugInDriverRef, AudioObjectID, const AudioServerPlugInClientInfo*) { return kAudioHardwareNoError; }
 OSStatus RemoveDeviceClient(AudioServerPlugInDriverRef, AudioObjectID, const AudioServerPlugInClientInfo*) { return kAudioHardwareNoError; }
-OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef, AudioObjectID, UInt64, void*) { return kAudioHardwareNoError; }
-OSStatus AbortDeviceConfigurationChange(AudioServerPlugInDriverRef, AudioObjectID, UInt64, void*) { return kAudioHardwareNoError; }
+OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef, AudioObjectID, UInt64, void*);
+OSStatus AbortDeviceConfigurationChange(AudioServerPlugInDriverRef, AudioObjectID, UInt64, void*);
 Boolean HasProperty(AudioServerPlugInDriverRef, AudioObjectID, pid_t, const AudioObjectPropertyAddress*);
 OSStatus IsPropertySettable(AudioServerPlugInDriverRef, AudioObjectID, pid_t, const AudioObjectPropertyAddress*, Boolean*);
 OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef, AudioObjectID, pid_t, const AudioObjectPropertyAddress*, UInt32, const void*, UInt32*);
@@ -222,11 +250,56 @@ ULONG Release(void* inDriver) {
   return r;
 }
 
+void watch_format();
+
 OSStatus Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRef inHost) {
   if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
   std::lock_guard<std::mutex> l(g.mutex);
   g.host = inHost;
   load_format_from_daemon();
+  if (!g.format_watcher) {
+    g.format_watcher = true;
+    std::thread(watch_format).detach();  // lives as long as coreaudiod
+  }
+  return kAudioHardwareNoError;
+}
+
+// Asks the host to change the device when virgild's format differs from the
+// one we publish (8 channels until virgild is first seen, for example).
+void watch_format() {
+  while (true) {
+    std::this_thread::sleep_for(std::chrono::seconds(1));
+    Format want;
+    // A request the host has not acted on within 5 s is made again.
+    const int64_t pending = g.change_requested_ns.load();
+    if (pending && virgil::mono_ns() - pending < 5000000000LL) continue;
+    if (!daemon_format(&want)) continue;
+    AudioServerPlugInHostRef host;
+    {
+      std::lock_guard<std::mutex> l(g.mutex);
+      if (want == current_format()) continue;
+      host = g.host;
+    }
+    if (!host) continue;
+    g.change_requested_ns = virgil::mono_ns();
+    if (host->RequestDeviceConfigurationChange(host, kObjectID_Device, 0, nullptr) != kAudioHardwareNoError)
+      g.change_requested_ns = 0;
+  }
+}
+
+// IO is stopped while the host performs the change.
+OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt64, void*) {
+  if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
+  std::lock_guard<std::mutex> l(g.mutex);
+  Format f;
+  if (daemon_format(&f)) apply_format(f);
+  if (g.io_count == 0) g.client.close();
+  g.change_requested_ns = 0;
+  return kAudioHardwareNoError;
+}
+OSStatus AbortDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, AudioObjectID, UInt64, void*) {
+  if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
+  g.change_requested_ns = 0;
   return kAudioHardwareNoError;
 }
 
@@ -577,7 +650,7 @@ bool attach_daemon_locked() {
   if (!g.client.open() || !g.client.daemon_alive()) return false;
   if (g.client.sample_rate() != UInt32(g.sample_rate)) {
     // virgild was restarted with another rate; refuse rather than play at the
-    // wrong speed. Reloading the plug-in (killall coreaudiod) picks it up.
+    // wrong speed until the format watcher has changed the device.
     g.client.close();
     return false;
   }

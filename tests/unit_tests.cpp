@@ -11,6 +11,7 @@
 #include "virgil/ptp.h"
 #include "virgil/sample_convert.h"
 #include "virgil/shm_layout.h"
+#include "diagnostics.h"
 #include "test_main.h"
 
 using namespace virgil;
@@ -304,6 +305,109 @@ TEST(config_stock_name_becomes_unique) {
   CHECK(!replace_stock_name(path, "Virgil-host", &err));
   CHECK(read() == "[device]\nname = Stage Left\n");
   std::remove(path.c_str());
+}
+
+TEST(config_channel_names) {
+  Config c;
+  std::string err;
+  CHECK(parse_config("[device]\ntx_channels = 4\nrx_channels = 2\n[channel_names]\ntx1 = Kick\ntx3 = \"Vox; lead\"\n"
+                     "rx2 = Talkback\n",
+                     &c, &err));
+  CHECK(validate_config(&c, &err));
+  CHECK(c.tx_name(0) == "Kick" && c.tx_name(1).empty() && c.tx_name(2) == "Vox; lead" && c.rx_name(1) == "Talkback");
+  // Round trip through format_config.
+  Config d;
+  CHECK(parse_config(format_config(c), &d, &err) && validate_config(&d, &err));
+  CHECK(d.tx_name(2) == "Vox; lead" && d.rx_name(1) == "Talkback");
+  // Unique per direction, also against the default names; bad characters.
+  Config dup;
+  parse_config("[device]\ntx_channels = 2\n[channel_names]\ntx1 = Kick\ntx2 = kick\n", &dup, &err);
+  CHECK(!validate_config(&dup, &err));
+  Config dflt;
+  parse_config("[device]\ntx_channels = 2\n[channel_names]\ntx1 = TX 2\n", &dflt, &err);
+  CHECK(!validate_config(&dflt, &err));
+  CHECK(!channel_name_problem("a@b").empty() && !channel_name_problem("a.b").empty() &&
+        !channel_name_problem(std::string(32, 'x')).empty() && channel_name_problem("Vox 1 (L)").empty());
+  // Names of channels beyond the count are dropped.
+  Config extra;
+  parse_config("[device]\ntx_channels = 1\n[channel_names]\ntx5 = Five\n", &extra, &err);
+  CHECK(validate_config(&extra, &err) && extra.tx_names.size() == 1);
+  CHECK(!parse_config("[channel_names]\nfoo = 1\n", &extra, &err));
+
+  // Saving one name keeps the rest of the file.
+  const std::string path = "virgil-names-test.conf";
+  {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    std::fputs("# my setup\n[device]\nname = Stage\n\n[ptp]\nsubdomain = _DFLT\n", f);
+    std::fclose(f);
+  }
+  CHECK(save_channel_name(path, true, 0, "Kick", &err));
+  CHECK(save_channel_name(path, false, 3, "Talk back", &err));
+  CHECK(save_channel_name(path, true, 0, "Kick In", &err));
+  Config s;
+  CHECK(load_config(path, &s, &err));
+  CHECK(s.device_name == "Stage" && s.tx_name(0) == "Kick In" && s.rx_name(3) == "Talk back");
+  CHECK(save_channel_name(path, true, 0, "", &err));  // back to the default
+  Config s2;
+  CHECK(load_config(path, &s2, &err) && s2.tx_name(0).empty() && s2.rx_name(3) == "Talk back");
+  std::remove(path.c_str());
+}
+
+TEST(diagnostics_events_and_hints) {
+  Config cfg;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  EngineCounters::App app;
+  app.pid = 42;
+  app.name = "REAPER";
+  c.apps.push_back(app);
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);  // past the start-up grace
+  CHECK(d.recent_dropouts(t) == 0);
+  // Two seconds of late packets merge into one event; the hint asks for more latency.
+  c.rx_late_packets += 10;
+  c.rx_max_age_samples = 48 * 5;  // 5 ms at 48 kHz, latency 4 ms
+  d.sample(c, cfg, t += 1000);
+  c.rx_late_packets += 3;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 1);
+  std::string j = d.json(t);
+  CHECK(j.find("13 packets from the network arrived too late") != std::string::npos);
+  CHECK(j.find("Raise Receive latency to 10 ms") != std::string::npos);
+  // An app that missed its deadline; lost network audio; a lost clock leader.
+  c.apps[0].underrun_ticks += 3;
+  c.rx_gaps += 2;
+  c.rx_missing_samples += 96;
+  c.rx_max_age_samples = 0;
+  d.sample(c, cfg, t += 10000);
+  c.state = kStateFreeRun;
+  d.sample(c, cfg, t += 1000);
+  j = d.json(t);
+  CHECK(j.find("REAPER did not deliver its audio in time (3.0 ms of silence sent)") != std::string::npos);
+  CHECK(j.find("2.0 ms of audio from the network never arrived (2 gaps)") != std::string::npos);
+  CHECK(j.find("Lost the Dante clock leader 00:1d:c1:aa:bb:cc") != std::string::npos);
+  CHECK(j.find("REAPER did not keep up") != std::string::npos);
+  CHECK(d.recent_dropouts(t) == 4);
+  c.late_ticks += 50;  // slightly late wake-ups are absorbed by the margin
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 4);
+  c.overdue_ticks += 2;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 5);
+  CHECK(d.report(t).find("[network-late]") != std::string::npos);
+  // Counters that restart from zero (new engine) are not negative deltas.
+  d.engine_started(cfg, t += 1000);
+  EngineCounters fresh;
+  fresh.state = kStateFreeRun;
+  for (int i = 0; i < 5; ++i) d.sample(fresh, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 5);
+  d.reset(t);
+  CHECK(d.recent_dropouts(t) == 0);
 }
 
 TEST(config_legacy_aes67_is_ignored) {

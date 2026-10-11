@@ -65,6 +65,20 @@ class Client {
   // the device count are dropped (tx) or zero-filled (rx). write_tx skips
   // frames before tx_horizon() and returns how many were too late.
   uint32_t write_tx(uint64_t frame, const float* src, uint32_t frames, uint32_t src_channels);
+  // For drivers writing through tx_frame(): report that playback audio up
+  // to media frame `end` is written, and how many frames were dropped as too
+  // late. (write_tx does both itself.) Shown in Virgil's diagnostics.
+  void note_written(uint64_t end) {
+    if (slot_ >= 0) hdr_->clients[slot_].written_until.store(end, std::memory_order_release);
+  }
+  void note_late(uint64_t frames) {
+    if (slot_ >= 0 && frames) hdr_->clients[slot_].late_frames.fetch_add(frames, std::memory_order_relaxed);
+  }
+  // Channel name as shown in Dante Controller, or "" if not published.
+  std::string channel_name(bool tx, uint32_t index) const {
+    return hdr_ && index < (tx ? txch_ : rxch_) ? virgil::channel_name(*hdr_, tx, index) : std::string();
+  }
+  uint32_t names_seq() const { return hdr_ ? hdr_->names_seq.load(std::memory_order_acquire) : 0; }
   void read_rx(uint64_t frame, float* dst, uint32_t frames, uint32_t dst_channels) const;
 
   // Per-frame access for drivers that convert formats on the fly. The pointer

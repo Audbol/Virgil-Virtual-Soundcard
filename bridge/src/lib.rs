@@ -15,7 +15,10 @@ use std::sync::atomic::AtomicUsize;
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 
-use inferno_aoip::device_server::{AtomicSample, DeviceServer, ExternalBufferParameters, Sample, Settings};
+use inferno_aoip::device_server::{
+    current_name, rx_stats, set_name_overrides, set_rename_hook, AtomicSample, DeviceServer,
+    ExternalBufferParameters, Sample, Settings,
+};
 
 #[repr(C)]
 pub struct VgDanteConfig {
@@ -33,6 +36,11 @@ pub struct VgDanteConfig {
     rx_ring_frames: u32,
     mono_ns: Option<extern "C" fn() -> i64>,
     log: Option<extern "C" fn(i32, *const c_char)>,
+    // Channel names (tx_channels / rx_channels entries each, or NULL): a
+    // non-NULL, non-empty entry sets that channel's name, others keep the
+    // name the device saved last time (default "TX n" / "RX n").
+    tx_names: *const *const c_char,
+    rx_names: *const *const c_char,
 }
 
 struct Handle {
@@ -221,6 +229,77 @@ pub unsafe extern "C" fn vg_dante_set_clock_master(id: *const u8) {
     inferno_aoip::device_server::set_clock_master(v);
 }
 
+// ---- channel names ---------------------------------------------------------------
+
+static RENAME_CB: RwLock<Option<extern "C" fn(i32, u32, *const c_char)>> = RwLock::new(None);
+
+fn forward_rename(is_tx: bool, index: usize, name: &str) {
+    if let (Some(cb), Ok(c)) = (*RENAME_CB.read().unwrap(), CString::new(name)) {
+        cb(is_tx as i32, index as u32, c.as_ptr());
+    }
+}
+
+/// Called (from a Dante thread) when a channel is renamed from the network,
+/// e.g. in Dante Controller. NULL removes the callback.
+#[no_mangle]
+pub extern "C" fn vg_dante_set_rename_callback(cb: Option<extern "C" fn(i32, u32, *const c_char)>) {
+    *RENAME_CB.write().unwrap() = cb;
+    set_rename_hook(if cb.is_some() { Some(forward_rename) } else { None });
+}
+
+/// # Safety
+/// `buf` points to `len` writable bytes. Copies the current name of a channel
+/// of the running device (NUL-terminated, truncated); returns 0 if unknown.
+#[no_mangle]
+pub unsafe extern "C" fn vg_dante_channel_name(is_tx: i32, index: u32, buf: *mut c_char, len: u32) -> i32 {
+    if buf.is_null() || len == 0 {
+        return 0;
+    }
+    match current_name(is_tx != 0, index as usize) {
+        Some(n) => {
+            let bytes = n.as_bytes();
+            let k = bytes.len().min(len as usize - 1);
+            std::ptr::copy_nonoverlapping(bytes.as_ptr() as *const c_char, buf, k);
+            *buf.add(k) = 0;
+            1
+        }
+        None => 0,
+    }
+}
+
+// ---- receive statistics ----------------------------------------------------------
+
+#[repr(C)]
+pub struct VgDanteRxStats {
+    packets: u64,
+    late_packets: u64,
+    gaps: u64,
+    missing_samples: u64,
+    max_age_samples: u64,
+}
+
+/// # Safety
+/// `out` points to a writable VgDanteRxStats.
+#[no_mangle]
+pub unsafe extern "C" fn vg_dante_rx_stats(out: *mut VgDanteRxStats) {
+    if let Some(o) = out.as_mut() {
+        let s = rx_stats::take();
+        *o = VgDanteRxStats {
+            packets: s.packets,
+            late_packets: s.late_packets,
+            gaps: s.gaps,
+            missing_samples: s.missing_samples,
+            max_age_samples: s.max_age_samples,
+        };
+    }
+}
+
+unsafe fn names(p: *const *const c_char, n: u32) -> Vec<Option<String>> {
+    (0..n as usize)
+        .map(|i| if p.is_null() { None } else { cstr(*p.add(i)).filter(|s| !s.is_empty()) })
+        .collect()
+}
+
 /// # Safety
 /// `config` must point to a valid VgDanteConfig whose rings outlive the device.
 #[no_mangle]
@@ -262,6 +341,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         return std::ptr::null_mut();
     }
     let name = cstr(c.name).unwrap_or_else(|| "Virgil".into());
+    set_name_overrides(names(c.tx_names, c.tx_channels), names(c.rx_names, c.rx_channels));
 
     let mut cfg = BTreeMap::new();
     cfg.insert("NAME".to_owned(), name.chars().take(31).collect::<String>());

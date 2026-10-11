@@ -104,6 +104,8 @@ bool Client::acquire_tx_slot(const char* name) {
     std::memset(s.name, 0, sizeof s.name);
     if (name) std::strncpy(s.name, name, sizeof s.name - 1);
     s.heartbeat_ns.store(mono_ns(), std::memory_order_relaxed);
+    s.written_until.store(0, std::memory_order_relaxed);
+    s.late_frames.store(0, std::memory_order_relaxed);
     slot_ = int(i);
     tx_ = tx_ring_at(hdr_, ring_, txch_, i);
     std::memset(tx_, 0, size_t(ring_) * txch_ * sizeof(float));
@@ -125,6 +127,8 @@ void Client::release_tx_slot() {
 void Client::set_tx_active(bool on) {
   if (slot_ < 0) return;
   touch();
+  // A (re)started stream has written nothing yet: not late until it has.
+  hdr_->clients[slot_].written_until.store(0, std::memory_order_release);
   hdr_->clients[slot_].active.store(on ? 1 : 0, std::memory_order_release);
 }
 
@@ -145,6 +149,8 @@ uint32_t Client::write_tx(uint64_t frame, const float* src, uint32_t frames,
     const float* s = src + size_t(f) * src_channels;
     for (uint32_t c = 0; c < n; ++c) d[c] = s[c];
   }
+  note_late(skip);
+  if (skip < frames) note_written(frame + frames);
   return skip;
 }
 

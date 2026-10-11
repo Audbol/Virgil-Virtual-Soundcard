@@ -79,7 +79,8 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
           c->notes.push_back("ignoring [tx]/[rx] sections from the old AES67 version: "
                              "route channels in Dante Controller instead");
         noted_flows = true;
-      } else if (section != "device" && section != "ptp" && section != "network") {
+      } else if (section != "device" && section != "ptp" && section != "network" &&
+                 section != "channel_names") {
         return fail("unknown section [" + section + "]");
       }
       continue;
@@ -128,6 +129,15 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "clock") c->clock = lower(val);
       else if (key == "packet_time_us" || key == "sap") legacy();
       else return fail("unknown key '" + key + "'");
+    } else if (section == "channel_names") {
+      // tx1 = Kick, rx12 = Talkback
+      const bool tx = key.rfind("tx", 0) == 0, rx = key.rfind("rx", 0) == 0;
+      uint32_t n = 0;
+      if ((!tx && !rx) || !to_u32(key.substr(2), &n) || n < 1 || n > 1024)
+        return fail("channel names are written tx1 = ... or rx1 = ...");
+      auto& v = tx ? c->tx_names : c->rx_names;
+      if (v.size() < n) v.resize(n);
+      v[n - 1] = val;
     } else if (section == "ptp") {
       if (key == "subdomain") c->ptp_subdomain = val;
       else if (key == "master_capable") { if (!need_bool(&c->ptp_master_capable)) return false; }
@@ -178,6 +188,24 @@ bool validate_config(Config* c, std::string* error) {
   if (c->ptp_subdomain.empty() || c->ptp_subdomain.size() > 15)
     return fail("ptp subdomain must be 1 to 15 characters");
 
+  // Channel names: valid, and unique per direction (Dante subscribes by name).
+  for (int dir = 0; dir < 2; ++dir) {
+    auto& v = dir == 0 ? c->tx_names : c->rx_names;
+    const uint32_t n = dir == 0 ? c->tx_channels : c->rx_channels;
+    if (v.size() > n) v.resize(n);  // names of channels that no longer exist
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (v[i].empty()) continue;
+      const std::string p = channel_name_problem(v[i]);
+      const std::string which = std::string(dir == 0 ? "transmit" : "receive") + " channel " + std::to_string(i + 1);
+      if (!p.empty()) return fail(which + ": " + p);
+      for (size_t j = 0; j < n; ++j) {
+        if (j == i) continue;
+        const std::string other = j < v.size() && !v[j].empty() ? v[j] : default_channel_name(dir == 0, uint32_t(j + 1));
+        if (lower(other) == lower(v[i])) return fail(which + ": the name '" + v[i] + "' is used twice");
+      }
+    }
+  }
+
   if (c->tx_lead_us > 40000) return fail("tx_lead_us must be at most 40000");
   if (c->spin_us >= c->tick_us) return fail("spin_us must be smaller than tick_us");
 
@@ -196,6 +224,46 @@ bool validate_config(Config* c, std::string* error) {
     return fail("ring_frames must be a power of two between " + std::to_string(need) + " and " +
                 std::to_string(kMaxRing));
   return true;
+}
+
+static bool replace_file(const std::string& from, const std::string& to);
+
+// Same one-step replacement as saving from the control panel.
+static bool write_file_atomic(const std::string& path, const std::string& text, std::string* error) {
+  const std::string tmp = path + ".new";
+  {
+    std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+    o << text;
+    o.flush();
+    if (!o) {
+      if (error) *error = "cannot write " + tmp;
+      std::remove(tmp.c_str());
+      return false;
+    }
+  }
+  if (!replace_file(tmp, path)) {
+    if (error) *error = "cannot replace " + path;
+    std::remove(tmp.c_str());
+    return false;
+  }
+  return true;
+}
+
+std::string channel_name_problem(const std::string& name) {
+  if (name.empty()) return "the name is empty";
+  if (name.size() > 31) return "names can be at most 31 characters";
+  if (name.front() == ' ' || name.back() == ' ') return "names cannot start or end with a space";
+  for (char ch : name) {
+    const auto u = uint8_t(ch);
+    if (u < 0x20 || u > 0x7e) return "names may only use letters, digits, spaces and common punctuation";
+    if (ch == '=' || ch == '.' || ch == '@' || ch == '"' || ch == '\\')
+      return std::string("names cannot contain '") + ch + "'";
+  }
+  return "";
+}
+
+std::string default_channel_name(bool tx, uint32_t number) {
+  return std::string(tx ? "TX " : "RX ") + std::to_string(number);
 }
 
 static bool replace_file(const std::string& from, const std::string& to) {
@@ -247,24 +315,58 @@ bool replace_stock_name(const std::string& path, const std::string& name, std::s
     out += line;
   }
   if (!changed) return false;
-  // Same one-step replacement as saving from the control panel.
-  const std::string tmp = path + ".new";
+  return write_file_atomic(path, out, error);
+}
+
+bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,
+                       std::string* error) {
+  std::string text;
   {
-    std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
-    o << out;
-    o.flush();
-    if (!o) {
-      if (error) *error = "cannot write " + tmp;
-      std::remove(tmp.c_str());
-      return false;
+    std::ifstream in(path, std::ios::binary);
+    if (in) {
+      std::stringstream ss;
+      ss << in.rdbuf();
+      text = ss.str();
     }
   }
-  if (!replace_file(tmp, path)) {
-    if (error) *error = "cannot replace " + path;
-    std::remove(tmp.c_str());
-    return false;
+  const std::string key = std::string(tx ? "tx" : "rx") + std::to_string(index + 1);
+  const bool crlf = text.find("\r\n") != std::string::npos;
+  const std::string nl = crlf ? "\r\n" : "\n";
+  const std::string entry = name.empty() ? std::string() : key + " = \"" + name + "\"" + nl;
+  // Find [channel_names] and the key inside it.
+  std::string out, section;
+  bool in_names = false, done = false, have_section = false;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t end = text.find('\n', pos);
+    end = end == std::string::npos ? text.size() : end + 1;
+    std::string line = text.substr(pos, end - pos);
+    pos = end;
+    const std::string t = trim(line);
+    if (!t.empty() && t.front() == '[' && t.back() == ']') {
+      if (in_names && !done) {  // end of the section: add the key there
+        out += entry;
+        done = true;
+      }
+      section = lower(trim(t.substr(1, t.size() - 2)));
+      in_names = section == "channel_names";
+      have_section |= in_names;
+    } else if (in_names && !done) {
+      const size_t eq = t.find('=');
+      if (eq != std::string::npos && lower(trim(t.substr(0, eq))) == key) {
+        out += entry;  // replace (or drop, for an empty name)
+        done = true;
+        continue;
+      }
+    }
+    out += line;
   }
-  return true;
+  if (!done && !entry.empty()) {
+    if (!out.empty() && out.back() != '\n') out += nl;
+    if (!have_section) out += nl + "[channel_names]" + nl;
+    out += entry;
+  }
+  return write_file_atomic(path, out, error);
 }
 
 std::string format_config(const Config& c) {
@@ -292,6 +394,16 @@ std::string format_config(const Config& c) {
   o << "lock_memory = " << (c.lock_memory ? "true" : "false") << "\n";
   o << "\n[ptp]\nsubdomain = " << c.ptp_subdomain << "\n";
   o << "master_capable = " << (c.ptp_master_capable ? "true" : "false") << "\n";
+  bool names = false;
+  for (int dir = 0; dir < 2; ++dir) {
+    const auto& v = dir == 0 ? c.tx_names : c.rx_names;
+    for (size_t i = 0; i < v.size(); ++i) {
+      if (v[i].empty()) continue;
+      if (!names) o << "\n[channel_names]\n";
+      names = true;
+      o << (dir == 0 ? "tx" : "rx") << (i + 1) << " = \"" << v[i] << "\"\n";
+    }
+  }
   return o.str();
 }
 

@@ -19,10 +19,12 @@
 namespace virgil {
 
 constexpr uint32_t kShmMagic = 0x314C4756;  // "VGL1"
-constexpr uint32_t kShmVersion = 1;
+// 2: channel names, per-client delivery counters, 8 KiB header.
+constexpr uint32_t kShmVersion = 2;
 constexpr uint32_t kMaxChannels = 64;
 constexpr uint32_t kMaxTxClients = 8;
-constexpr size_t kShmHeaderBytes = 4096;
+constexpr size_t kShmHeaderBytes = 8192;
+constexpr size_t kChannelNameBytes = 32;  // ASIO's limit, NUL included
 
 #if defined(_WIN32)
 // The service creates a Global section visible to every session; a virgild
@@ -48,6 +50,11 @@ struct alignas(64) ClientSlot {
   std::atomic<uint32_t> active;  // 1 while the owner is producing audio
   std::atomic<int64_t> heartbeat_ns;
   char name[48];
+  // Diagnostics, written by the owner: the media frame up to which it has
+  // written playback audio (0 = nothing yet), and frames it had to drop
+  // because they were already too late for the network.
+  std::atomic<uint64_t> written_until;
+  std::atomic<uint64_t> late_frames;
 };
 
 struct alignas(64) ShmHeader {
@@ -87,6 +94,12 @@ struct alignas(64) ShmHeader {
   std::atomic<int64_t> ptp_offset_ns;
 
   ClientSlot clients[kMaxTxClients];
+
+  // Channel names as shown in Dante Controller (NUL-terminated; may be cut
+  // short, so read with channel_name()). names_seq changes whenever they do.
+  alignas(64) std::atomic<uint32_t> names_seq;
+  char tx_names[kMaxChannels][kChannelNameBytes];
+  char rx_names[kMaxChannels][kChannelNameBytes];
 };
 
 static_assert(sizeof(ShmHeader) <= kShmHeaderBytes, "header too large");
@@ -113,6 +126,13 @@ inline std::string shm_generation_name(const std::string& base, int gen) {
   return gen == 0 ? base : base + "." + std::to_string(gen + 1);
 }
 constexpr int kShmGenerations = 4;
+
+// A channel's name, bounded; "" if unset.
+inline std::string channel_name(const ShmHeader& h, bool tx, uint32_t index) {
+  if (index >= kMaxChannels) return std::string();
+  const char* n = tx ? h.tx_names[index] : h.rx_names[index];
+  return std::string(n, strnlen(n, kChannelNameBytes));
+}
 
 // A client slot's name, bounded (the shared copy may lack its terminator).
 inline std::string slot_name(const ClientSlot& s) {

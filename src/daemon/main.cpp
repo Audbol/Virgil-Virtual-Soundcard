@@ -166,6 +166,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
         ctx.status = "running";
         ctx.error.clear();
         rc = 0;
+        ctx.diag.engine_started(ctx.cfg, virgil::wall_ms());
       } else {
         const std::string err = virgil::last_error_message();
         engine.reset();
@@ -181,7 +182,33 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
     // restart the audio engine rather than staying silent.
     while (!g_quit && !ctx.reload) {
       wait_reload(1000000000LL);
+      if (engine && !ctx.reload) {
+        // Once a second: diagnostics, and channel names changed from the
+        // network (Dante Controller), which the configuration keeps.
+        engine->sync_channel_names();
+        const virgil::Config& ec = engine->config();
+        ctx.diag.sample(engine->counters(), ec, virgil::wall_ms());
+        for (const auto& rn : engine->take_renames()) {
+          const std::string def = virgil::default_channel_name(rn.tx, rn.index + 1);
+          const std::string keep = rn.name == def ? std::string() : rn.name;
+          std::string path, err;
+          {
+            std::lock_guard<std::mutex> l(ctx.mutex);
+            auto& v = rn.tx ? ctx.cfg.tx_names : ctx.cfg.rx_names;
+            if (v.size() <= rn.index) v.resize(rn.index + 1);
+            v[rn.index] = keep;
+            if (ctx.config_path.empty()) ctx.config_path = virgil::default_config_path();
+            path = ctx.config_path;
+          }
+          VIRGIL_LOG_INFO("%s channel %u renamed to \"%s\" from the network", rn.tx ? "transmit" : "receive",
+                          rn.index + 1, rn.name.c_str());
+          if (!virgil::save_channel_name(path, rn.tx, rn.index, keep, &err))
+            VIRGIL_LOG_WARN("could not save the channel name: %s", err.c_str());
+        }
+      }
       if (engine && !engine->dante_healthy() && !g_quit && !ctx.reload) {
+        ctx.diag.note(virgil::Diagnostics::Kind::Service,
+                      "The Dante stack stopped unexpectedly; the audio engine was restarted", virgil::wall_ms());
         VIRGIL_LOG_ERROR("Dante stack stopped unexpectedly; restarting the audio engine");
         wait_reload(2000000000LL);  // do not spin if it keeps failing
         ctx.reload = true;

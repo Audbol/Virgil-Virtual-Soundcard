@@ -49,6 +49,8 @@ struct SocketData<P: ProxyToSamplesBuffer> {
   channels: Vec<Option<Channel<P>>>,
   empty_sinks_vecs: Vec<Vec<RBInput<Sample, P>>>,
   actual_latency_samples: Arc<AtomicI32>,
+  // Virgil patch: where the next packet should start, to count lost audio.
+  next_timestamp: Option<Clock>,
 }
 
 struct SilenceWriter<P: ProxyToSamplesBuffer> {
@@ -118,9 +120,31 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           // fetch it every n packets or use timestamped_socket and kernel-level timestamps instead
 
           // can be wrapping because used only for latency calculation
+          let mut age = None;
           if let Some(now) = clock.wrapping_now_in_timebase(sample_rate.into()) {
             let latency = wrapped_diff(now, timestamp).clamp(0, i32::MAX as _);
             sd.actual_latency_samples.fetch_max(latency as _, Ordering::Relaxed);
+            age = Some(latency as u64);
+          }
+          if write {
+            // Virgil patch: dropout diagnostics (see rx_stats.rs).
+            super::rx_stats::packet(age, sd.latency_samples);
+            let stride = sd.channels.len().max(1) * sd.bytes_per_sample;
+            let samples = (recv_size - 9) / stride;
+            if let Some(expected) = sd.next_timestamp {
+              let d = wrapped_diff(timestamp, expected);
+              // Ignore reordering and restarts of the sender (> 1 s).
+              if d > 0 && d < sample_rate as ClockDiff {
+                super::rx_stats::gap(d as u64);
+              }
+              if d < 0 && d > -(sample_rate as ClockDiff) {
+                // Older than expected: a reordered packet; keep the timeline.
+              } else {
+                sd.next_timestamp = Some(timestamp.wrapping_add(samples));
+              }
+            } else {
+              sd.next_timestamp = Some(timestamp.wrapping_add(samples));
+            }
           }
 
           if write {
@@ -568,6 +592,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
           channels: (0..channels_count).map(|_| None).collect(),
           empty_sinks_vecs,
           actual_latency_samples: als,
+          next_timestamp: None,
         },
       })
       .await

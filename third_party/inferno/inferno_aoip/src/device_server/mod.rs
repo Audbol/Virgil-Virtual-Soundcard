@@ -34,6 +34,7 @@ pub(crate) mod channels_subscriber;
 pub(crate) mod flows_rx;
 pub(crate) mod flows_tx;
 mod peaks;
+pub mod rx_stats;
 pub(crate) mod samples_collector;
 pub(crate) mod samples_utils;
 pub(crate) mod saved_settings;
@@ -45,6 +46,7 @@ pub use crate::media_clock::{MediaClock, RealTimeClockReceiver};
 pub use crate::ring_buffer::{new_owned, ExternalBufferParameters, PositionReportDestination, RBInput};
 pub use settings::Settings;
 pub use info_mcast_server::{set_clock_master, set_product_version};
+pub use saved_settings::{current_name, set_name_overrides, set_rename_hook, RenameHook};
 pub type AtomicSample = atomic::Atomic<Sample>;
 
 use channels_subscriber::{ChannelsBuffering, ChannelsSubscriber, ExternalBuffering, OwnedBuffering};

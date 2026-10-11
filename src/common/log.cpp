@@ -2,6 +2,7 @@
 
 #include <cstdarg>
 #include <ctime>
+#include <deque>
 #include <mutex>
 
 namespace virgil {
@@ -11,7 +12,15 @@ int g_log_level = kLogInfo;
 namespace {
 std::mutex g_err_mutex;
 std::string g_last_error;
+std::mutex g_recent_mutex;
+std::deque<std::string> g_recent;  // for diagnostics reports
+constexpr size_t kRecentLines = 400;
 }  // namespace
+
+std::vector<std::string> recent_log_lines() {
+  std::lock_guard<std::mutex> l(g_recent_mutex);
+  return std::vector<std::string>(g_recent.begin(), g_recent.end());
+}
 
 std::string last_error_message() {
   std::lock_guard<std::mutex> l(g_err_mutex);
@@ -50,8 +59,14 @@ void log_message(int level, const char* fmt, ...) {
   localtime_r(&t, &tmv);
 #endif
   std::strftime(ts, sizeof ts, "%H:%M:%S", &tmv);
+  const char* tag = tags[level < 0 ? 0 : level > 3 ? 3 : level];
+  {
+    std::lock_guard<std::mutex> l(g_recent_mutex);
+    g_recent.push_back(std::string(ts) + " [" + tag + "] " + msg);
+    if (g_recent.size() > kRecentLines) g_recent.pop_front();
+  }
   std::lock_guard<std::mutex> l(m);
-  std::fprintf(stderr, "%s [%s] %s\n", ts, tags[level < 0 ? 0 : level > 3 ? 3 : level], msg);
+  std::fprintf(stderr, "%s [%s] %s\n", ts, tag, msg);
   // stderr may be redirected to a (buffered) file: never keep lines back,
   // or the last moments before a problem are missing from the log.
   std::fflush(stderr);

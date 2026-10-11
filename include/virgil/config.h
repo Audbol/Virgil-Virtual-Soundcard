@@ -29,6 +29,12 @@ struct Config {
 
   uint32_t control_port = 8480;       // local web control panel; 0 = off
 
+  // Channel names ([channel_names] tx1 = Kick ...); "" = the device's own
+  // ("TX n" / "RX n", or a name given in Dante Controller). Index 0 = channel 1.
+  std::vector<std::string> tx_names, rx_names;
+  std::string tx_name(uint32_t i) const { return i < tx_names.size() ? tx_names[i] : std::string(); }
+  std::string rx_name(uint32_t i) const { return i < rx_names.size() ? rx_names[i] : std::string(); }
+
   // Messages about ignored legacy settings, for the log.
   std::vector<std::string> notes;
 
@@ -53,6 +59,15 @@ bool parse_config(const std::string& text, Config* out, std::string* error);
 bool load_config(const std::string& path, Config* out, std::string* error);
 // Range checks and derived defaults. Returns false with a message if unusable.
 bool validate_config(Config* c, std::string* error);
+// Why `name` cannot be a channel name, or "" if it can.
+std::string channel_name_problem(const std::string& name);
+// Default name of a channel (1-based), as the device shows it unnamed.
+std::string default_channel_name(bool tx, uint32_t number);
+// Set (or with an empty name, remove) one channel name in the file at `path`,
+// keeping everything else. Used when a channel is renamed in Dante Controller.
+bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,
+                       std::string* error);
+
 // Dante names must be unique on the network, and every installation starts
 // out as "Virgil": that stock name becomes Virgil-<host name>.
 extern const char* const kStockDeviceName;

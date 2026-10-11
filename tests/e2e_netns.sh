@@ -51,7 +51,7 @@ tx_channels = 8
 rx_channels = 8
 latency_us = ${LAT_US:-4000}
 tx_latency_us = ${TXLAT_US:-4000}
-control_port = 0
+control_port = ${CONTROL_PORT:-8480}
 lock_memory = false
 [ptp]
 master_capable = $3
@@ -130,6 +130,16 @@ CONF
   # Channel 1 is routed A -> B; expect the 440 Hz tone at -6 dBFS (RMS 0.354).
   sox "$work/rec.wav" -n remix 1 trim 1.5 2 stat 2>&1 | grep -E "RMS +amplitude|Rough +frequency"
 fi
+
+echo "--- diagnostics on B (receiver); on a quiet machine there should be none"
+diag=$(ip netns exec vg-b curl -s http://127.0.0.1:8480/api/diagnostics || true)
+echo "$diag" | python3 -c '
+import json, sys
+d = json.load(sys.stdin)
+for e in reversed(d["events"]):
+    print("  [%s] %s" % (e["kind"], e["text"]))
+print("  dropouts in the last hour:", d["dropouts_last_hour"])
+' || status=1
 
 echo "--- clock status as Dante Controller asks for it"
 ip netns exec vg-c python3 "$(dirname "$0")/clock_status_probe.py" 10.77.0.1 10.77.0.3 || status=1

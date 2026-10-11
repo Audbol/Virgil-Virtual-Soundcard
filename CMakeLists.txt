@@ -77,7 +77,7 @@ if(WIN32)
   set(VIRGIL_ICON_SOURCES ${CMAKE_BINARY_DIR}/generated/virgil_icon.rc)
 endif()
 
-add_executable(virgild src/daemon/main.cpp src/daemon/control.cpp src/daemon/http_server.cpp
+add_executable(virgild src/daemon/main.cpp src/daemon/control.cpp src/daemon/diagnostics.cpp src/daemon/http_server.cpp
                     ${VIRGIL_UI_HEADER} ${VIRGIL_ICON_SOURCES})
 target_include_directories(virgild PRIVATE ${CMAKE_BINARY_DIR}/generated)
 target_compile_definitions(virgild PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")

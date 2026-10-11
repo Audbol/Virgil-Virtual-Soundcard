@@ -26,7 +26,19 @@ typedef struct VgDanteConfig {
   int64_t (*mono_ns)(void);
   // Log sink (level 0 error .. 3 debug); may be NULL.
   void (*log)(int level, const char* message);
+  // Channel names, tx_channels / rx_channels entries (or NULL). A non-empty
+  // entry sets the name; others keep the device's saved name ("TX n" / "RX n").
+  const char* const* tx_names;
+  const char* const* rx_names;
 } VgDanteConfig;
+
+typedef struct VgDanteRxStats {
+  uint64_t packets;          // audio packets received
+  uint64_t late_packets;     // arrived after their receive latency (too late to play)
+  uint64_t gaps;             // holes in a stream (lost packets)
+  uint64_t missing_samples;  // samples per channel that never arrived
+  uint64_t max_age_samples;  // oldest packet on arrival since the last call
+} VgDanteRxStats;
 
 // Starts the Dante device. Returns an opaque handle, or NULL on failure.
 void* vg_dante_start(const VgDanteConfig* config);
@@ -40,6 +52,14 @@ void vg_dante_set_clock(int64_t last_sync, int64_t shift, double freq_scale);
 // The PTP clock leader's EUI-64 identity (8 bytes), or NULL when there is
 // none. Dante Controller shows it (and the sync state) in its clock status.
 void vg_dante_set_clock_master(const uint8_t* id);
+// Called from a Dante thread when a channel is renamed from the network
+// (Dante Controller): is_tx, 0-based index, new name. NULL removes it.
+void vg_dante_set_rename_callback(void (*cb)(int is_tx, uint32_t index, const char* name));
+// Current name of a channel of the running device into buf (len bytes).
+// Returns 0 if the device has not published its names yet.
+int vg_dante_channel_name(int is_tx, uint32_t index, char* buf, uint32_t len);
+// Receive counters since the device started (max_age resets per call).
+void vg_dante_rx_stats(VgDanteRxStats* out);
 // Stops the device and releases the rings.
 // 1 while running normally, 0 after a crash of any of its threads.
 int vg_dante_healthy(void* handle);

@@ -30,6 +30,10 @@ inline void peak_max(std::atomic<uint32_t>& a, float v) {
 
 extern "C" int64_t bridge_mono_ns() { return mono_ns(); }
 
+// The running engine, for the rename callback (one engine at a time).
+std::mutex g_engine_mutex;
+Engine* g_engine = nullptr;
+
 extern "C" void bridge_log(int level, const char* msg) {
   log_message(level < 0 ? 0 : level > 3 ? 3 : level, "%s", msg);
 }
@@ -181,6 +185,17 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.rx_ring_frames = dring_;
     dc.mono_ns = &bridge_mono_ns;
     dc.log = &bridge_log;
+    // Named channels get their names; the others keep the device's own.
+    std::vector<const char*> txn(cfg_.tx_channels), rxn(cfg_.rx_channels);
+    for (uint32_t i = 0; i < cfg_.tx_channels; ++i) txn[i] = i < cfg_.tx_names.size() ? cfg_.tx_names[i].c_str() : nullptr;
+    for (uint32_t i = 0; i < cfg_.rx_channels; ++i) rxn[i] = i < cfg_.rx_names.size() ? cfg_.rx_names[i].c_str() : nullptr;
+    dc.tx_names = txn.data();
+    dc.rx_names = rxn.data();
+    {
+      std::lock_guard<std::mutex> l(g_engine_mutex);
+      g_engine = this;
+    }
+    vg_dante_set_rename_callback(&Engine::on_rename);
     dante_ = vg_dante_start(&dc);
     if (!dante_) {
       const char* why = vg_dante_last_error();
@@ -196,6 +211,19 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
       return false;
     }
   }
+
+  {
+    // Until the device publishes its names: the configured ones, or defaults.
+    std::lock_guard<std::mutex> l(names_mutex_);
+    tx_names_.resize(cfg_.tx_channels);
+    rx_names_.resize(cfg_.rx_channels);
+    for (uint32_t i = 0; i < cfg_.tx_channels; ++i)
+      tx_names_[i] = cfg_.tx_name(i).empty() ? default_channel_name(true, i + 1) : cfg_.tx_name(i);
+    for (uint32_t i = 0; i < cfg_.rx_channels; ++i)
+      rx_names_[i] = cfg_.rx_name(i).empty() ? default_channel_name(false, i + 1) : cfg_.rx_name(i);
+    publish_names_locked();
+  }
+  sync_channel_names();
 
   running_ = true;
   hdr_->state.store(clock_->state(), std::memory_order_release);
@@ -229,6 +257,13 @@ void Engine::stop() {
     return;
   }
   if (tick_thread_.joinable()) tick_thread_.join();
+  {
+    std::lock_guard<std::mutex> l(g_engine_mutex);
+    if (g_engine == this) {
+      vg_dante_set_rename_callback(nullptr);
+      g_engine = nullptr;
+    }
+  }
   if (dante_) {
     vg_dante_set_clock_master(nullptr);
     reported_master_ = false;
@@ -276,6 +311,7 @@ void Engine::tick_loop() {
   float* rx = rx_ring_at(hdr_, ring, txch);
   const int64_t spin = int64_t(cfg_.spin_us) * 1000;
   const int64_t resync_ns = std::max<int64_t>(50000000, 4 * period_ns);
+  const int64_t overdue_ns = std::max<int64_t>(period_ns, int64_t(cfg_.tx_lead_frames()) * 1000000000LL / rate);
 
   // A new engine (reload) may run on a different timeline than the one
   // connected drivers were following: tell them to realign.
@@ -293,14 +329,19 @@ void Engine::tick_loop() {
       // Clock stepped (PTP lock, master change) or we were descheduled for a
       // long time: realign instead of bursting or stalling.
       hdr_->clock_steps.fetch_add(1, std::memory_order_relaxed);
+      resyncs_.fetch_add(1, std::memory_order_relaxed);
       next = (ptp_ns_to_frames(m.ptp_at(now), rate) / P + 1) * P;
       clear_rings();
       std::fill(drx_.begin(), drx_.end(), 0);
       continue;
     }
     sleep_until_ns(deadline, spin);
-    if (mono_ns() - deadline > period_ns / 2)
-      hdr_->late_ticks.fetch_add(1, std::memory_order_relaxed);
+    {
+      // Late by more than the drivers' margin: their audio missed the tick.
+      const int64_t late = mono_ns() - deadline;
+      if (late > period_ns / 2) hdr_->late_ticks.fetch_add(1, std::memory_order_relaxed);
+      if (late > overdue_ns) overdue_ticks_.fetch_add(1, std::memory_order_relaxed);
+    }
 
     ClockAnchor a;
     a.host_ns = deadline;
@@ -310,7 +351,14 @@ void Engine::tick_loop() {
     hdr_->now_frames.store(next, std::memory_order_release);
     hdr_->heartbeat_ns.store(mono_ns(), std::memory_order_release);
     hdr_->state.store(clock_->state(), std::memory_order_relaxed);
-    hdr_->ptp_offset_ns.store(clock_->last_offset_ns(), std::memory_order_relaxed);
+    const int64_t off = clock_->last_offset_ns();
+    hdr_->ptp_offset_ns.store(off, std::memory_order_relaxed);
+    {
+      const int64_t a = off < 0 ? -off : off;
+      int64_t cur = max_offset_ns_.load(std::memory_order_relaxed);
+      while (a > cur && !max_offset_ns_.compare_exchange_weak(cur, a, std::memory_order_relaxed)) {
+      }
+    }
 
     // --- transmit: mix clients into the Dante ring ---
     if (txch) {
@@ -321,6 +369,17 @@ void Engine::tick_loop() {
         if (s.pid.load(std::memory_order_acquire) == 0) continue;
         float* cring = tx_ring_at(hdr_, ring, txch, i);
         const bool active = s.active.load(std::memory_order_acquire) != 0;
+        // An app that has written before but not this tick's audio missed
+        // its deadline: the network gets silence from it.
+        const uint32_t pid = s.pid.load(std::memory_order_relaxed);
+        if (underrun_pid_[i] != pid) {
+          underrun_pid_[i] = pid;
+          underrun_ticks_[i].store(0, std::memory_order_relaxed);
+        }
+        if (active) {
+          const uint64_t w = s.written_until.load(std::memory_order_acquire);
+          if (w != 0 && w < start + P) underrun_ticks_[i].fetch_add(1, std::memory_order_relaxed);
+        }
         for (uint32_t f = 0; f < P; ++f) {
           float* src = cring + size_t((start + f) & mask) * txch;
           if (active) {
@@ -434,6 +493,91 @@ void Engine::take_peaks(std::vector<float>* tx, std::vector<float>* rx) {
   };
   drain(tx_peak_, cfg_.tx_channels, tx);
   drain(rx_peak_, cfg_.rx_channels, rx);
+}
+
+void Engine::on_rename(int is_tx, uint32_t index, const char* name) {
+  std::lock_guard<std::mutex> l(g_engine_mutex);
+  if (!g_engine || !name) return;
+  std::lock_guard<std::mutex> n(g_engine->names_mutex_);
+  g_engine->renames_.push_back({is_tx != 0, index, name});
+}
+
+std::vector<Engine::Rename> Engine::take_renames() {
+  std::lock_guard<std::mutex> l(names_mutex_);
+  std::vector<Rename> r;
+  r.swap(renames_);
+  return r;
+}
+
+std::vector<std::string> Engine::channel_names(bool tx) const {
+  std::lock_guard<std::mutex> l(names_mutex_);
+  return tx ? tx_names_ : rx_names_;
+}
+
+void Engine::sync_channel_names() {
+  if (!dante_ || !hdr_) return;
+  std::lock_guard<std::mutex> l(names_mutex_);
+  bool changed = false;
+  char buf[64];
+  for (int dir = 0; dir < 2; ++dir) {
+    auto& v = dir == 0 ? tx_names_ : rx_names_;
+    for (uint32_t i = 0; i < v.size(); ++i) {
+      if (!vg_dante_channel_name(dir == 0, i, buf, sizeof buf)) continue;
+      if (v[i] != buf) {
+        v[i] = buf;
+        changed = true;
+      }
+    }
+  }
+  if (changed) publish_names_locked();
+}
+
+// Names for the drivers (ASIO channel names, Core Audio element names).
+void Engine::publish_names_locked() {
+  if (!hdr_) return;
+  for (int dir = 0; dir < 2; ++dir) {
+    const auto& v = dir == 0 ? tx_names_ : rx_names_;
+    auto& dst = dir == 0 ? hdr_->tx_names : hdr_->rx_names;
+    for (uint32_t i = 0; i < kMaxChannels; ++i) {
+      std::memset(dst[i], 0, kChannelNameBytes);
+      if (i < v.size()) std::strncpy(dst[i], v[i].c_str(), kChannelNameBytes - 1);
+    }
+  }
+  hdr_->names_seq.fetch_add(1, std::memory_order_release);
+}
+
+EngineCounters Engine::counters() {
+  EngineCounters c;
+  if (!hdr_) return c;
+  c.state = hdr_->state.load(std::memory_order_relaxed);
+  c.grandmaster = clock_ ? clock_->grandmaster() : std::string();
+  c.late_ticks = hdr_->late_ticks.load(std::memory_order_relaxed);
+  c.overdue_ticks = overdue_ticks_.load(std::memory_order_relaxed);
+  c.resyncs = resyncs_.load(std::memory_order_relaxed);
+  c.max_offset_ns = max_offset_ns_.exchange(0, std::memory_order_relaxed);
+  if (dante_) {
+    VgDanteRxStats rs{};
+    vg_dante_rx_stats(&rs);
+    c.rx_packets = rs.packets;
+    c.rx_late_packets = rs.late_packets;
+    c.rx_gaps = rs.gaps;
+    c.rx_missing_samples = rs.missing_samples;
+    c.rx_max_age_samples = rs.max_age_samples;
+  }
+  for (uint32_t i = 0; i < kMaxTxClients; ++i) {
+    const ClientSlot& s = hdr_->clients[i];
+    const uint32_t pid = s.pid.load(std::memory_order_acquire);
+    if (!pid) continue;
+    EngineCounters::App a;
+    a.slot = i;
+    a.pid = pid;
+    a.name = slot_name(s);
+    a.active = s.active.load(std::memory_order_relaxed) != 0;
+    a.underrun_ticks = underrun_ticks_[i].load(std::memory_order_relaxed);
+    a.late_frames = s.late_frames.load(std::memory_order_relaxed);
+    c.apps.push_back(a);
+  }
+  return c;
 }
 
 std::string Engine::status_line() const {

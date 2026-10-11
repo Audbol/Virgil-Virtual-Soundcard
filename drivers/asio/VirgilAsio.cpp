@@ -15,6 +15,7 @@
 #include <objbase.h>
 #include <olectl.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
@@ -366,6 +367,7 @@ class VirgilAsio : public IASIO {
       // are dropped rather than left to replay a ring later.
       const uint64_t out_start = t + out_off;
       const uint64_t horizon = client_.tx_horizon();
+      if (out_start < horizon) client_.note_late(std::min<uint64_t>(B, horizon - out_start));
       for (uint32_t f = 0; f < B; ++f) {
         if (out_start + f < horizon) continue;
         float* dst = client_.tx_frame(out_start + f);
@@ -374,6 +376,7 @@ class VirgilAsio : public IASIO {
           if (uint32_t(c.channel) < txch)
             dst[c.channel] = virgil::s32_to_float(c.data[size_t(idx) * B + f]);
       }
+      client_.note_written(out_start + B);
       client_.touch();
       t += B;
       ++k;

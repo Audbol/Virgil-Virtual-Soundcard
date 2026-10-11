@@ -235,7 +235,9 @@ impl Settings {
     self.self_info.rx_channels = (1..=count)
       .map(|id| Channel {
         factory_name: format!("{id:02}"),
-        friendly_name: Arc::new(RwLock::new(format!("RX {id}"))),
+        friendly_name: Arc::new(RwLock::new(
+          super::saved_settings::name_override(false, id - 1).unwrap_or_else(|| format!("RX {id}")),
+        )),
       })
       .collect();
   }
@@ -243,7 +245,9 @@ impl Settings {
     self.self_info.tx_channels = (1..=count)
       .map(|id| Channel {
         factory_name: format!("{id:02}"),
-        friendly_name: Arc::new(RwLock::new(format!("TX {id}"))),
+        friendly_name: Arc::new(RwLock::new(
+          super::saved_settings::name_override(true, id - 1).unwrap_or_else(|| format!("TX {id}")),
+        )),
       })
       .collect();
   }

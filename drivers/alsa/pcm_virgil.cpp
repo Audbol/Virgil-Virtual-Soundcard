@@ -150,6 +150,7 @@ int virgil_start(snd_pcm_ioplug_t* io) {
       std::memcpy(p->client.tx_frame(p->start_frame + k),
                   &p->prefill[size_t(k % io->buffer_size) * ch], sizeof(float) * ch);
     p->client.set_tx_active(true);
+    p->client.note_written(p->start_frame + p->appl);
   } else {
     p->start_frame = now - p->client.rx_latency_frames();
   }
@@ -181,6 +182,7 @@ snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_ar
 
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
     const uint64_t too_late = p->running ? p->client.tx_horizon() : 0;
+    uint64_t late = 0;
     for (snd_pcm_uframes_t f = 0; f < size; ++f) {
       const uint64_t k = p->appl + f;
       float* dst;
@@ -189,11 +191,18 @@ snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_ar
       } else {
         const uint64_t media = p->start_frame + k;
         // Never write behind the daemon: the slot would replay a ring later.
-        if (media < too_late) continue;
+        if (media < too_late) {
+          ++late;
+          continue;
+        }
         dst = p->client.tx_frame(media);
       }
       for (uint32_t c = 0; c < n; ++c) dst[c] = load_sample(areas[c], offset + f, io->format);
       for (uint32_t c = n; c < ch; ++c) dst[c] = 0.f;
+    }
+    if (p->running) {
+      p->client.note_late(late);
+      p->client.note_written(p->start_frame + p->appl + size);
     }
   } else {
     for (snd_pcm_uframes_t f = 0; f < size; ++f) {

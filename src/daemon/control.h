@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "virgil/config.h"
+#include "diagnostics.h"
 #include "http_server.h"
 
 namespace virgil {
@@ -26,6 +27,9 @@ struct DaemonContext {
   // Command-line options that override the file; re-applied after a reload.
   std::function<void(Config&)> overrides;
 
+  // Dropout diagnostics (has its own lock).
+  Diagnostics diag;
+
   // Meter cache so several open panels see the same peaks.
   int64_t meters_ns = 0;
   std::vector<float> tx_peak, rx_peak;
@@ -43,11 +47,15 @@ class ControlServer {
   HttpResponse interfaces_json();
   HttpResponse get_config();
   HttpResponse save_config(const HttpRequest& r);
+  HttpResponse diagnostics_report();
 
   DaemonContext* ctx_;
   HttpServer http_;
   uint16_t port_ = 0;
 };
+
+// Wall clock in ms since the Unix epoch (diagnostics timestamps).
+int64_t wall_ms();
 
 // The configuration file location used by installers on this OS.
 std::string default_config_path();

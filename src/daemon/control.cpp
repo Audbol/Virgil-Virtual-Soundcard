@@ -1,5 +1,6 @@
 #include "control.h"
 
+#include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <fstream>
@@ -9,6 +10,7 @@
 #include "virgil/log.h"
 #include "virgil/net.h"
 #include "virgil/platform.h"
+#include "json.h"
 #include "ui_html.h"  // generated from src/daemon/ui/index.html
 
 #if defined(_WIN32)
@@ -18,6 +20,7 @@
 #undef interface  // objbase.h macro; clashes with Config::interface
 #else
 #include <sys/stat.h>
+#include <sys/utsname.h>
 #include <unistd.h>
 #endif
 
@@ -26,6 +29,11 @@
 #endif
 
 namespace virgil {
+
+int64_t wall_ms() {
+  return std::chrono::duration_cast<std::chrono::milliseconds>(std::chrono::system_clock::now().time_since_epoch())
+      .count();
+}
 
 std::string default_config_path() {
 #if defined(_WIN32)
@@ -39,66 +47,6 @@ std::string default_config_path() {
 }
 
 namespace {
-
-// ---- tiny JSON writer -------------------------------------------------------
-// Values are written in order; `comma_` says whether the next key/value in
-// the current container needs a separator.
-class Json {
- public:
-  Json& begin_obj() { pre(); out_ += '{'; comma_ = false; return *this; }
-  Json& end_obj() { out_ += '}'; comma_ = true; return *this; }
-  Json& begin_arr() { pre(); out_ += '['; comma_ = false; return *this; }
-  Json& end_arr() { out_ += ']'; comma_ = true; return *this; }
-  Json& key(const char* k) { pre(); quote(k); out_ += ':'; comma_ = false; return *this; }
-
-  Json& v(const std::string& s) { pre(); quote(s); comma_ = true; return *this; }
-  Json& v(double d) {
-    pre();
-    char b[32];
-    std::snprintf(b, sizeof b, "%.6g", std::isfinite(d) ? d : 0.0);
-    out_ += b;
-    comma_ = true;
-    return *this;
-  }
-  Json& v(unsigned long long u) { pre(); out_ += std::to_string(u); comma_ = true; return *this; }
-  Json& vb(bool b) { pre(); out_ += b ? "true" : "false"; comma_ = true; return *this; }
-
-  Json& kv(const char* k, const std::string& s) { return key(k).v(s); }
-  Json& kv(const char* k, const char* s) { return key(k).v(std::string(s)); }
-  Json& kv(const char* k, double d) { return key(k).v(d); }
-  Json& kv(const char* k, unsigned long long u) { return key(k).v(u); }
-  Json& kv(const char* k, uint32_t u) { return key(k).v((unsigned long long)u); }
-  Json& kvb(const char* k, bool b) { return key(k).vb(b); }
-  std::string take() { return std::move(out_); }
-
- private:
-  void pre() {
-    if (comma_) out_ += ',';
-  }
-  void quote(const std::string& s) {
-    out_ += '"';
-    for (unsigned char c : s) {
-      switch (c) {
-        case '"': out_ += "\\\""; break;
-        case '\\': out_ += "\\\\"; break;
-        case '\n': out_ += "\\n"; break;
-        case '\r': out_ += "\\r"; break;
-        case '\t': out_ += "\\t"; break;
-        default:
-          if (c < 0x20) {
-            char b[8];
-            std::snprintf(b, sizeof b, "\\u%04x", c);
-            out_ += b;
-          } else {
-            out_ += char(c);
-          }
-      }
-    }
-    out_ += '"';
-  }
-  std::string out_;
-  bool comma_ = false;
-};
 
 HttpResponse json_error(int status, const std::string& msg) {
   Json j;
@@ -162,6 +110,9 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
     if (r.path == "/api/status") return status_json();
     if (r.path == "/api/interfaces") return interfaces_json();
     if (r.path == "/api/config") return get_config();
+    if (r.path == "/api/diagnostics")
+      return {200, "application/json", ctx_->diag.json(wall_ms()), ""};
+    if (r.path == "/api/diagnostics/report") return diagnostics_report();
     return json_error(404, "not found");
   }
 
@@ -174,6 +125,12 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
     if (!origin.empty() && origin != "http://" + host)
       return json_error(403, "cross-origin request refused");
     if (r.path == "/api/config") return save_config(r);
+    if (r.path == "/api/diagnostics/reset") {
+      ctx_->diag.reset(wall_ms());
+      Json j;
+      j.begin_obj().kvb("ok", true).end_obj();
+      return {200, "application/json", j.take(), ""};
+    }
     if (r.path == "/api/restart") {
       ctx_->reload = true;
       Json j;
@@ -209,6 +166,21 @@ HttpResponse ControlServer::status_json() {
   j.kv("tx_latency_us", c.tx_latency_us);
   j.kvb("dante", e ? e->dante_running() : false);
   j.end_obj();
+
+  // Channel names as on the network (Dante Controller, the drivers).
+  for (int dir = 0; dir < 2; ++dir) {
+    const bool tx = dir == 0;
+    const uint32_t n = tx ? c.tx_channels : c.rx_channels;
+    std::vector<std::string> names = e ? e->channel_names(tx) : std::vector<std::string>();
+    j.key(tx ? "tx_names" : "rx_names").begin_arr();
+    for (uint32_t i = 0; i < n; ++i) {
+      std::string v = i < names.size() ? names[i] : (tx ? c.tx_name(i) : c.rx_name(i));
+      if (v.empty()) v = default_channel_name(tx, i + 1);
+      j.v(v);
+    }
+    j.end_arr();
+  }
+  j.kv("dropouts_last_hour", (unsigned long long)ctx_->diag.recent_dropouts(wall_ms()));
 
   j.key("clock").begin_obj();
   j.kv("state", h ? state_name(h->state.load()) : "stopped");
@@ -265,6 +237,73 @@ HttpResponse ControlServer::interfaces_json() {
   }
   j.end_arr();
   return {200, "application/json", j.take(), ""};
+}
+
+// Plain-text report to attach to a bug report or send to whoever looks
+// after the system: versions, setup, dropout events and the recent log.
+HttpResponse ControlServer::diagnostics_report() {
+  const int64_t now = wall_ms();
+  std::string r = "Virgil diagnostics report\n=========================\n";
+  r += std::string("Virgil ") + VIRGIL_VERSION + " on ";
+#if defined(_WIN32)
+  r += "Windows";
+#elif defined(__APPLE__)
+  r += "macOS";
+#else
+  r += "Linux";
+#endif
+#if !defined(_WIN32)
+  struct utsname u;
+  if (uname(&u) == 0) r += std::string(" (") + u.sysname + " " + u.release + " " + u.machine + ")";
+#endif
+  r += ", computer " + host_name() + "\n";
+  std::string cfg_path;
+  {
+    std::lock_guard<std::mutex> l(ctx_->mutex);
+    const Config& c = ctx_->cfg;
+    Engine* e = ctx_->engine;
+    ShmHeader* h = e ? e->header() : nullptr;
+    cfg_path = ctx_->config_path;
+    char b[512];
+    std::snprintf(b, sizeof b,
+                  "\nDevice  \"%s\" on %s, %u Hz, %u out / %u in, receive latency %.1f ms, transmit latency "
+                  "%.1f ms\nService %s%s%s\n",
+                  c.device_name.c_str(), e ? ipv4_to_string(e->interface_address()).c_str() : "-", c.sample_rate,
+                  c.tx_channels, c.rx_channels, c.latency_us / 1000.0, c.tx_latency_us / 1000.0,
+                  ctx_->status.c_str(), ctx_->error.empty() ? "" : ": ", ctx_->error.c_str());
+    r += b;
+    if (h) {
+      std::snprintf(b, sizeof b, "Clock   %s, leader %s, offset %+.1f us\n", state_name(h->state.load()),
+                    e->grandmaster().empty() ? "-" : e->grandmaster().c_str(), h->ptp_offset_ns.load() / 1000.0);
+      r += b;
+      for (uint32_t i = 0; i < kMaxTxClients; ++i) {
+        const ClientSlot& s = h->clients[i];
+        if (!s.pid.load()) continue;
+        std::snprintf(b, sizeof b, "App     %s (process %u)%s\n", slot_name(s).c_str(), s.pid.load(),
+                      s.active.load() ? ", playing" : "");
+        r += b;
+      }
+    }
+  }
+  r += "\nNetwork adapters\n";
+  for (const auto& i : list_interfaces())
+    r += "  " + i.name + "  " + ipv4_to_string(i.addr) + (i.loopback ? "  loopback" : "") +
+         (i.virtual_adapter ? "  virtual" : "") + "\n";
+  r += "\n" + ctx_->diag.report(now);
+  if (!cfg_path.empty()) {
+    std::ifstream f(cfg_path);
+    if (f) {
+      std::stringstream ss;
+      ss << f.rdbuf();
+      r += "\nConfiguration (" + cfg_path + ")\n" + ss.str();
+      if (!r.empty() && r.back() != '\n') r += "\n";
+    }
+  }
+  r += "\nRecent log\n";
+  for (const auto& line : recent_log_lines()) r += "  " + line + "\n";
+  HttpResponse resp{200, "text/plain; charset=utf-8", r, ""};
+  resp.extra_headers = "Content-Disposition: attachment; filename=\"virgil-report.txt\"\r\n";
+  return resp;
 }
 
 HttpResponse ControlServer::get_config() {
