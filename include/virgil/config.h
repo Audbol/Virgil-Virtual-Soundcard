@@ -32,6 +32,9 @@ struct Config {
   // Dante software on this computer, e.g. Dante Controller, already uses
   // them), "standard", or the first of four alternative ports.
   std::string ports = "auto";
+  // false: Virgil is stopped (Stop in Virgil Control): no audio engine, off
+  // the Dante network, all its ports free, until started again.
+  bool enabled = true;
 
   // Channel names ([channel_names] tx1 = Kick ...); "" = the device's own
   // ("TX n" / "RX n", or a name given in Dante Controller). Index 0 = channel 1.
@@ -67,6 +70,10 @@ bool validate_config(Config* c, std::string* error);
 std::string channel_name_problem(const std::string& name);
 // Default name of a channel (1-based), as the device shows it unnamed.
 std::string default_channel_name(bool tx, uint32_t number);
+// Set (or with an empty value, remove) `key` in `[section]` of the file at
+// `path`, keeping everything else (comments, layout, other keys).
+bool set_config_value(const std::string& path, const std::string& section, const std::string& key,
+                      const std::string& value, std::string* error);
 // Set (or with an empty name, remove) one channel name in the file at `path`,
 // keeping everything else. Used when a channel is renamed in Dante Controller.
 bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,

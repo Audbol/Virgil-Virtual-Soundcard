@@ -131,6 +131,8 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
       j.begin_obj().kvb("ok", true).end_obj();
       return {200, "application/json", j.take(), ""};
     }
+    if (r.path == "/api/stop") return set_running(false);
+    if (r.path == "/api/start") return set_running(true);
     if (r.path == "/api/restart") {
       ctx_->reload = true;
       Json j;
@@ -165,6 +167,7 @@ HttpResponse ControlServer::status_json() {
   j.kv("latency_us", c.latency_us);
   j.kv("tx_latency_us", c.tx_latency_us);
   j.kvb("dante", e ? e->dante_running() : false);
+  j.kvb("enabled", c.enabled);
   j.kv("dante_ports", e ? uint32_t(e->control_port_base()) : 0u);
   j.end_obj();
 
@@ -305,6 +308,34 @@ HttpResponse ControlServer::diagnostics_report() {
   HttpResponse resp{200, "text/plain; charset=utf-8", r, ""};
   resp.extra_headers = "Content-Disposition: attachment; filename=\"virgil-report.txt\"\r\n";
   return resp;
+}
+
+// Stop / Start Virgil: kept in the configuration ([device] enabled), so a
+// stopped Virgil stays stopped after a restart of the computer, and applied
+// by a reload of the engine.
+HttpResponse ControlServer::set_running(bool on) {
+  std::string path;
+  {
+    std::lock_guard<std::mutex> l(ctx_->mutex);
+    ctx_->run_override = on ? 1 : 0;
+    path = ctx_->config_path;
+  }
+  bool saved = false;
+  std::string err;
+  if (!path.empty()) {
+    std::ifstream exists(path);
+    if (exists) {
+      exists.close();
+      saved = set_config_value(path, "device", "enabled", on ? "" : "false", &err);
+      if (!saved) VIRGIL_LOG_WARN("could not save %s state: %s", on ? "started" : "stopped", err.c_str());
+    }
+  }
+  ctx_->diag.note(Diagnostics::Kind::Service, on ? "Virgil was started" : "Virgil was stopped", wall_ms());
+  VIRGIL_LOG_INFO("control: %s", on ? "starting Virgil" : "stopping Virgil");
+  ctx_->reload = true;
+  Json j;
+  j.begin_obj().kvb("ok", true).kvb("saved", saved).end_obj();
+  return {200, "application/json", j.take(), ""};
 }
 
 HttpResponse ControlServer::get_config() {

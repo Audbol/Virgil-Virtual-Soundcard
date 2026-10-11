@@ -132,11 +132,19 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       std::lock_guard<std::mutex> l(ctx.mutex);
       cfg = ctx.cfg;
     }
+    // Stopped (Stop in Virgil Control): no engine, nothing on the network,
+    // until Start (a reload with enabled = true).
+    const bool stopped = !cfg.enabled;
+    if (stopped) {
+      VIRGIL_LOG_INFO("Virgil is stopped: the audio engine is off and Virgil is not on the Dante network "
+                      "(Start in Virgil Control starts it again)");
+      set_status("stopped");
+    }
 
     // At boot the NIC may not have an address yet (DHCP, link): wait for it.
     uint32_t addr = 0;
     bool warned = false;
-    while (!g_quit && !ctx.reload && !virgil::resolve_interface(cfg.interface, &addr)) {
+    while (!stopped && !g_quit && !ctx.reload && !virgil::resolve_interface(cfg.interface, &addr)) {
       if (!warned) {
         VIRGIL_LOG_WARN("waiting for network interface '%s' to come up...",
                      cfg.interface.empty() ? "(any)" : cfg.interface.c_str());
@@ -149,7 +157,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       VIRGIL_LOG_INFO("network interface %s is up", virgil::ipv4_to_string(addr).c_str());
 
     std::unique_ptr<virgil::Engine> engine;
-    if (!g_quit && !ctx.reload) {
+    if (!stopped && !g_quit && !ctx.reload) {
       virgil::clear_last_error();
       engine = std::make_unique<virgil::Engine>(cfg);
       engine->set_shared_memory(&soundcard);
@@ -241,6 +249,10 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
         VIRGIL_LOG_INFO("reloaded configuration %s", path.c_str());
       } else if (!path.empty()) {
         VIRGIL_LOG_ERROR("reload of %s failed: %s", path.c_str(), err.c_str());
+      }
+      {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        if (ctx.run_override >= 0) ctx.cfg.enabled = ctx.run_override != 0;
       }
       set_status("starting");
     }

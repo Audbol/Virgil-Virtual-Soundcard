@@ -41,6 +41,7 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; display: grid
 .banner { padding: 10px 14px; border-radius: 8px; border: 1px solid var(--bad); color: var(--bad);
   background: color-mix(in srgb, var(--bad) 8%, var(--panel)); display: none; }
 .banner.show { display: block; }
+.banner.info { border-color: var(--line); color: var(--text); background: var(--panel); }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .card, section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
 .card { padding: 14px 16px; min-width: 0; }
@@ -133,6 +134,8 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
 <main>
   <div class="banner" id="offline">The Virgil service is not reachable. Start it (Windows: Start menu › Virgil › Restart Virgil service; macOS/Linux: see README); this page reconnects automatically.</div>
   <div class="banner" id="errbanner"></div>
+  <div class="banner info" id="stoppedbanner">Virgil is stopped: it is off the Dante network, its ports are free and apps cannot use the soundcard.
+    <button class="primary" id="startbtn" style="margin-left:10px">Start Virgil</button></div>
 
   <div class="cards">
     <div class="card"><h3>Clock</h3><div class="big" id="c-clock">—</div><div class="small" id="c-clock2">&nbsp;</div></div>
@@ -208,6 +211,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
       <button class="primary" id="apply" disabled>Apply &amp; restart audio</button>
       <button id="revert" disabled>Discard changes</button>
       <button id="restart">Restart audio engine</button>
+      <button id="stopbtn" class="danger">Stop Virgil</button>
       <span class="msg" id="msg" role="status" aria-live="polite"></span>
     </div>
   </section>
@@ -309,7 +313,12 @@ function render(st) {
   const d = st.device, c = st.clock, k = st.counters || {};
   $("devname").textContent = d.name || "Virgil";
   document.title = (d.name || "Virgil") + " · Virgil Control";
-  if (st.status === "error") setPill("bad", "Error");
+  const stopped = st.status === "stopped";
+  $("stoppedbanner").classList.toggle("show", stopped);
+  $("stopbtn").style.display = stopped ? "none" : "";
+  $("restart").disabled = stopped;
+  if (stopped) setPill("", "Stopped");
+  else if (st.status === "error") setPill("bad", "Error");
   else if (st.status === "waiting-for-network") setPill("warn", "Waiting for network");
   else if (st.status !== "running") setPill("warn", "Starting…");
   else if (!d.dante) setPill("bad", "Dante stack not running");
@@ -387,6 +396,15 @@ $("apply").addEventListener("click", async () => {
   } catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; $("apply").disabled = false; }
 });
 $("revert").addEventListener("click", () => { S.cfg = S.savedCfg; fillForm(); markDirty(); $("msg").textContent = ""; });
+$("stopbtn").addEventListener("click", async () => {
+  if (!confirm("Stop Virgil?\n\nAudio to and from the Dante network stops, Virgil leaves the network and apps cannot use its soundcard until you start it again. It stays stopped after a restart of the computer.")) return;
+  try { await api("/api/stop", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Stopping Virgil…"; }
+  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+});
+$("startbtn").addEventListener("click", async () => {
+  try { await api("/api/start", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Starting Virgil…"; }
+  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+});
 $("restart").addEventListener("click", async () => {
   try { await api("/api/restart", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Audio engine restarting…"; }
   catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }

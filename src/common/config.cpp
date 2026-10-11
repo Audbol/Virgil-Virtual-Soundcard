@@ -128,6 +128,7 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "control_port") { if (!to_u32(val, &u) || u > 65535) return fail("bad control_port"); c->control_port = u; }
       else if (key == "clock") c->clock = lower(val);
       else if (key == "ports") c->ports = lower(val);
+      else if (key == "enabled") { if (!need_bool(&c->enabled)) return false; }
       else if (key == "packet_time_us" || key == "sap") legacy();
       else return fail("unknown key '" + key + "'");
     } else if (section == "channel_names") {
@@ -324,8 +325,8 @@ bool replace_stock_name(const std::string& path, const std::string& name, std::s
   return write_file_atomic(path, out, error);
 }
 
-bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,
-                       std::string* error) {
+bool set_config_value(const std::string& path, const std::string& section_name, const std::string& key,
+                      const std::string& value, std::string* error) {
   std::string text;
   {
     std::ifstream in(path, std::ios::binary);
@@ -335,13 +336,12 @@ bool save_channel_name(const std::string& path, bool tx, uint32_t index, const s
       text = ss.str();
     }
   }
-  const std::string key = std::string(tx ? "tx" : "rx") + std::to_string(index + 1);
   const bool crlf = text.find("\r\n") != std::string::npos;
   const std::string nl = crlf ? "\r\n" : "\n";
-  const std::string entry = name.empty() ? std::string() : key + " = \"" + name + "\"" + nl;
-  // Find [channel_names] and the key inside it.
+  const std::string entry = value.empty() ? std::string() : key + " = \"" + value + "\"" + nl;
+  // Find the section and the key inside it.
   std::string out, section;
-  bool in_names = false, done = false, have_section = false;
+  bool in_section = false, done = false, have_section = false;
   size_t pos = 0;
   while (pos < text.size()) {
     size_t end = text.find('\n', pos);
@@ -350,17 +350,17 @@ bool save_channel_name(const std::string& path, bool tx, uint32_t index, const s
     pos = end;
     const std::string t = trim(line);
     if (!t.empty() && t.front() == '[' && t.back() == ']') {
-      if (in_names && !done) {  // end of the section: add the key there
+      if (in_section && !done) {  // end of the section: add the key there
         out += entry;
         done = true;
       }
       section = lower(trim(t.substr(1, t.size() - 2)));
-      in_names = section == "channel_names";
-      have_section |= in_names;
-    } else if (in_names && !done) {
+      in_section = section == section_name;
+      have_section |= in_section;
+    } else if (in_section && !done) {
       const size_t eq = t.find('=');
       if (eq != std::string::npos && lower(trim(t.substr(0, eq))) == key) {
-        out += entry;  // replace (or drop, for an empty name)
+        out += entry;  // replace (or drop, for an empty value)
         done = true;
         continue;
       }
@@ -369,10 +369,16 @@ bool save_channel_name(const std::string& path, bool tx, uint32_t index, const s
   }
   if (!done && !entry.empty()) {
     if (!out.empty() && out.back() != '\n') out += nl;
-    if (!have_section) out += nl + "[channel_names]" + nl;
+    if (!have_section) out += nl + "[" + section_name + "]" + nl;
     out += entry;
   }
   return write_file_atomic(path, out, error);
+}
+
+bool save_channel_name(const std::string& path, bool tx, uint32_t index, const std::string& name,
+                       std::string* error) {
+  return set_config_value(path, "channel_names", std::string(tx ? "tx" : "rx") + std::to_string(index + 1), name,
+                          error);
 }
 
 std::string format_config(const Config& c) {
@@ -393,6 +399,7 @@ std::string format_config(const Config& c) {
   o << "tx_latency_us = " << c.tx_latency_us << "\n";
   o << "clock = " << c.clock << "\n";
   if (c.ports != "auto") o << "ports = " << c.ports << "\n";
+  if (!c.enabled) o << "enabled = false\n";
   o << "control_port = " << c.control_port << "\n";
   if (c.tick_us != 1000) o << "tick_us = " << c.tick_us << "\n";
   if (c.tx_lead_us) o << "tx_lead_us = " << c.tx_lead_us << "\n";

@@ -46,6 +46,7 @@ struct ClockView {
 ClockView clock_view(const Status& s) {
   if (!s.reachable) return {kBad, "Service not running", ""};
   if (s.state == "error") return {kBad, "Audio engine error", s.error};
+  if (s.state == "stopped") return {kDim, "Stopped", "off the Dante network"};
   if (s.state == "waiting-for-network") return {kWarn, "Waiting for network", s.iface};
   if (s.state != "running") return {kWarn, "Starting…", ""};
   if (!s.dante) return {kBad, "Dante stack not running", ""};
@@ -163,6 +164,12 @@ void StatusView::paint(Canvas& c, float W, float H) {
            Rect{0, kHeader + 100, W, kHeader + 120}, kMuted, Align::Center);
     buttons_.push_back({Rect{W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172}, "Start service",
                         Action::StartService, true});
+  } else if (s.state == "stopped") {
+    c.text("Virgil is stopped.", Font::Big, Rect{0, kHeader + 70, W, kHeader + 100}, kText, Align::Center);
+    c.text("It is off the Dante network, its ports are free and apps cannot use the soundcard.", Font::Sub,
+           Rect{0, kHeader + 100, W, kHeader + 120}, kMuted, Align::Center);
+    buttons_.push_back(
+        {Rect{W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172}, "Start Virgil", Action::Start, true});
   } else {
     // Meter bridge: from the network (what apps record) on top, to the
     // network (what apps play) below.
@@ -183,8 +190,25 @@ void StatusView::paint(Canvas& c, float W, float H) {
       if (!apps.empty()) apps += ",  ";
       apps += cl.name + (cl.active ? " (playing)" : "");
     }
-    const float text_r = W - kPad - 352;
-    c.text(apps.empty() ? "No apps connected" : apps, Font::Label,
+    // Buttons from the right; the text gets what is left.
+    const bool stopped = s.state == "stopped";
+    struct B {
+      const char* label;
+      Action a;
+    };
+    std::vector<B> right;
+    if (!stopped) right = {{"Stop", Action::Stop}, {"Restart", Action::Restart}};
+    right.push_back({"Settings…", Action::Settings});
+    right.push_back({"Dropouts…", Action::Diagnostics});
+    float bx = W - kPad;
+    for (const B& b : right) {
+      const float w = std::max(64.f, c.text_width(b.label, Font::Button) + 28);
+      buttons_.push_back({Rect{bx - w, H - kFooter + 12, bx, H - 12}, b.label, b.a, false});
+      bx -= w + 8;
+    }
+    const float text_r = bx - 6;
+    if (stopped) apps.clear();
+    c.text(stopped ? "Stopped" : apps.empty() ? "No apps connected" : apps, Font::Label,
            Rect{kPad, H - kFooter, text_r, H - kFooter / 2 - 2}, apps.empty() ? kMuted : kText, Align::Left);
     // Version, and how many dropouts the last hour had (details: Dropouts).
     const std::string ver = "Virgil " + s.version + "   ·   ";
@@ -193,12 +217,6 @@ void StatusView::paint(Canvas& c, float W, float H) {
     const unsigned long long n = s.dropouts_last_hour;
     c.text(n ? fmt("%llu dropout%s in the last hour", n, n == 1 ? "" : "s") : "no dropouts", Font::Sub,
            Rect{vx, H - kFooter / 2 - 4, text_r, H - 8}, n ? kWarn : kDim, Align::Left);
-    buttons_.push_back({Rect{W - kPad - 344, H - kFooter + 12, W - kPad - 244, H - 12}, "Dropouts…",
-                        Action::Diagnostics, false});
-    buttons_.push_back({Rect{W - kPad - 236, H - kFooter + 12, W - kPad - 128, H - 12}, "Settings…",
-                        Action::Settings, false});
-    buttons_.push_back({Rect{W - kPad - 120, H - kFooter + 12, W - kPad, H - 12}, "Restart engine",
-                        Action::Restart, false});
   }
   for (size_t i = 0; i < buttons_.size(); ++i) draw_button(c, buttons_[i], int(i));
 }
@@ -229,7 +247,8 @@ Action StatusView::release(float x, float y) {
 std::string tray_tooltip(const Status& s) {
   if (!s.reachable) return "Virgil: service not running";
   std::string t = "Virgil — " + s.name + "\n";
-  if (s.state == "error") t += "Audio engine error";
+  if (s.state == "stopped") t += "Stopped";
+  else if (s.state == "error") t += "Audio engine error";
   else if (s.clock == "ptp-locked") t += "Locked to " + s.grandmaster;
   else if (s.clock == "ptp-master") t += "Clock leader";
   else t += "Free-running";

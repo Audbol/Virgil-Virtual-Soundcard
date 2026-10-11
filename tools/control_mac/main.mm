@@ -219,6 +219,8 @@ void set_autostart(bool on) {
   id app = [NSApp delegate];
   if (a == vc::Action::Settings) [app performSelector:@selector(showSettings:) withObject:nil];
   if (a == vc::Action::Restart) [app performSelector:@selector(restartEngine:) withObject:nil];
+  if (a == vc::Action::Stop) [app performSelector:@selector(stopVirgil:) withObject:nil];
+  if (a == vc::Action::Start) [app performSelector:@selector(startVirgil:) withObject:nil];
   if (a == vc::Action::StartService) [app performSelector:@selector(startService:) withObject:nil];
   if (a == vc::Action::Diagnostics) [app performSelector:@selector(openDiagnostics:) withObject:nil];
 }
@@ -231,6 +233,7 @@ void set_autostart(bool on) {
 @property(strong) VCView* view;
 @property(strong) NSStatusItem* item;
 @property(strong) NSMenuItem* autostartItem;
+@property(strong) NSMenuItem* runItem;  // Stop Virgil / Start Virgil
 @property BOOL startHidden;
 @end
 
@@ -329,6 +332,7 @@ void set_autostart(bool on) {
   add(@"Open Virgil", @selector(showWindow:));
   add(@"Settings…", @selector(showSettings:));
   add(@"Restart audio engine", @selector(restartEngine:));
+  self.runItem = add(@"Stop Virgil", @selector(toggleRunning:));
   [m addItem:[NSMenuItem separatorItem]];
   add(@"Dropouts and diagnostics", @selector(openDiagnostics:));
   add(@"Open control panel in browser", @selector(openBrowser:));
@@ -342,6 +346,8 @@ void set_autostart(bool on) {
 
 - (void)menuNeedsUpdate:(NSMenu*)menu {
   self.autostartItem.state = autostart_enabled() ? NSControlStateValueOn : NSControlStateValueOff;
+  const vc::Status& s = g_view.status();
+  self.runItem.title = s.state == "stopped" ? @"Start Virgil" : @"Stop Virgil";
 }
 
 - (void)pollLoop {
@@ -414,6 +420,25 @@ void set_autostart(bool on) {
 - (BOOL)applicationShouldHandleReopen:(NSApplication*)a hasVisibleWindows:(BOOL)v {
   [self showWindow:nil];
   return YES;
+}
+
+- (void)stopVirgil:(id)sender {
+  NSAlert* a = [[NSAlert alloc] init];
+  a.messageText = @"Stop Virgil?";
+  a.informativeText = @"Audio to and from the Dante network stops, Virgil leaves the network and apps cannot use "
+                      @"its soundcard until you start it again. It stays stopped after a restart of the Mac.";
+  [a addButtonWithTitle:@"Stop"];
+  [a addButtonWithTitle:@"Cancel"];
+  [NSApp activateIgnoringOtherApps:YES];
+  if ([a runModal] != NSAlertFirstButtonReturn) return;
+  if (vc::http(g_port, "POST", "/api/stop").status != 200) alert(@"The Virgil service is not running.");
+}
+- (void)startVirgil:(id)sender {
+  if (vc::http(g_port, "POST", "/api/start").status != 200) alert(@"The Virgil service is not running.");
+}
+- (void)toggleRunning:(id)sender {
+  if (g_view.status().state == "stopped") [self startVirgil:sender];
+  else [self stopVirgil:sender];
 }
 
 - (void)restartEngine:(id)sender {

@@ -21,11 +21,14 @@ struct DaemonContext {
   Engine* engine = nullptr;   // null while (re)starting or on error
   Config cfg;                 // configuration the engine runs / will run
   std::string config_path;    // where the panel saves configuration
-  std::string status = "starting";  // starting | waiting-for-network | running | error
+  std::string status = "starting";  // starting | waiting-for-network | running | stopped | error
   std::string error;          // last start error, shown in the panel
   std::atomic<bool> reload{false};
   // Command-line options that override the file; re-applied after a reload.
   std::function<void(Config&)> overrides;
+  // Stop / Start from the control panel when the file cannot keep it
+  // (no configuration file): -1 = as configured, 0 = stopped, 1 = running.
+  int run_override = -1;
 
   // Dropout diagnostics (has its own lock).
   Diagnostics diag;
@@ -48,6 +51,7 @@ class ControlServer {
   HttpResponse get_config();
   HttpResponse save_config(const HttpRequest& r);
   HttpResponse diagnostics_report();
+  HttpResponse set_running(bool on);
 
   DaemonContext* ctx_;
   HttpServer http_;

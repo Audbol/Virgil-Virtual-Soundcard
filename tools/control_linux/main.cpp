@@ -56,6 +56,7 @@ bool g_have_tray = false;
 bool g_start_hidden = false;
 GdkPixbuf* g_logo;
 GtkWidget* g_autostart_item;
+GtkWidget* g_run_item;  // Stop Virgil / Start Virgil
 
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -255,6 +256,8 @@ void show_settings();
 void restart_engine();
 void start_service();
 void open_diagnostics();
+void stop_virgil();
+void start_virgil();
 
 gboolean on_motion(GtkWidget*, GdkEventMotion* e, gpointer) {
   if (g_view.hover(float(e->x), float(e->y))) {
@@ -275,6 +278,8 @@ gboolean on_release(GtkWidget*, GdkEventButton* e, gpointer) {
   if (a == vc::Action::Restart) restart_engine();
   if (a == vc::Action::StartService) start_service();
   if (a == vc::Action::Diagnostics) open_diagnostics();
+  if (a == vc::Action::Stop) stop_virgil();
+  if (a == vc::Action::Start) start_virgil();
   return TRUE;
 }
 
@@ -336,6 +341,10 @@ gboolean apply_status(gpointer data) {
   g_view.update(s, now_ms());
   if (s.tx != old_tx || s.rx != old_rx) resize_to_view();
   if (g_visible) gtk_widget_queue_draw(g_area);
+  if (g_run_item) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_run_item), s.state == "stopped" ? "Start Virgil" : "Stop Virgil");
+    gtk_widget_set_sensitive(g_run_item, s.reachable);
+  }
   if (event == 1) notify("Virgil service stopped", "Audio to and from the Dante network has stopped.");
   if (event == 2) notify("Dante clock lost", "Virgil is running on its own clock; check the network connection.");
   return G_SOURCE_REMOVE;
@@ -356,7 +365,10 @@ void poll_thread() {
     }
     int event = 0;
     if (was_reachable && !s.reachable) event = 1;
-    if (s.reachable && was_clock == "ptp-locked" && s.clock != "ptp-locked" && !lost_since) lost_since = now_ms();
+    // Not when Virgil was stopped on purpose (or is restarting).
+    if (s.reachable && s.state == "running" && was_clock == "ptp-locked" && s.clock != "ptp-locked" && !lost_since)
+      lost_since = now_ms();
+    if (s.state != "running") lost_since = 0;
     if (s.clock == "ptp-locked") lost_since = 0, lost_told = false;
     if (lost_since && !lost_told && now_ms() - lost_since > 5000) {
       lost_told = true;
@@ -370,6 +382,33 @@ void poll_thread() {
 }
 
 // ---- actions -----------------------------------------------------------------------------
+
+void stop_virgil() {
+  GtkWidget* d = gtk_message_dialog_new(
+      g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr, GTK_DIALOG_MODAL,
+      GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "Stop Virgil?");
+  gtk_message_dialog_format_secondary_text(
+      GTK_MESSAGE_DIALOG(d),
+      "Audio to and from the Dante network stops, Virgil leaves the network and apps cannot use its "
+      "soundcard until you start it again. It stays stopped after a restart of the computer.");
+  gtk_dialog_add_buttons(GTK_DIALOG(d), "_Cancel", GTK_RESPONSE_CANCEL, "_Stop", GTK_RESPONSE_ACCEPT, nullptr);
+  gtk_window_set_title(GTK_WINDOW(d), "Virgil");
+  const int r = gtk_dialog_run(GTK_DIALOG(d));
+  gtk_widget_destroy(d);
+  if (r != GTK_RESPONSE_ACCEPT) return;
+  if (vc::http(g_port, "POST", "/api/stop").status != 200)
+    message(GTK_MESSAGE_WARNING, "The Virgil service is not running.");
+}
+
+void start_virgil() {
+  if (vc::http(g_port, "POST", "/api/start").status != 200)
+    message(GTK_MESSAGE_WARNING, "The Virgil service is not running.");
+}
+
+void toggle_running() {
+  if (g_view.status().state == "stopped") start_virgil();
+  else stop_virgil();
+}
 
 void restart_engine() {
   if (vc::http(g_port, "POST", "/api/restart").status != 200)
@@ -630,6 +669,9 @@ void build_menu() {
   menu_item("Open Virgil", show_window);
   menu_item("Settings…", show_settings);
   menu_item("Restart audio engine", restart_engine);
+  g_run_item = gtk_menu_item_new_with_label("Stop Virgil");
+  g_signal_connect(g_run_item, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { toggle_running(); }), nullptr);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), g_run_item);
   menu_sep();
   menu_item("Dropouts and diagnostics", open_diagnostics);
   menu_item("Open control panel in browser", open_browser);

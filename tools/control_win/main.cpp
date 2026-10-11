@@ -92,7 +92,10 @@ const unsigned kBg = 0x15171A, kPanel = 0x1B1E22, kLine = 0x2A2E34, kText = 0xE9
 const wchar_t* kWindowClass = L"VirgilControlWindow";
 const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3;
 const UINT kTrayId = 1;
-enum { ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT, ID_DIAG };
+enum {
+  ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT, ID_DIAG,
+  ID_STOP, ID_START
+};
 
 HINSTANCE g_inst;
 HWND g_hwnd;
@@ -354,6 +357,7 @@ struct ClockView {
 ClockView clock_view(const vc::Status& s) {
   if (!s.reachable) return {kBad, L"Service not running", L""};
   if (s.state == "error") return {kBad, L"Audio engine error", widen(s.error)};
+  if (s.state == "stopped") return {kDim, L"Stopped", L"off the Dante network"};
   if (s.state == "waiting-for-network") return {kWarn, L"Waiting for network", widen(s.iface)};
   if (s.state != "running") return {kWarn, L"Starting\u2026", L""};
   if (!s.dante) return {kBad, L"Dante stack not running", L""};
@@ -404,7 +408,7 @@ void paint(HWND hwnd) {
        kText);
   if (!cv.line2.empty()) text(cv.line2, g_f_sub, D2D1::RectF(cx + 16, 40, W - kPad, 58), kMuted);
 
-  g_buttons.resize(4);
+  g_buttons.resize(6);
   for (auto& b : g_buttons) b.visible = false;
 
   if (!s.reachable) {
@@ -414,6 +418,16 @@ void paint(HWND hwnd) {
     Button& b = g_buttons[0];
     b.id = ID_RESTART;
     b.label = L"Start service";
+    b.primary = true;
+    b.r = D2D1::RectF(W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172);
+    draw_button(b);
+  } else if (s.state == "stopped") {
+    text(L"Virgil is stopped.", g_f_big, D2D1::RectF(0, kHeader + 70, W, kHeader + 100), kText);
+    text(L"It is off the Dante network, its ports are free and apps cannot use the soundcard.", g_f_sub_c,
+         D2D1::RectF(0, kHeader + 100, W, kHeader + 120), kMuted);
+    Button& b = g_buttons[0];
+    b.id = ID_START;
+    b.label = L"Start Virgil";
     b.primary = true;
     b.r = D2D1::RectF(W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172);
     draw_button(b);
@@ -437,35 +451,42 @@ void paint(HWND hwnd) {
     if (!apps.empty()) apps += L",  ";
     apps += widen(c.name) + (c.active ? L" (playing)" : L"");
   }
+  // Leave room for the footer buttons (4 while running, 2 when stopped).
+  const bool stopped_now = s.state == "stopped";
+  const float text_r = W - kPad - (stopped_now ? 200 : 352);
+  if (stopped_now) apps.clear();
   if (s.reachable)
-    text(apps.empty() ? L"No apps connected" : apps, g_f_label,
-         D2D1::RectF(kPad, H - kFooter, W - kPad - 352, H - kFooter / 2 - 2), apps.empty() ? kMuted : kText);
+    text(stopped_now ? L"Stopped" : apps.empty() ? L"No apps connected" : apps, g_f_label,
+         D2D1::RectF(kPad, H - kFooter, text_r, H - kFooter / 2 - 2), apps.empty() ? kMuted : kText);
   if (s.reachable) {
     // Version, and how many dropouts the last hour had (details: Dropouts).
     const unsigned long long n = s.dropouts_last_hour;
     text(L"Virgil " + widen(s.version) + L"   \u00b7   " +
              (n ? fmt(L"%llu dropout%s in the last hour", n, n == 1 ? L"" : L"s") : std::wstring(L"no dropouts")),
-         g_f_sub, D2D1::RectF(kPad, H - kFooter / 2 - 4, W - kPad - 352, H - 8), n ? kWarn : kDim);
+         g_f_sub, D2D1::RectF(kPad, H - kFooter / 2 - 4, text_r, H - 8), n ? kWarn : kDim);
   }
   if (s.reachable) {
-    Button& b3 = g_buttons[3];
-    b3.id = ID_DIAG;
-    b3.label = L"Dropouts\u2026";
-    b3.primary = false;
-    b3.r = D2D1::RectF(W - kPad - 344, H - kFooter + 12, W - kPad - 244, H - 12);
-    draw_button(b3);
-    Button& b1 = g_buttons[1];
-    b1.id = ID_SETTINGS;
-    b1.label = L"Settings\u2026";
-    b1.primary = false;
-    b1.r = D2D1::RectF(W - kPad - 236, H - kFooter + 12, W - kPad - 128, H - 12);
-    draw_button(b1);
-    Button& b2 = g_buttons[2];
-    b2.id = ID_RESTART;
-    b2.label = L"Restart engine";
-    b2.primary = false;
-    b2.r = D2D1::RectF(W - kPad - 120, H - kFooter + 12, W - kPad, H - 12);
-    draw_button(b2);
+    // Buttons from the right (indices 1..): Stop, Restart, Settings, Dropouts.
+    const bool stopped = s.state == "stopped";
+    struct B {
+      int id;
+      const wchar_t* label;
+    };
+    std::vector<B> right;
+    if (!stopped) right = {{ID_STOP, L"Stop"}, {ID_RESTART, L"Restart"}};
+    right.push_back({ID_SETTINGS, L"Settings\u2026"});
+    right.push_back({ID_DIAG, L"Dropouts\u2026"});
+    float bx = W - kPad;
+    for (size_t k = 0; k < right.size(); ++k) {
+      Button& b = g_buttons[1 + k];
+      const float w = std::max(64.f, text_width(right[k].label, g_f_button) + 28);
+      b.id = right[k].id;
+      b.label = right[k].label;
+      b.primary = false;
+      b.r = D2D1::RectF(bx - w, H - kFooter + 12, bx, H - 12);
+      draw_button(b);
+      bx -= w + 8;
+    }
   }
 
   if (g_rt->EndDraw() == HRESULT(D2DERR_RECREATE_TARGET)) discard_device();
@@ -656,6 +677,9 @@ void tray_menu() {
   AppendMenuW(m, MF_STRING, ID_OPEN, L"Open Virgil Control");
   AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_SETTINGS, L"Settings\u2026");
   AppendMenuW(m, MF_STRING, ID_RESTART, s.reachable ? L"Restart audio engine" : L"Start Virgil service");
+  if (s.reachable)
+    AppendMenuW(m, MF_STRING, s.state == "stopped" ? ID_START : ID_STOP,
+                s.state == "stopped" ? L"Start Virgil" : L"Stop Virgil");
   AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
   AppendMenuW(m, MF_STRING, ID_DIAG, L"Dropouts and diagnostics");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
@@ -677,6 +701,15 @@ void command(int id) {
     case ID_SETTINGS: show_settings(); break;
     case ID_DIAG: open_page(L"#diagnostics"); break;
     case ID_RESTART: restart_engine(); break;
+    case ID_STOP:
+      if (MessageBoxW(g_hwnd,
+                      L"Audio to and from the Dante network stops, Virgil leaves the network (its ports are "
+                      L"free, e.g. for Dante Virtual Soundcard) and apps cannot use its soundcard until you "
+                      L"start it again. It stays stopped after a restart of the computer.",
+                      L"Stop Virgil?", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) == IDOK)
+        vc::http(g_port, "POST", "/api/stop");
+      break;
+    case ID_START: vc::http(g_port, "POST", "/api/start"); break;
     case ID_LOG: ShellExecuteW(g_hwnd, L"open", log_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_AUTOSTART: set_autostart(!autostart_enabled()); break;
     case ID_QUIT: DestroyWindow(g_hwnd); break;
@@ -730,8 +763,10 @@ void poll_thread() {
     // Notifications on state changes worth knowing about while hidden.
     if (was_reachable && !s.reachable)
       PostMessageW(g_hwnd, WM_APP_STATUS, 1, 0);
-    if (s.reachable && was_clock == "ptp-locked" && s.clock != "ptp-locked" && !lost_since)
+    // Not when Virgil was stopped on purpose (or is restarting).
+    if (s.reachable && s.state == "running" && was_clock == "ptp-locked" && s.clock != "ptp-locked" && !lost_since)
       lost_since = GetTickCount();
+    if (s.state != "running") lost_since = 0;
     if (s.clock == "ptp-locked") lost_since = 0, lost_told = false;
     if (lost_since && !lost_told && GetTickCount() - lost_since > 5000) {
       lost_told = true;

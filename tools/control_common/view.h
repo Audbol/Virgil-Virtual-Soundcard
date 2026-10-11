@@ -40,7 +40,7 @@ class Canvas {
   virtual void logo(const Rect& r) = 0;
 };
 
-enum class Action { None, Settings, Restart, StartService, Diagnostics };
+enum class Action { None, Settings, Restart, StartService, Diagnostics, Stop, Start };
 
 class StatusView {
  public:
