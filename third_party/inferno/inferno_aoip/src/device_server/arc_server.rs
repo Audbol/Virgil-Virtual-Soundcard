@@ -405,9 +405,10 @@ pub async fn run_server(
           let mut flow_ids = vec![];
           for descr_offset in deserialize_items::<u16>(content) {
             let descr_offset: usize = descr_offset.into();
-            if descr_offset - HEADER_LENGTH
-              + create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE
-              > content.len()
+            if descr_offset < HEADER_LENGTH
+              || descr_offset - HEADER_LENGTH
+                + create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE
+                > content.len()
             {
               continue;
             }
@@ -443,7 +444,7 @@ pub async fn run_server(
               let after_header = &content[descr_offset - HEADER_LENGTH
                 + create_multicast_tx_flow::FlowDescriptorHeader::SERIALIZED_SIZE..];
               if after_header.len()
-                < (descr.channels_count as usize)
+                < (descr.channels_count as usize) * 2
                   + create_multicast_tx_flow::FlowDescriptorFooter::SERIALIZED_SIZE
               {
                 error!("multicast tx flow descriptor parse failed, too short channels list or footer");
@@ -482,6 +483,11 @@ pub async fn run_server(
         }
         delete_multicast_tx_flow::OPCODE => {
           let content = request.content();
+          if content.len() < 4 {
+            error!("delete multicast tx flow request too short: {}", hex::encode(content));
+            conn.respond_with_code(0xFFFF /* TODO */, &[]).await;
+            continue;
+          }
           let count = make_u16(content[0], content[1]).try_into().unwrap();
           let flow_indices = content[4..]
             .chunks_exact(2)
@@ -716,7 +722,15 @@ pub async fn run_server(
           // whole packet: "27ff00104a1c30140000000100000002"
           if let Some(channels_recv) = &subscriber {
             let content = request.content();
+            if content.len() < 6 {
+              error!("subscription remove request too short: {}", hex::encode(content));
+              continue;
+            }
             let local_channel = make_u16(content[4], content[5]);
+            if local_channel == 0 || local_channel as usize > self_info.rx_channels.len() {
+              error!("got disconnect request for nonexisting channel {local_channel}");
+              continue;
+            }
             let local_channel_index = (local_channel - 1) as usize;
             info!("disconnect requested: local channel {}", local_channel);
             channels_recv.unsubscribe(local_channel_index).await;

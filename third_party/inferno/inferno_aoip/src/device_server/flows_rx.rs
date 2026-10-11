@@ -155,7 +155,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             //let audio_bytes = &buf[9..9+total_num_samples*sd.bytes_per_sample];
             let audio_bytes = &buf[9..recv_size];
 
-            let stride = num_channels * sd.bytes_per_sample;
+            let stride = (num_channels * sd.bytes_per_sample).max(1);
             let samples_count = audio_bytes.len() / stride;
             //info!("first byte = {}, assuming {} samples in {} channels", buf[0], samples_count, num_channels);
             for (i, ch) in sd.channels.iter_mut().enumerate() {

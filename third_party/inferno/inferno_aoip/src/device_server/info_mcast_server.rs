@@ -52,7 +52,7 @@ fn read_clock_stats_file(required_prefix: &str) -> Option<Vec<u8>> {
       if let Ok(content) = std::fs::read_to_string(entry.path()) {
         let content = content.trim_ascii();
         if content.len() >= 16 {
-          if let Ok(master_id) = hex::decode(&content[0..16]) {
+          if let Some(Ok(master_id)) = content.get(0..16).map(hex::decode) {
             return Some(master_id);
           }
         }

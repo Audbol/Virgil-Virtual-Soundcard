@@ -59,3 +59,9 @@ Changes for Virgil:
     ones and are saved), read the current names (`current_name`) and is told
     about renames from the network (`set_rename_hook`), so Virgil's
     configuration and Dante Controller show the same names.
+12. Malformed control packets no longer panic: `flows_control_server.rs`,
+    `arc_server.rs` and `proto_arc.rs::deserialize_items` check lengths and
+    offsets before indexing, `flows_tx.rs` refuses flows whose channel numbers,
+    channel count, frames per packet or sample size the transmit thread could
+    not handle, and channel names that are not allowed are refused
+    (`saved_settings.rs::valid_channel_name`).

@@ -449,6 +449,8 @@ struct FlowData {
   cookie: u16,
   remote: SocketAddr,
   expired: Arc<AtomicBool>,
+  fpp: usize,
+  bytes_per_sample: usize,
 }
 
 #[derive(Debug)]
@@ -480,6 +482,43 @@ fn split_handle(h: FlowHandle) -> (u32, u16) {
 }
 
 impl FlowsTransmitter {
+  // Virgil patch: the transmit thread indexes channel buffers and the packet
+  // buffer with these, so refuse what a remote request could make it overrun.
+  fn check_flow_params(
+    &self,
+    channel_indices: &[Option<usize>],
+    fpp: Option<usize>,
+    bytes_per_sample: Option<usize>,
+  ) -> Result<(), std::io::Error> {
+    let invalid = |what: &str| {
+      error!("refusing tx flow: {what}");
+      Err(std::io::Error::from(std::io::ErrorKind::InvalidInput))
+    };
+    let n = channel_indices.len();
+    if n == 0 || n > MAX_CHANNELS_IN_FLOW as usize {
+      return invalid(&format!("{n} channels"));
+    }
+    if channel_indices.iter().flatten().any(|&ch| ch >= self.self_info.tx_channels.len()) {
+      return invalid("channel number out of range");
+    }
+    if let Some(bps) = bytes_per_sample {
+      if !(2..=4).contains(&bps) {
+        return invalid(&format!("{bps} bytes per sample"));
+      }
+    }
+    if let Some(fpp) = fpp {
+      if fpp < FPP_MIN as usize || fpp > FPP_MAX as usize {
+        return invalid(&format!("{fpp} frames per packet"));
+      }
+    }
+    if let (Some(fpp), Some(bps)) = (fpp, bytes_per_sample) {
+      if 9 + n * bps * fpp > MTU {
+        return invalid(&format!("{n} channels x {fpp} frames does not fit a packet"));
+      }
+    }
+    Ok(())
+  }
+
   async fn run<P: ProxyToSamplesBuffer>(
     rx: mpsc::Receiver<Command>,
     tx_source_bit_depth: u8,
@@ -574,6 +613,7 @@ impl FlowsTransmitter {
     requested_flow_index: Option<u32>,
     is_multicast: bool,
   ) -> Result<(usize, FlowHandle), std::io::Error> {
+    self.check_flow_params(&flow_info.local_channel_indices, Some(fpp), Some(bytes_per_sample))?;
     let channel_indices = flow_info.local_channel_indices.clone();
     let dst_addr = SocketAddr::new(IpAddr::V4(flow_info.dst_addr), flow_info.dst_port);
     let (flow_index, cookie) = match self.ip_port_to_id.get(&dst_addr) {
@@ -606,6 +646,8 @@ impl FlowsTransmitter {
           remote: dst_addr.clone(),
           // we're adding multicast flow as 'expired' to give it grace period for multicast address collission detection
           expired: Arc::new(AtomicBool::new(is_multicast)),
+          fpp,
+          bytes_per_sample,
         };
 
         let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(self.self_info.ip_address), 0))?;
@@ -634,6 +676,8 @@ impl FlowsTransmitter {
       Some(&flow_index) => {
         warn!("got add flow request for already existing flow, setting channels instead");
         // TODO FIXME what if fpp or bytes_per_sample change?
+        let existing = self.flows.get(&flow_index).unwrap();
+        self.check_flow_params(&channel_indices, Some(existing.fpp), Some(existing.bytes_per_sample))?;
         self
           .commands_sender
           .send(Command::SetChannels {
@@ -709,6 +753,11 @@ impl FlowsTransmitter {
   ) -> Result<usize, std::io::Error> {
     if let Some((index, _)) = self.get_flow(handle) {
       let channel_indices = channel_indices.into_iter().collect_vec();
+      let (fpp, bps) = match &self.flows.get(&index) {
+        Some(f) => (Some(f.fpp), Some(f.bytes_per_sample)),
+        None => (None, None),
+      };
+      self.check_flow_params(&channel_indices, fpp, bps)?;
       self
         .commands_sender
         .send(Command::SetChannels { index: index as usize, channel_indices: channel_indices.clone() })

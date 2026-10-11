@@ -406,9 +406,10 @@ impl<'a, T: BinarySerde> Iterator for ItemsInPacketIterator<'a, T> {
 
 pub fn deserialize_items<'a, T: BinarySerde>(payload: &'a [u8]) -> ItemsInPacketIterator<'a, T> {
   let num_items: usize = (*payload.get(1).unwrap_or(&0)).into();
-  let num_items = num_items.min(payload.len() / T::SERIALIZED_SIZE);
+  // Virgil patch: a payload shorter than its item count claims is cut short, never indexed past
+  let num_items = num_items.min(payload.len().saturating_sub(2) / T::SERIALIZED_SIZE);
   ItemsInPacketIterator::<'a, T> {
-    items_bytes: &payload[2..][..num_items * T::SERIALIZED_SIZE],
+    items_bytes: payload.get(2..).map_or(&[][..], |p| &p[..num_items * T::SERIALIZED_SIZE]),
     item_start: 0,
     _t: Default::default(),
   }
@@ -635,6 +636,15 @@ mod tests {
   #[test]
   fn extract_start_index_zero_value() {
     assert_eq!(extract_start_index(&[0, 0, 0, 0]), None);
+  }
+
+  #[test]
+  fn deserialize_items_short_payload() {
+    assert!(deserialize_items::<u16>(&[]).next().is_none());
+    assert!(deserialize_items::<u16>(&[0]).next().is_none());
+    // claims 5 items but carries one and a half
+    let items: Vec<u16> = deserialize_items(&[0, 5, 0, 7, 1]).collect();
+    assert_eq!(items, vec![7]);
   }
 
   #[test]

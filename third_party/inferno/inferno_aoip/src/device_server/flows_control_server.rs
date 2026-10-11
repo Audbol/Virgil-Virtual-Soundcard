@@ -49,6 +49,11 @@ pub async fn run_server(
           }
           let num_channels = make_u16(c[12], c[13]);
           let remote_descr_offset = make_u16(c[14], c[15]) as usize;
+          let offset = 16 + num_channels as usize * 2 + 6;
+          if c.len() < offset + 4 {
+            error!("invalid flow request, {num_channels} channels in a {}-byte packet", c.len());
+            continue;
+          }
           let channel_indices = (0..num_channels as usize)
             .map(|i| {
               let id = make_u16(c[16 + i * 2], c[17 + i * 2]);
@@ -58,14 +63,20 @@ pub async fn run_server(
               }
             })
             .collect_vec();
-          let offset = (16 + num_channels * 2 + 6) as usize;
           let fpp = make_u16(c[offset], c[offset + 1]);
           let rx_flow_name_offset = make_u16(c[offset + 2], c[offset + 3]) as usize;
 
           let req_bytes = request.into_storage();
-          let hostname = read_0term_str_from_buffer(req_bytes, hostname_offset).unwrap().to_owned();
-          let rx_flow_name =
-            read_0term_str_from_buffer(req_bytes, rx_flow_name_offset).unwrap().to_owned();
+          let (hostname, rx_flow_name) = match (
+            read_0term_str_from_buffer(req_bytes, hostname_offset),
+            read_0term_str_from_buffer(req_bytes, rx_flow_name_offset),
+          ) {
+            (Ok(h), Ok(n)) => (h.to_owned(), n.to_owned()),
+            _ => {
+              error!("invalid flow request, bad name offsets: {}", hex::encode(req_bytes));
+              continue;
+            }
+          };
 
           if req_bytes.len() < remote_descr_offset + 8 {
             error!("packet too short: {}", hex::encode(req_bytes));
@@ -88,6 +99,7 @@ pub async fn run_server(
           if channel_indices.iter().flatten().find(|&&chi| chi >= self_info.tx_channels.len()).is_some() {
             error!("too large channel number, returning error");
             conn.respond_with_code(0x0302u16 /* ??? TODO */, &[]).await;
+            continue;
           }
           if sample_rate != self_info.sample_rate {
             error!("sample rate mismatch, returning error");
@@ -142,8 +154,16 @@ pub async fn run_server(
         0x0102 => {
           // update flow
           let c = request.content();
+          if c.len() < 8 {
+            error!("update flow request too short: {}", hex::encode(c));
+            continue;
+          }
           let handle: FlowHandle = c[0..6].try_into().unwrap();
           let num_channels = make_u16(c[6], c[7]);
+          if c.len() < 8 + num_channels as usize * 2 {
+            error!("update flow request, {num_channels} channels in a {}-byte packet", c.len());
+            continue;
+          }
 
           let channel_indices = (0..num_channels as usize)
             .map(|i| {
