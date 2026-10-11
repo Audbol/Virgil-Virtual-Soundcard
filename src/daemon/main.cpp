@@ -202,6 +202,20 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
           std::string path, err;
           {
             std::lock_guard<std::mutex> l(ctx.mutex);
+            // The name comes from the network: only keep one the
+            // configuration accepts (valid, unique), or the file could be
+            // corrupted or fail to load at the next start.
+            virgil::Config check = ctx.cfg;
+            auto& cv = rn.tx ? check.tx_names : check.rx_names;
+            if (cv.size() <= rn.index) cv.resize(rn.index + 1);
+            cv[rn.index] = keep;
+            std::string why = keep.empty() ? std::string() : virgil::channel_name_problem(keep);
+            if (why.empty()) virgil::validate_config(&check, &why);
+            if (!why.empty()) {
+              VIRGIL_LOG_WARN("%s channel %u renamed from the network to a name Virgil cannot keep (%s); not saved",
+                              rn.tx ? "transmit" : "receive", rn.index + 1, why.c_str());
+              continue;
+            }
             auto& v = rn.tx ? ctx.cfg.tx_names : ctx.cfg.rx_names;
             if (v.size() <= rn.index) v.resize(rn.index + 1);
             v[rn.index] = keep;

@@ -384,6 +384,9 @@ TEST(config_channel_names) {
   Config s;
   CHECK(load_config(path, &s, &err));
   CHECK(s.device_name == "Stage" && s.tx_name(0) == "Kick In" && s.rx_name(3) == "Talk back");
+  // A value that would end its line or quotes is refused (config injection).
+  CHECK(!save_channel_name(path, true, 1, "x\"\n[device]\nshm_name = /evil", &err));
+  CHECK(!set_config_value(path, "device", "name", "a\nb", &err));
   CHECK(save_channel_name(path, true, 0, "", &err));  // back to the default
   Config s2;
   CHECK(load_config(path, &s2, &err) && s2.tx_name(0).empty() && s2.rx_name(3) == "Talk back");

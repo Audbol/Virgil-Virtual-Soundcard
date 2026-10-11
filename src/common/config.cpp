@@ -336,6 +336,12 @@ bool set_config_value(const std::string& path, const std::string& section_name, 
       text = ss.str();
     }
   }
+  // The value is written quoted on one line: never let it end the line or
+  // the quotes (it would add keys or sections of its own).
+  if (value.find_first_of("\r\n\"") != std::string::npos) {
+    if (error) *error = "value contains a line break or a quote";
+    return false;
+  }
   const bool crlf = text.find("\r\n") != std::string::npos;
   const std::string nl = crlf ? "\r\n" : "\n";
   const std::string entry = value.empty() ? std::string() : key + " = \"" + value + "\"" + nl;
