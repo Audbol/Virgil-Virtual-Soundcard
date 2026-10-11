@@ -21,6 +21,7 @@ BEGIN
     EDITTEXT        IDC_TXCH, 118, 70, 30, 13, ES_NUMBER
     LTEXT           "/", -1, 152, 72, 6, 9
     EDITTEXT        IDC_RXCH, 160, 70, 30, 13, ES_NUMBER
+    PUSHBUTTON      "Channel names...", IDC_NAMES, 204, 69, 70, 15
 
     GROUPBOX        "Latency", -1, 7, 90, 276, 48
     LTEXT           "Receive (ms):", -1, 16, 106, 96, 9

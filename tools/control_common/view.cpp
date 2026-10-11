@@ -182,11 +182,18 @@ void StatusView::paint(Canvas& c, float W, float H) {
       if (!apps.empty()) apps += ",  ";
       apps += cl.name + (cl.active ? " (playing)" : "");
     }
+    const float text_r = W - kPad - 352;
     c.text(apps.empty() ? "No apps connected" : apps, Font::Label,
-           Rect{kPad, H - kFooter, W - 280, H - kFooter / 2 - 2}, apps.empty() ? kMuted : kText, Align::Left);
-    std::string ver = "Virgil " + s.version;
-    if (s.clock_steps > 1) ver += fmt("   ·   clock re-synced %llu×", s.clock_steps - 1);
-    c.text(ver, Font::Sub, Rect{kPad, H - kFooter / 2 - 4, W - 280, H - 8}, kDim, Align::Left);
+           Rect{kPad, H - kFooter, text_r, H - kFooter / 2 - 2}, apps.empty() ? kMuted : kText, Align::Left);
+    // Version, and how many dropouts the last hour had (details: Dropouts).
+    const std::string ver = "Virgil " + s.version + "   ·   ";
+    c.text(ver, Font::Sub, Rect{kPad, H - kFooter / 2 - 4, text_r, H - 8}, kDim, Align::Left);
+    const float vx = kPad + c.text_width(ver, Font::Sub);
+    const unsigned long long n = s.dropouts_last_hour;
+    c.text(n ? fmt("%llu dropout%s in the last hour", n, n == 1 ? "" : "s") : "no dropouts", Font::Sub,
+           Rect{vx, H - kFooter / 2 - 4, text_r, H - 8}, n ? kWarn : kDim, Align::Left);
+    buttons_.push_back({Rect{W - kPad - 344, H - kFooter + 12, W - kPad - 244, H - 12}, "Dropouts…",
+                        Action::Diagnostics, false});
     buttons_.push_back({Rect{W - kPad - 236, H - kFooter + 12, W - kPad - 128, H - 12}, "Settings…",
                         Action::Settings, false});
     buttons_.push_back({Rect{W - kPad - 120, H - kFooter + 12, W - kPad, H - 12}, "Restart engine",
@@ -228,6 +235,7 @@ std::string tray_tooltip(const Status& s) {
   unsigned playing = 0;
   for (const auto& c : s.clients) playing += c.active;
   if (playing) t += fmt("\n%u app(s) playing", playing);
+  if (s.dropouts_last_hour) t += fmt("\n%llu dropout(s) in the last hour", s.dropouts_last_hour);
   return t;
 }
 

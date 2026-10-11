@@ -12,3 +12,4 @@
 #define IDC_MASTER 1009
 #define IDC_ERR 1010
 #define IDC_CONFPATH 1011
+#define IDC_NAMES 1012

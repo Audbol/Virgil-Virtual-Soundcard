@@ -220,6 +220,7 @@ void set_autostart(bool on) {
   if (a == vc::Action::Settings) [app performSelector:@selector(showSettings:) withObject:nil];
   if (a == vc::Action::Restart) [app performSelector:@selector(restartEngine:) withObject:nil];
   if (a == vc::Action::StartService) [app performSelector:@selector(startService:) withObject:nil];
+  if (a == vc::Action::Diagnostics) [app performSelector:@selector(openDiagnostics:) withObject:nil];
 }
 @end
 
@@ -329,6 +330,7 @@ void set_autostart(bool on) {
   add(@"Settings…", @selector(showSettings:));
   add(@"Restart audio engine", @selector(restartEngine:));
   [m addItem:[NSMenuItem separatorItem]];
+  add(@"Dropouts and diagnostics", @selector(openDiagnostics:));
   add(@"Open control panel in browser", @selector(openBrowser:));
   add(@"Show log", @selector(showLog:));
   self.autostartItem = add(@"Start at login", @selector(toggleAutostart:));
@@ -441,9 +443,16 @@ void set_autostart(bool on) {
     alert(@"Could not start the Virgil service. See the log (Show log) for details.");
 }
 
-- (void)openBrowser:(id)sender {
+- (void)openPage:(const char*)anchor {
   [[NSWorkspace sharedWorkspace]
-      openURL:[NSURL URLWithString:ns("http://127.0.0.1:" + std::to_string(g_port) + "/")]];
+      openURL:[NSURL URLWithString:ns("http://127.0.0.1:" + std::to_string(g_port) + "/" + anchor)]];
+}
+- (void)openBrowser:(id)sender {
+  [self openPage:""];
+}
+// Dropout details and the channel name editor live in the control panel.
+- (void)openDiagnostics:(id)sender {
+  [self openPage:"#diagnostics"];
 }
 
 - (void)showLog:(id)sender {
@@ -556,6 +565,7 @@ void set_autostart(bool on) {
   a.informativeText = @"Applying restarts the audio engine; connected apps stay attached if the format is unchanged.";
   [a addButtonWithTitle:@"Apply"];
   [a addButtonWithTitle:@"Cancel"];
+  [a addButtonWithTitle:@"Channel names…"];
   NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 320)];
   [box addSubview:grid];
   [grid.leadingAnchor constraintEqualToAnchor:box.leadingAnchor].active = YES;
@@ -564,7 +574,8 @@ void set_autostart(bool on) {
   if (@available(macOS 10.14, *)) a.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
   [NSApp activateIgnoringOtherApps:YES];
 
-  while ([a runModal] == NSAlertFirstButtonReturn) {
+  NSModalResponse response;
+  while ((response = [a runModal]) == NSAlertFirstButtonReturn) {
     f.name = name.stringValue.UTF8String ?: "";
     f.iface_index = int(iface.indexOfSelectedItem);
     f.rate_index = int(rate.indexOfSelectedItem);
@@ -578,6 +589,7 @@ void set_autostart(bool on) {
     if (vc::save_settings(g_port, vc::apply_settings(c.body, f), &e)) break;
     err.stringValue = ns(e);
   }
+  if (response == NSAlertThirdButtonReturn) [self openPage:"#channels"];
 }
 
 @end

@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.0
+- **Dropout diagnostics.** Virgil now notices and explains dropouts: audio from the network that arrived too late for the receive latency or never arrived, apps that did not deliver their audio in time, the computer keeping Virgil's engine waiting, and clock trouble. Virgil Control shows how many dropouts the last hour had; *Dropouts…* opens the event list with a chart of the last hour, suggestions (for example the receive latency that would have covered the late audio) and *Download report*, a text file with the setup, the events and the recent log for bug reports.
+- **Channel names.** Name channels in Virgil's settings or in Dante Controller (both stay in step, and the names are saved in the configuration). ASIO and Core Audio apps show them as channel names.
+- macOS: the Virgil device now has the channel count, sample rate and latency set in Virgil. It used to keep 8 channels when Core Audio started before the Virgil service (as at boot) until Core Audio was restarted, so apps such as Live Professor saw 8 of 32 channels. It also follows later changes by itself.
+- The drivers and the service must be the same version (the shared-memory layout changed); the installers update both.
+
 ## 0.5.2
 - **Unique device names on every platform.** Every installation used to start out named "Virgil", so two computers running Virgil conflicted in Dante Controller. Virgil now replaces the stock name with Virgil-<computer name> when it starts (and saves it, so the control panel shows it); a name you chose yourself is kept. Devices subscribed to the old "Virgil" channels need re-subscribing to the new name.
 - Includes the macOS fixes of 0.5.1 (Quit, single instance, app menu).

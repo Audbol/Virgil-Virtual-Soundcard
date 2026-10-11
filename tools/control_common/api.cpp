@@ -339,6 +339,9 @@ bool parse_status(const std::string& body, Status* st) {
   s.grandmaster = c["grandmaster"].str();
   s.late_ticks = (unsigned long long)j["counters"]["late_ticks"].num();
   s.clock_steps = (unsigned long long)j["counters"]["clock_steps"].num();
+  s.dropouts_last_hour = (unsigned long long)j["dropouts_last_hour"].num();
+  for (size_t i = 0; i < j["tx_names"].size(); ++i) s.tx_names.push_back(j["tx_names"][i].str());
+  for (size_t i = 0; i < j["rx_names"].size(); ++i) s.rx_names.push_back(j["rx_names"][i].str());
   const Json& cl = j["clients"];
   for (size_t i = 0; i < cl.size(); ++i) s.clients.push_back({cl[i]["name"].str(), cl[i]["active"].boolean()});
   const Json& m = j["meters"];

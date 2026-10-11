@@ -53,6 +53,8 @@ struct Status {
   double offset_us = 0;
   std::string grandmaster;
   unsigned long long late_ticks = 0, clock_steps = 0;
+  unsigned long long dropouts_last_hour = 0;
+  std::vector<std::string> tx_names, rx_names;  // channel names (Dante Controller)
   std::vector<Client> clients;
   std::vector<float> meter_tx, meter_rx;
 };

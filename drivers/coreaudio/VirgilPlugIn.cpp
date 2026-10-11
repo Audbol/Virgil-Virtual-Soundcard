@@ -20,7 +20,9 @@
 #include <cmath>
 #include <cstring>
 #include <mutex>
+#include <string>
 #include <thread>
+#include <vector>
 
 #include "virgil/client.h"
 #include "virgil/platform.h"
@@ -266,9 +268,40 @@ OSStatus Initialize(AudioServerPlugInDriverRef inDriver, AudioServerPlugInHostRe
 
 // Asks the host to change the device when virgild's format differs from the
 // one we publish (8 channels until virgild is first seen, for example).
+// Tells the host that channel names changed (renamed in Dante Controller or
+// in Virgil's settings).
+void notify_names(AudioServerPlugInHostRef host) {
+  std::vector<AudioObjectPropertyAddress> addrs;
+  UInt32 in, out;
+  {
+    std::lock_guard<std::mutex> l(g.mutex);
+    in = g.in_channels;
+    out = g.out_channels;
+  }
+  for (UInt32 i = 1; i <= in; ++i)
+    addrs.push_back({kAudioObjectPropertyElementName, kAudioObjectPropertyScopeInput, i});
+  for (UInt32 i = 1; i <= out; ++i)
+    addrs.push_back({kAudioObjectPropertyElementName, kAudioObjectPropertyScopeOutput, i});
+  if (!addrs.empty()) host->PropertiesChanged(host, kObjectID_Device, UInt32(addrs.size()), addrs.data());
+}
+
 void watch_format() {
+  uint32_t names_seq = 0;
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
+    {
+      virgil::Client c;
+      if (c.open() && c.names_seq() != names_seq) {
+        const bool first = names_seq == 0;
+        names_seq = c.names_seq();
+        AudioServerPlugInHostRef host;
+        {
+          std::lock_guard<std::mutex> l(g.mutex);
+          host = g.host;
+        }
+        if (host && !first) notify_names(host);
+      }
+    }
     Format want;
     // A request the host has not acted on within 5 s is made again.
     const int64_t pending = g.change_requested_ns.load();
@@ -352,6 +385,11 @@ Boolean HasProperty(AudioServerPlugInDriverRef inDriver, AudioObjectID id, pid_t
         case kAudioDevicePropertyPreferredChannelsForStereo:
           return a->mScope == kAudioObjectPropertyScopeInput ||
                  a->mScope == kAudioObjectPropertyScopeOutput;
+        case kAudioObjectPropertyElementName:  // channel names, as in Dante Controller
+          return (a->mScope == kAudioObjectPropertyScopeInput && a->mElement >= 1 &&
+                  a->mElement <= g.in_channels) ||
+                 (a->mScope == kAudioObjectPropertyScopeOutput && a->mElement >= 1 &&
+                  a->mElement <= g.out_channels);
       }
       return false;
     case kObjectID_Stream_Input:
@@ -408,6 +446,7 @@ OSStatus GetPropertyDataSize(AudioServerPlugInDriverRef inDriver, AudioObjectID 
       *out = sizeof(AudioObjectID);
       return kAudioHardwareNoError;
     case kAudioObjectPropertyName:
+    case kAudioObjectPropertyElementName:
     case kAudioObjectPropertyManufacturer:
     case kAudioDevicePropertyDeviceUID:
     case kAudioDevicePropertyModelUID:
@@ -506,6 +545,17 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
         }
         // Invalid UTF-8 (cut inside a character) gives NULL: never hand that out.
         if (!name) name = CFSTR("Virgil Virtual Soundcard");
+        return put<CFStringRef>(inDataSize, outDataSize, outData, name);
+      }
+      case kAudioObjectPropertyElementName: {
+        const bool input = a->mScope == kAudioObjectPropertyScopeInput;
+        const UInt32 ch = a->mElement - 1;
+        virgil::Client c;
+        std::string n = c.open() ? c.channel_name(!input, ch) : std::string();
+        if (n.empty() || n == std::string(input ? "RX " : "TX ") + std::to_string(ch + 1))
+          n = std::string(input ? "Input " : "Output ") + std::to_string(ch + 1);
+        CFStringRef name = CFStringCreateWithCString(nullptr, n.c_str(), kCFStringEncodingUTF8);
+        if (!name) name = CFSTR("");
         return put<CFStringRef>(inDataSize, outDataSize, outData, name);
       }
       case kAudioObjectPropertyManufacturer:

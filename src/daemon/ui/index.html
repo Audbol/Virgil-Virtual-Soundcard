@@ -85,6 +85,30 @@ textarea { font-family: var(--mono); font-size: 12.5px; min-height: 260px; resiz
 details summary { cursor: pointer; color: var(--muted); margin-top: 14px; font-size: 13px; }
 .inline-num { width: 70px; display: inline-block; padding: 4px 6px; }
 footer { color: var(--muted); font-size: 12px; text-align: center; }
+.names { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
+.names h3 { margin: 0 0 8px; font-size: 12.5px; color: var(--muted); font-weight: 600; }
+.namegrid { display: grid; grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); gap: 6px 10px; }
+.namegrid label { grid-template-columns: 26px 1fr; align-items: center; gap: 6px; }
+.namegrid label span { font-family: var(--mono); font-size: 11.5px; text-align: right; }
+.namegrid input { padding: 5px 7px; }
+.namegrid input:invalid { border-color: var(--bad); }
+.diag-top { display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+.diag-top .big { font-size: 18px; font-weight: 600; }
+.chart { display: flex; align-items: flex-end; gap: 2px; height: 64px; margin: 14px 0 4px; padding: 0 2px;
+  border-bottom: 1px solid var(--line); }
+.chart .col { flex: 1; display: flex; flex-direction: column-reverse; min-width: 3px; height: 100%; }
+.chart .col i { display: block; width: 100%; }
+.chart .net { background: var(--info); } .chart .apps { background: var(--warn); }
+.chart .engine { background: var(--accent); } .chart .clock { background: var(--bad); }
+.legend { display: flex; gap: 14px; flex-wrap: wrap; color: var(--muted); font-size: 12px; }
+.legend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin-right: 5px; vertical-align: -1px; }
+.hints { margin: 12px 0 0; padding-left: 20px; } .hints li { margin: 4px 0; }
+.ev td:first-child { white-space: nowrap; font-family: var(--mono); font-size: 12px; color: var(--muted); }
+.ev .warn td:nth-child(2)::before, .ev .error td:nth-child(2)::before, .ev .info td:nth-child(2)::before {
+  content: ""; display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 8px; vertical-align: 1px; }
+.ev .warn td:nth-child(2)::before { background: var(--warn); } .ev .error td:nth-child(2)::before { background: var(--bad); }
+.ev .info td:nth-child(2)::before { background: var(--muted); }
+@media (max-width: 760px) { .names { grid-template-columns: 1fr; } }
 .offline main > :not(#offline) { opacity: .45; pointer-events: none; }
 #offline { display: none; }
 .offline #offline { display: block; }
@@ -130,6 +154,24 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
     </section>
   </div>
 
+  <section aria-labelledby="h-diag" id="diagnostics">
+    <div class="head"><h2 id="h-diag">Dropouts</h2><span class="hint" id="d-since"></span></div>
+    <div class="diag-top">
+      <span class="pill" id="d-pill"><span class="dot"></span><span id="d-head">—</span></span>
+      <span class="spacer"></span>
+      <button id="d-report">Download report</button>
+      <button id="d-clear">Clear</button>
+    </div>
+    <div class="chart" id="d-chart" role="img" aria-label="Dropouts per minute, last hour"></div>
+    <div class="legend"><span>last 60 minutes, per minute:</span><span><i class="net" style="background:var(--info)"></i>network</span>
+      <span><i style="background:var(--warn)"></i>apps</span><span><i style="background:var(--accent)"></i>computer busy</span>
+      <span><i style="background:var(--bad)"></i>clock</span></div>
+    <ul class="hints" id="d-hints"></ul>
+    <details id="d-evwrap" open><summary>Events</summary>
+      <div class="tw"><table class="ev"><tbody id="d-events"></tbody></table></div>
+    </details>
+  </section>
+
   <section aria-labelledby="h-route">
     <div class="head"><h2 id="h-route">Routing</h2></div>
     <p id="routing" style="margin:0">Open <b>Dante Controller</b>: this computer appears as <b id="r-name">Virgil</b> with
@@ -151,6 +193,13 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
       <label>Clock<select id="f-clock" data-key="clock">
         <option value="ptp">PTP (follow the Dante clock master)</option><option value="free">Local clock only (testing)</option></select></label>
     </div>
+    <details id="channels"><summary>Channel names</summary>
+      <p style="color:var(--muted);font-size:12.5px;margin:8px 0 12px">Shown in Dante Controller and, as channel names, in ASIO and Core Audio apps. Leave a field empty for the default (TX 1, RX 1, …). Names changed in Dante Controller appear here too. Up to 31 characters, unique per direction, without = . @ or ".</p>
+      <div class="names">
+        <div><h3>Transmit (playback → network)</h3><div class="namegrid" id="n-tx"></div></div>
+        <div><h3>Receive (network → capture)</h3><div class="namegrid" id="n-rx"></div></div>
+      </div>
+    </details>
     <details id="adv"><summary>Advanced: edit configuration file</summary>
       <p class="sub" style="color:var(--muted);font-size:12.5px">The form above edits this text. See <code>virgil.conf.example</code> for every option. Latency must match on both ends: Dante Controller shows the device latency it expects.</p>
       <textarea id="cfgtext" spellcheck="false" aria-label="Configuration file"></textarea>
@@ -199,7 +248,7 @@ function getKey(text, section, key) {
   const { lines, list } = sections(text);
   const s = list.find(x => x.name === section); if (!s) return null;
   for (let i = s.start; i < s.end; i++) {
-    const m = lines[i].match(/^\s*([A-Za-z_]+)\s*=\s*(.*)$/);
+    const m = lines[i].match(/^\s*([A-Za-z_0-9]+)\s*=\s*(.*)$/);
     if (m && m[1].toLowerCase() === key) {
       let v = m[2]; let q = false; let out = "";
       for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }
@@ -209,13 +258,22 @@ function getKey(text, section, key) {
   return null;
 }
 function quoteVal(v) { v = String(v); return /[;#]|^\s|\s$/.test(v) ? '"' + v + '"' : v; }
+function removeKey(text, section, key) {
+  const { lines, list } = sections(text);
+  const s = list.find(x => x.name === section); if (!s) return text;
+  for (let i = s.start; i < s.end; i++) {
+    const m = lines[i].match(/^\s*([A-Za-z_0-9]+)\s*=/);
+    if (m && m[1].toLowerCase() === key) { lines.splice(i, 1); return lines.join("\n"); }
+  }
+  return text;
+}
 function setKey(text, section, key, value) {
   const { lines, list } = sections(text);
   let s = list.find(x => x.name === section);
   const line = key + " = " + quoteVal(value);
   if (!s) { return text.replace(/\s*$/, "") + "\n\n[" + section + "]\n" + line + "\n"; }
   for (let i = s.start; i < s.end; i++) {
-    const m = lines[i].match(/^(\s*)([A-Za-z_]+)(\s*=\s*)(.*)$/);
+    const m = lines[i].match(/^(\s*)([A-Za-z_0-9]+)(\s*=\s*)(.*)$/);
     if (m && m[2].toLowerCase() === key) { lines[i] = m[1] + key + m[3] + quoteVal(value); return lines.join("\n"); }
   }
   let at = s.end; while (at > s.start + 1 && lines[at - 1].trim() === "") at--;
@@ -232,7 +290,7 @@ function meterDom(el, n, prefix) {
     `<div class="meter" title="${prefix} ${i + 1}"><div class="track"><div class="fill"></div><div class="hold"></div></div><div class="lbl">${i + 1}</div></div>`).join("");
 }
 function meterPos(lin) { if (!(lin > 0)) return 0; const db = 20 * Math.log10(lin); return Math.max(0, Math.min(1, (db + 60) / 60)); }
-function renderMeters(el, vals, holds, n, prefix) {
+function renderMeters(el, vals, holds, n, prefix, names) {
   meterDom(el, n, prefix);
   const now = performance.now();
   [...el.children].forEach((m, i) => {
@@ -242,7 +300,8 @@ function renderMeters(el, vals, holds, n, prefix) {
     if (p >= h.p || now - h.t > 1500) { holds[i] = { p, t: now }; }
     m.querySelector(".hold").style.bottom = "calc(" + (holds[i].p * 100).toFixed(1) + "% - 2px)";
     m.querySelector(".hold").style.display = holds[i].p > 0.01 ? "" : "none";
-    m.title = prefix + " " + (i + 1) + (vals[i] > 0 ? ": " + (20 * Math.log10(vals[i])).toFixed(1) + " dBFS" : ": silent");
+    const nm = names && names[i] ? " · " + names[i] : "";
+    m.title = prefix + " " + (i + 1) + nm + (vals[i] > 0 ? ": " + (20 * Math.log10(vals[i])).toFixed(1) + " dBFS" : ": silent");
   });
 }
 
@@ -267,7 +326,9 @@ function render(st) {
   $("c-format").textContent = `${fmtRate(d.sample_rate)} · ${d.tx_channels}×${d.rx_channels} ch`;
   $("c-format2").textContent = `rx latency ${fmtUs(d.latency_us)} · tx latency ${fmtUs(d.tx_latency_us)}`;
   $("c-net").textContent = d.address || (d.interface || "—");
-  $("c-net2").textContent = d.dante ? `Dante device online · late ticks ${fmtCount(k.late_ticks || 0)}` : "Dante stack not running";
+  const dh = st.dropouts_last_hour || 0;
+  $("c-net2").textContent = d.dante ? (dh ? `${dh} dropout${dh === 1 ? "" : "s"} in the last hour` : "Dante device online · no dropouts")
+    : "Dante stack not running";
   $("r-name").textContent = d.name; $("r-tx").textContent = d.tx_channels; $("r-rx").textContent = d.rx_channels;
 
   const playing = st.clients.filter(x => x.active);
@@ -276,8 +337,9 @@ function render(st) {
     : "ASIO, Core Audio and ALSA clients appear here";
   if (playing.length) $("c-apps").textContent = `${playing.length} playing`;
 
-  renderMeters($("m-tx"), st.meters.tx, S.holds.tx, d.tx_channels, "Playback channel");
-  renderMeters($("m-rx"), st.meters.rx, S.holds.rx, d.rx_channels, "Capture channel");
+  renderMeters($("m-tx"), st.meters.tx, S.holds.tx, d.tx_channels, "Playback channel", st.tx_names);
+  renderMeters($("m-rx"), st.meters.rx, S.holds.rx, d.rx_channels, "Capture channel", st.rx_names);
+  renderNamePlaceholders(st);
 
   $("cfgpath").textContent = st.config_path ? "Saved to " + st.config_path : "";
   $("footer").textContent = `Virgil ${st.version} · GPLv3, no warranty · not affiliated with or endorsed by Audinate; Dante is a registered trademark of Audinate Pty Ltd · control panel on this computer only (127.0.0.1)`;
@@ -300,6 +362,7 @@ function fillForm() {
     else if (id === "f-lat" || id === "f-txlat") el.value = "4000";
   }
   $("cfgtext").value = t;
+  fillNames();
 }
 function markDirty() {
   const dirty = S.cfg !== S.savedCfg;
@@ -309,6 +372,7 @@ function markDirty() {
 FIELDS.forEach(id => $(id).addEventListener("input", e => {
   S.cfg = setKey(S.cfg, "device", e.target.dataset.key, e.target.value);
   $("cfgtext").value = S.cfg; markDirty();
+  if (/_channels$/.test(e.target.dataset.key)) fillNames();
 }));
 $("cfgtext").addEventListener("input", e => { S.cfg = e.target.value; fillFormFromText(); markDirty(); });
 function fillFormFromText() { const keep = $("cfgtext").value; fillForm(); $("cfgtext").value = keep; }
@@ -326,6 +390,77 @@ $("restart").addEventListener("click", async () => {
   try { await api("/api/restart", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Audio engine restarting…"; }
   catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
 });
+// ---------- channel names ----------
+function nameOk(v) {
+  if (v.length > 31 || v !== v.trim()) return false;
+  for (const ch of v) { const c = ch.charCodeAt(0); if (c < 0x20 || c > 0x7e || '=.@"\\'.includes(ch)) return false; }
+  return true;
+}
+function namesDom(el, dir, n) {
+  if (el.childElementCount === n && el.dataset.n == n) return;
+  el.dataset.n = n;
+  el.innerHTML = Array.from({ length: n }, (_, i) =>
+    `<label><span>${i + 1}</span><input data-dir="${dir}" data-i="${i + 1}" maxlength="31" spellcheck="false"
+      aria-label="${dir === "tx" ? "Transmit" : "Receive"} channel ${i + 1} name"></label>`).join("");
+  el.querySelectorAll("input").forEach(inp => inp.addEventListener("input", e => {
+    const v = e.target.value.trim(), key = e.target.dataset.dir + e.target.dataset.i;
+    e.target.setCustomValidity(v === "" || nameOk(v) ? "" : "Up to 31 characters, without = . @ or \"");
+    S.cfg = v === "" ? removeKey(S.cfg, "channel_names", key) : setKey(S.cfg, "channel_names", key, v);
+    $("cfgtext").value = S.cfg; markDirty();
+  }));
+}
+function fillNames() {
+  const tx = +(getKey(S.cfg, "device", "tx_channels") ?? 8), rx = +(getKey(S.cfg, "device", "rx_channels") ?? 8);
+  namesDom($("n-tx"), "tx", Math.max(0, Math.min(64, tx || 0)));
+  namesDom($("n-rx"), "rx", Math.max(0, Math.min(64, rx || 0)));
+  document.querySelectorAll(".namegrid input").forEach(inp => {
+    if (document.activeElement === inp) return;
+    inp.value = getKey(S.cfg, "channel_names", inp.dataset.dir + inp.dataset.i) ?? "";
+  });
+  if (S.status) renderNamePlaceholders(S.status);
+}
+function renderNamePlaceholders(st) {
+  document.querySelectorAll(".namegrid input").forEach(inp => {
+    const live = (inp.dataset.dir === "tx" ? st.tx_names : st.rx_names) || [];
+    inp.placeholder = live[inp.dataset.i - 1] || (inp.dataset.dir === "tx" ? "TX " : "RX ") + inp.dataset.i;
+  });
+}
+
+// ---------- diagnostics ----------
+function fmtTime(ms) { return new Date(ms).toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit", second: "2-digit" }); }
+function fmtDay(ms) { const d = new Date(ms); return d.toDateString() === new Date().toDateString() ? fmtTime(ms) : d.toLocaleString(); }
+function renderDiag(g) {
+  const n = g.dropouts_last_hour;
+  $("d-pill").className = "pill " + (n ? "warn" : "ok");
+  $("d-head").textContent = n ? `${n} dropout${n === 1 ? "" : "s"} in the last hour` : "No dropouts in the last hour";
+  $("d-since").textContent = "since " + fmtDay(g.since_ms) + (g.dropouts_total ? ` · ${g.dropouts_total} in total` : "");
+  // Last 60 minutes, oldest left.
+  const byMin = new Map(g.minutes.map(m => [m.t, m]));
+  const now = g.now_ms, m0 = now - now % 60000, cols = [];
+  let peak = 1;
+  for (let k = 59; k >= 0; k--) { const m = byMin.get(m0 - k * 60000); if (m) peak = Math.max(peak, m.network + m.apps + m.engine + m.clock); }
+  for (let k = 59; k >= 0; k--) {
+    const t = m0 - k * 60000, m = byMin.get(t) || { network: 0, apps: 0, engine: 0, clock: 0 };
+    const seg = (cls, v) => v ? `<i class="${cls}" style="height:${(v / peak * 100).toFixed(1)}%"></i>` : "";
+    const tip = `${fmtTime(t).slice(0, 5)}: ${m.network} network, ${m.apps} apps, ${m.engine} busy, ${m.clock} clock (seconds with trouble)`;
+    cols.push(`<div class="col" title="${esc(tip)}">${seg("net", m.network)}${seg("apps", m.apps)}${seg("engine", m.engine)}${seg("clock", m.clock)}</div>`);
+  }
+  $("d-chart").innerHTML = cols.join("");
+  $("d-hints").innerHTML = g.hints.map(h => `<li>${esc(h)}</li>`).join("");
+  $("d-events").innerHTML = g.events.length ? g.events.slice(0, 100).map(e => {
+    const dur = e.end_ms - e.start_ms >= 1000 ? ` <span class="sub">(${Math.round((e.end_ms - e.start_ms) / 1000)} s)</span>` : "";
+    return `<tr class="${e.severity}"><td>${esc(fmtDay(e.start_ms))}</td><td>${esc(e.text)}${dur}</td></tr>`;
+  }).join("") : `<tr><td class="empty" colspan="2">Nothing yet.</td></tr>`;
+}
+async function pollDiag() {
+  try { renderDiag(await api("/api/diagnostics")); } catch (e) { }
+  setTimeout(pollDiag, document.hidden ? 10000 : 2000);
+}
+$("d-report").addEventListener("click", () => { location.href = "/api/diagnostics/report"; });
+$("d-clear").addEventListener("click", async () => {
+  try { await api("/api/diagnostics/reset", { method: "POST" }); renderDiag(await api("/api/diagnostics")); } catch (e) { }
+});
+
 // ---------- polling ----------
 let failures = 0;
 async function pollStatus() {
@@ -344,7 +479,9 @@ async function loadConfig() {
     if (S.cfg === S.savedCfg) { S.cfg = S.savedCfg = cfg; fillForm(); markDirty(); }
   } catch (e) { setTimeout(loadConfig, 2000); }
 }
-pollStatus(); loadConfig();
+pollStatus(); loadConfig(); pollDiag();
+// Virgil Control opens #diagnostics or #channels directly.
+if (location.hash === "#channels") $("channels").open = true;
 </script>
 </body>
 </html>

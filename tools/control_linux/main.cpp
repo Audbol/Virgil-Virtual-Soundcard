@@ -254,6 +254,7 @@ void set_cursor() {
 void show_settings();
 void restart_engine();
 void start_service();
+void open_diagnostics();
 
 gboolean on_motion(GtkWidget*, GdkEventMotion* e, gpointer) {
   if (g_view.hover(float(e->x), float(e->y))) {
@@ -273,6 +274,7 @@ gboolean on_release(GtkWidget*, GdkEventButton* e, gpointer) {
   if (a == vc::Action::Settings) show_settings();
   if (a == vc::Action::Restart) restart_engine();
   if (a == vc::Action::StartService) start_service();
+  if (a == vc::Action::Diagnostics) open_diagnostics();
   return TRUE;
 }
 
@@ -434,9 +436,13 @@ void show_log() {
   gtk_widget_destroy(d);
 }
 
-void open_browser() {
-  spawn_detached({"xdg-open", "http://127.0.0.1:" + std::to_string(g_port) + "/"});
+void open_page(const char* anchor) {
+  spawn_detached({"xdg-open", "http://127.0.0.1:" + std::to_string(g_port) + "/" + anchor});
 }
+void open_browser() { open_page(""); }
+// Dropout details and the channel name editor live in the control panel.
+void open_diagnostics() { open_page("#diagnostics"); }
+void open_channel_names() { open_page("#channels"); }
 
 void show_about() {
   GtkWidget* d = gtk_about_dialog_new();
@@ -491,6 +497,8 @@ GtkWidget* label(const char* text) {
   return l;
 }
 
+constexpr int kResponseNames = 1;
+
 void show_settings() {
   const auto c = vc::http(g_port, "GET", "/api/config");
   if (c.status != 200) {
@@ -502,8 +510,8 @@ void show_settings() {
 
   GtkWidget* d = gtk_dialog_new_with_buttons(
       "Virgil Settings", g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr,
-      GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT), "_Cancel", GTK_RESPONSE_CANCEL, "_Apply",
-      GTK_RESPONSE_APPLY, nullptr);
+      GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT), "Channel _names…", kResponseNames,
+      "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
   gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_APPLY);
   GtkWidget* grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
@@ -582,7 +590,8 @@ void show_settings() {
   gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), grid, TRUE, TRUE, 0);
   gtk_widget_show_all(d);
 
-  while (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_APPLY) {
+  int response;
+  while ((response = gtk_dialog_run(GTK_DIALOG(d))) == GTK_RESPONSE_APPLY) {
     f.name = gtk_entry_get_text(GTK_ENTRY(name));
     f.iface_index = gtk_combo_box_get_active(GTK_COMBO_BOX(iface));
     f.rate_index = gtk_combo_box_get_active(GTK_COMBO_BOX(rate));
@@ -601,6 +610,7 @@ void show_settings() {
     g_free(m);
   }
   gtk_widget_destroy(d);
+  if (response == kResponseNames) open_channel_names();
 }
 
 // ---- tray --------------------------------------------------------------------------------
@@ -621,6 +631,7 @@ void build_menu() {
   menu_item("Settings…", show_settings);
   menu_item("Restart audio engine", restart_engine);
   menu_sep();
+  menu_item("Dropouts and diagnostics", open_diagnostics);
   menu_item("Open control panel in browser", open_browser);
   menu_item("Show log", show_log);
   g_autostart_item = gtk_check_menu_item_new_with_label("Start at login");

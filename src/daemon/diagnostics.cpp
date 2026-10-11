@@ -214,8 +214,9 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
     if (gaps)
       add_locked(Kind::NetLost, std::string(), gaps, delta(c.rx_missing_samples, prev_.rx_missing_samples) * 1000.0 / rate,
                  now, std::string());
+    // Only audible with an app attached (otherwise nothing waited for it).
     const uint64_t lt = delta(c.overdue_ticks, prev_.overdue_ticks);
-    if (lt) add_locked(Kind::EngineLate, std::string(), lt, 0, now, std::string());
+    if (lt && !c.apps.empty()) add_locked(Kind::EngineLate, std::string(), lt, 0, now, std::string());
     const uint64_t rs = delta(c.resyncs, prev_.resyncs);
     if (rs) add_locked(Kind::ClockJump, std::string(), rs, 0, now, std::string());
   }

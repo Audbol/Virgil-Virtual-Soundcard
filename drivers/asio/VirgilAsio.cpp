@@ -20,6 +20,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <string>
 #include <thread>
 #include <vector>
 
@@ -195,7 +196,13 @@ class VirgilAsio : public IASIO {
     info->isActive = ASIOFalse;
     for (const auto& c : (in ? inputs_ : outputs_))
       if (c.channel == info->channel) info->isActive = ASIOTrue;
-    std::snprintf(info->name, sizeof info->name, "Virgil %s %ld", in ? "In" : "Out", info->channel + 1);
+    // The channel's name in Dante Controller when it has one ("3 Kick In").
+    const std::string dante = client_.channel_name(!in, uint32_t(info->channel));
+    const std::string dflt = std::string(in ? "RX " : "TX ") + std::to_string(info->channel + 1);
+    if (!dante.empty() && dante != dflt)
+      std::snprintf(info->name, sizeof info->name, "%ld %s", info->channel + 1, dante.c_str());
+    else
+      std::snprintf(info->name, sizeof info->name, "Virgil %s %ld", in ? "In" : "Out", info->channel + 1);
     return ASE_OK;
   }
 

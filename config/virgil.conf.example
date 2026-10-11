@@ -41,6 +41,14 @@ clock = ptp
 # Local web control panel port (127.0.0.1 only).
 control_port = 8480
 
+[channel_names]
+# Optional channel names, shown in Dante Controller and by ASIO / Core Audio
+# apps; renames made in Dante Controller are saved here. tx = playback
+# (computer -> network), rx = capture. Up to 31 characters, unique per
+# direction, without = . @ or ". Unnamed channels are TX n / RX n.
+# tx1 = Kick In
+# rx1 = Talkback
+
 [ptp]
 # PTPv1 subdomain Dante uses.
 subdomain = _DFLT

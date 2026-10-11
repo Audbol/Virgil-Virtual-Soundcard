@@ -51,3 +51,11 @@ Changes for Virgil:
    `DynamicUser=`, and no user database entry) the state directory lookup
    panicked and the device never started; it now falls back to the temp
    directory. Virgil's Linux service also sets `HOME` to its state directory.
+10. `device_server/rx_stats.rs` (new) and `flows_rx.rs`: counters of received
+    packets, packets that arrived after their receive latency, and gaps in a
+    flow's timestamps (lost audio), for Virgil's dropout diagnostics.
+11. `saved_settings.rs`, `settings.rs`: the embedding program can set channel
+    names for the next start (`set_name_overrides`; they win over the saved
+    ones and are saved), read the current names (`current_name`) and is told
+    about renames from the network (`set_rename_hook`), so Virgil's
+    configuration and Dante Controller show the same names.

@@ -147,7 +147,8 @@ desktop; raise the latencies if you hear dropouts.
 Virgil Control is a native app on every platform, with the same window: the
 device name and address, the clock state, level meters for every channel from
 the network (on top) and to the network (below), the apps that are playing,
-and *Settings…* and *Restart engine* buttons.
+how many dropouts the last hour had, and *Dropouts…*, *Settings…* and
+*Restart engine* buttons.
 
 - **Windows:** lives in the notification area (system tray) and starts with
   Windows. Right-click the icon for *Settings…*, *Restart audio engine*,
@@ -169,13 +170,43 @@ The same controls are also available in a browser at http://127.0.0.1:8480/
 (*Open control panel in browser* in the menu), which is handy on a headless
 Raspberry Pi over SSH. It also has an editor for the raw configuration file.
 
+### Dropouts and diagnostics
+
+Virgil watches for everything that can make audio drop out and keeps a log of
+it: audio from the network that arrived too late for the receive latency or
+never arrived, apps that did not deliver their audio in time, the computer
+keeping Virgil's engine waiting, and the clock leader being lost or the clock
+jumping. *Dropouts…* (also in the tray menu as *Dropouts and diagnostics*)
+opens the list in the control panel, with a chart of the last hour and
+suggestions, such as the receive latency that would have covered the late
+audio. *Download report* saves a text file with the setup, the events and the
+recent log, to attach to a bug report.
+
+### Channel names
+
+Name channels in *Settings… › Channel names…* (or in the control panel). The
+names appear in Dante Controller, and ASIO and Core Audio apps show them as
+channel names, e.g. `3 Kick In` in REAPER on Windows. Renaming a channel in
+Dante Controller works too; Virgil saves that name in its configuration. In
+the file they are a `[channel_names]` section:
+
+```ini
+[channel_names]
+tx1 = Kick In
+tx2 = Snare Top
+rx1 = Talkback
+```
+
+Names have up to 31 characters, are unique per direction, and cannot contain
+`=`, `.`, `@` or `"`. ASIO hosts read the names when they open the driver.
+
 Routing is done in Dante Controller (or any Dante routing tool).
 
 **Apply** validates the configuration, saves it and restarts the audio
 engine inside `virgild`. Apps stay connected when the sample rate and channel
 counts are unchanged. If those change, ALSA apps reconnect by themselves
-and ASIO hosts get a driver reset request. On macOS, restart Core Audio
-after changing them.
+and ASIO hosts get a driver reset request. On macOS the Virgil device
+changes to the new format by itself (apps may briefly stop and restart it).
 
 The panel only listens on 127.0.0.1. It refuses requests addressed to other
 host names (DNS rebinding) and cross-site form posts. Set `control_port = 0`

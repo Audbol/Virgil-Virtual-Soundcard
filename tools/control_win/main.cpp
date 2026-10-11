@@ -92,7 +92,7 @@ const unsigned kBg = 0x15171A, kPanel = 0x1B1E22, kLine = 0x2A2E34, kText = 0xE9
 const wchar_t* kWindowClass = L"VirgilControlWindow";
 const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3;
 const UINT kTrayId = 1;
-enum { ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT };
+enum { ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT, ID_DIAG };
 
 HINSTANCE g_inst;
 HWND g_hwnd;
@@ -402,7 +402,7 @@ void paint(HWND hwnd) {
        kText);
   if (!cv.line2.empty()) text(cv.line2, g_f_sub, D2D1::RectF(cx + 16, 40, W - kPad, 58), kMuted);
 
-  g_buttons.resize(3);
+  g_buttons.resize(4);
   for (auto& b : g_buttons) b.visible = false;
 
   if (!s.reachable) {
@@ -437,11 +437,21 @@ void paint(HWND hwnd) {
   }
   if (s.reachable)
     text(apps.empty() ? L"No apps connected" : apps, g_f_label,
-         D2D1::RectF(kPad, H - kFooter, W - 280, H - kFooter / 2 - 2), apps.empty() ? kMuted : kText);
-  if (s.reachable)
-    text(L"Virgil " + widen(s.version) + (s.clock_steps > 1 ? fmt(L"   \u00b7   clock re-synced %llu\u00d7", s.clock_steps - 1) : L""),
-         g_f_sub, D2D1::RectF(kPad, H - kFooter / 2 - 4, W - 280, H - 8), kDim);
+         D2D1::RectF(kPad, H - kFooter, W - kPad - 352, H - kFooter / 2 - 2), apps.empty() ? kMuted : kText);
   if (s.reachable) {
+    // Version, and how many dropouts the last hour had (details: Dropouts).
+    const unsigned long long n = s.dropouts_last_hour;
+    text(L"Virgil " + widen(s.version) + L"   \u00b7   " +
+             (n ? fmt(L"%llu dropout%s in the last hour", n, n == 1 ? L"" : L"s") : std::wstring(L"no dropouts")),
+         g_f_sub, D2D1::RectF(kPad, H - kFooter / 2 - 4, W - kPad - 352, H - 8), n ? kWarn : kDim);
+  }
+  if (s.reachable) {
+    Button& b3 = g_buttons[3];
+    b3.id = ID_DIAG;
+    b3.label = L"Dropouts\u2026";
+    b3.primary = false;
+    b3.r = D2D1::RectF(W - kPad - 344, H - kFooter + 12, W - kPad - 244, H - 12);
+    draw_button(b3);
     Button& b1 = g_buttons[1];
     b1.id = ID_SETTINGS;
     b1.label = L"Settings\u2026";
@@ -625,6 +635,11 @@ void hide_window() {
 }
 
 void show_settings();
+// Dropout details and the channel name editor live in the control panel.
+void open_page(const wchar_t* anchor) {
+  const std::wstring url = L"http://127.0.0.1:" + std::to_wstring(g_port) + L"/" + anchor;
+  ShellExecuteW(g_hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+}
 
 void tray_menu() {
   vc::Status s;
@@ -640,6 +655,7 @@ void tray_menu() {
   AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_SETTINGS, L"Settings\u2026");
   AppendMenuW(m, MF_STRING, ID_RESTART, s.reachable ? L"Restart audio engine" : L"Start Virgil service");
   AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
+  AppendMenuW(m, MF_STRING, ID_DIAG, L"Dropouts and diagnostics");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING | (autostart_enabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
   AppendMenuW(m, MF_STRING, ID_ABOUT, L"About Virgil\u2026");
@@ -657,6 +673,7 @@ void command(int id) {
   switch (id) {
     case ID_OPEN: show_window(); break;
     case ID_SETTINGS: show_settings(); break;
+    case ID_DIAG: open_page(L"#diagnostics"); break;
     case ID_RESTART: restart_engine(); break;
     case ID_LOG: ShellExecuteW(g_hwnd, L"open", log_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_AUTOSTART: set_autostart(!autostart_enabled()); break;
@@ -796,6 +813,11 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       }
       break;
     case WM_COMMAND:
+      if (LOWORD(wp) == IDC_NAMES) {  // the editor lives in the control panel
+        open_page(L"#channels");
+        EndDialog(d, 0);
+        return TRUE;
+      }
       if (LOWORD(wp) == IDCANCEL) {
         EndDialog(d, 0);
         return TRUE;

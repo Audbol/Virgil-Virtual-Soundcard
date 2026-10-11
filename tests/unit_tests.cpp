@@ -399,6 +399,11 @@ TEST(diagnostics_events_and_hints) {
   c.overdue_ticks += 2;
   d.sample(c, cfg, t += 1000);
   CHECK(d.recent_dropouts(t) == 5);
+  EngineCounters idle = c;  // the same with no app attached: nothing to drop
+  idle.apps.clear();
+  idle.overdue_ticks += 5;
+  d.sample(idle, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 5);
   CHECK(d.report(t).find("[network-late]") != std::string::npos);
   // Counters that restart from zero (new engine) are not negative deltas.
   d.engine_started(cfg, t += 1000);
