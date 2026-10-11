@@ -67,6 +67,14 @@ pids+=($!)
 # device's, so the transmitter A steps back by decades when it locks
 # (regression: Inferno's transmitter then ignored commands such as adding
 # channel 2 or stopping).
+# E2E_LOCAL_DANTE=1: something else on B's computer holds the Dante control
+# port for all addresses, as Dante Controller's service does on Windows: B
+# must move to alternative ports, and the controller still find it.
+if [ -n "${E2E_LOCAL_DANTE:-}" ]; then
+  ip netns exec vg-b python3 -c 'import socket,time; s=socket.socket(socket.AF_INET,socket.SOCK_DGRAM); s.bind(("0.0.0.0",8800)); time.sleep(600)' &
+  pids+=($!)
+  sleep 0.5
+fi
 VIRGIL_TEST_PTP_EPOCH_S=1000 HOME="$work/home-b" ip netns exec vg-b "$build/virgild" -c "$work/VirgilB.conf" -i vb \
   >"$work/b.log" 2>&1 &
 pids+=($!)

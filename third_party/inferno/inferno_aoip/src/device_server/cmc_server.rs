@@ -39,12 +39,18 @@ pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<
         }
       }
     } else {
-      error!(
-        "received unknown opcode2 {:#04x}, content {}",
-        request.opcode2().read(),
-        hex::encode(request.content())
-      );
-      error!("whole packet: {:?}", hex::encode(request.into_storage()));
+      // Virgil patch: a reply, not a request. It reaches us when other Dante
+      // software on this host listens on the same port for all addresses
+      // and asked a device (perhaps us) from it: the answer was meant for
+      // that program. Say so once instead of logging every retry.
+      static WARNED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+      if !WARNED.swap(true, std::sync::atomic::Ordering::Relaxed) {
+        warn!(
+          "received a reply on the device control port (UDP {}), meant for other Dante software on this \
+           computer; run on alternative ports (ports = auto) so it reaches that program",
+          self_info.cmc_port
+        );
+      }
     }
   }
 }

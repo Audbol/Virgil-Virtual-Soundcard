@@ -160,6 +160,11 @@ jobs:
           # A draft has no tag yet; publishing it on GitHub creates the tag.
           draft=""
           [ "$DRAFT" = true ] && draft="--draft"
+          # A new build of an unpublished draft replaces it (published
+          # releases are never touched: creating one again fails instead).
+          if [ "$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json isDraft -q .isDraft 2>/dev/null)" = true ]; then
+            gh release delete "$TAG" --repo "$GITHUB_REPOSITORY" --yes
+          fi
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Virgil $TAG" --notes-file "$notes" --generate-notes \

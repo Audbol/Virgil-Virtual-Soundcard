@@ -69,6 +69,8 @@ class Engine {
   uint32_t interface_address() const { return iface_; }
   std::string grandmaster() const { return clock_ ? clock_->grandmaster() : std::string(); }
   bool dante_running() const { return dante_ != nullptr; }
+  // First Dante control port in use (4440 = the standard ports).
+  uint16_t control_port_base() const { return alt_port_ ? alt_port_ : 4440; }
   // False if the Dante stack was started and has since crashed or stopped.
   bool dante_healthy() const;
   // Peak level (linear) per channel since the previous call; resets them.
@@ -109,6 +111,7 @@ class Engine {
   std::unique_ptr<ClockSource> clock_;
   bool dante_enabled_ = true;
   void* dante_ = nullptr;
+  uint16_t alt_port_ = 0;  // 0 = standard Dante ports
   std::vector<int32_t> dtx_, drx_;  // Dante-side rings (32-bit, interleaved)
   uint32_t dring_ = 0;
   std::vector<float> mix_;

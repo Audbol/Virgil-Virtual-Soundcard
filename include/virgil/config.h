@@ -28,6 +28,10 @@ struct Config {
   bool ptp_master_capable = false;    // only for networks without Dante hardware
 
   uint32_t control_port = 8480;       // local web control panel; 0 = off
+  // Dante control ports: "auto" (standard 4440/8800/4455/8700 unless other
+  // Dante software on this computer, e.g. Dante Controller, already uses
+  // them), "standard", or the first of four alternative ports.
+  std::string ports = "auto";
 
   // Channel names ([channel_names] tx1 = Kick ...); "" = the device's own
   // ("TX n" / "RX n", or a name given in Dante Controller). Index 0 = channel 1.

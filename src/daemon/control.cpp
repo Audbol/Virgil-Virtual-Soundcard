@@ -165,6 +165,7 @@ HttpResponse ControlServer::status_json() {
   j.kv("latency_us", c.latency_us);
   j.kv("tx_latency_us", c.tx_latency_us);
   j.kvb("dante", e ? e->dante_running() : false);
+  j.kv("dante_ports", e ? uint32_t(e->control_port_base()) : 0u);
   j.end_obj();
 
   // Channel names as on the network (Dante Controller, the drivers).

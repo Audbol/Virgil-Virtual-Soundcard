@@ -30,6 +30,9 @@ typedef struct VgDanteConfig {
   // entry sets the name; others keep the device's saved name ("TX n" / "RX n").
   const char* const* tx_names;
   const char* const* rx_names;
+  // First of four alternative control ports (ARC, CMC, flow control, info),
+  // or 0 for the standard Dante ports. Dante Controller finds them by mDNS.
+  uint16_t alt_port;
 } VgDanteConfig;
 
 typedef struct VgDanteRxStats {

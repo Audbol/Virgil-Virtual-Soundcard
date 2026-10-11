@@ -41,6 +41,7 @@ pub struct VgDanteConfig {
     // name the device saved last time (default "TX n" / "RX n").
     tx_names: *const *const c_char,
     rx_names: *const *const c_char,
+    alt_port: u16,
 }
 
 struct Handle {
@@ -356,6 +357,9 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     // own latency starts counting, whatever its latency setting (as Dante
     // Virtual Soundcard does; the latency shows up as our output latency).
     cfg.insert("TX_TIMESTAMP_OFFSET_NS".to_owned(), c.tx_latency_ns.to_string());
+    if c.alt_port != 0 {
+        cfg.insert("ALT_PORT".to_owned(), c.alt_port.to_string());
+    }
 
     let valid = Arc::new(RwLock::new(true));
     let tx_views = channel_views(c.tx_ring, c.tx_ring_frames as usize, c.tx_channels as usize, &valid);

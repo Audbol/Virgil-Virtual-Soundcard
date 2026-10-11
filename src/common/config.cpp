@@ -127,6 +127,7 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "lock_memory") { if (!need_bool(&c->lock_memory)) return false; }
       else if (key == "control_port") { if (!to_u32(val, &u) || u > 65535) return fail("bad control_port"); c->control_port = u; }
       else if (key == "clock") c->clock = lower(val);
+      else if (key == "ports") c->ports = lower(val);
       else if (key == "packet_time_us" || key == "sap") legacy();
       else return fail("unknown key '" + key + "'");
     } else if (section == "channel_names") {
@@ -185,6 +186,11 @@ bool validate_config(Config* c, std::string* error) {
     return fail("tx_latency_us must be at least two ticks + 1500 (" +
                 std::to_string(c->tx_send_delay_us() + 1000) + ")");
   if (c->clock != "ptp" && c->clock != "free") return fail("clock must be 'ptp' or 'free'");
+  if (c->ports != "auto" && c->ports != "standard") {
+    uint32_t p = 0;
+    if (!to_u32(c->ports, &p) || p < 1024 || p > 65500)
+      return fail("ports must be auto, standard or a port number between 1024 and 65500");
+  }
   if (c->ptp_subdomain.empty() || c->ptp_subdomain.size() > 15)
     return fail("ptp subdomain must be 1 to 15 characters");
 
@@ -386,6 +392,7 @@ std::string format_config(const Config& c) {
   o << "latency_us = " << c.latency_us << "\n";
   o << "tx_latency_us = " << c.tx_latency_us << "\n";
   o << "clock = " << c.clock << "\n";
+  if (c.ports != "auto") o << "ports = " << c.ports << "\n";
   o << "control_port = " << c.control_port << "\n";
   if (c.tick_us != 1000) o << "tick_us = " << c.tick_us << "\n";
   if (c.tx_lead_us) o << "tx_lead_us = " << c.tx_lead_us << "\n";

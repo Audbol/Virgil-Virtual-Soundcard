@@ -69,6 +69,12 @@ UDP 319/320 (PTP), 5353 (mDNS), 4400, 4455, 8700 and 8800 (Dante control),
 and the audio flows. Virgil needs administrator/root rights for the PTP
 ports.
 
+Dante Controller can run on the same computer as Virgil. Its background
+service listens on the standard Dante control ports, so Virgil then moves to
+24440–24443 (it says so in the log) and Dante Controller finds it there by
+itself. The same applies to Dante Virtual Soundcard, but the two cannot run
+at once: both need the PTP clock ports 319/320.
+
 ## Architecture
 
 ```

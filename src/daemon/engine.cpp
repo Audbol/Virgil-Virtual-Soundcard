@@ -191,6 +191,28 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     for (uint32_t i = 0; i < cfg_.rx_channels; ++i) rxn[i] = i < cfg_.rx_names.size() ? cfg_.rx_names[i].c_str() : nullptr;
     dc.tx_names = txn.data();
     dc.rx_names = rxn.data();
+    // Dante software on this computer (Dante Controller's services, Dante
+    // Virtual Soundcard) listens on the standard control ports for all
+    // addresses. Then replies sent to it would reach us instead (Dante
+    // Controller kept asking and showed Virgil as not routable): move to
+    // alternative ports, which Dante Controller finds through mDNS.
+    alt_port_ = 0;
+    if (cfg_.ports == "auto") {
+      std::string busy;
+      for (uint16_t p : {uint16_t(4440), uint16_t(8800), uint16_t(4455), uint16_t(8700)}) {
+        UdpSocket probe;
+        if (!probe.open(p, false)) busy += (busy.empty() ? "" : ", ") + std::to_string(p);
+      }
+      if (!busy.empty()) {
+        alt_port_ = 24440;
+        VIRGIL_LOG_INFO("other Dante software on this computer uses UDP %s; Virgil uses control ports "
+                        "%u-%u instead (Dante Controller finds them by itself)",
+                        busy.c_str(), alt_port_, alt_port_ + 3);
+      }
+    } else if (cfg_.ports != "standard") {
+      alt_port_ = uint16_t(std::atoi(cfg_.ports.c_str()));
+    }
+    dc.alt_port = alt_port_;
     {
       std::lock_guard<std::mutex> l(g_engine_mutex);
       g_engine = this;

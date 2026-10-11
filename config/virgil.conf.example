@@ -38,6 +38,11 @@ lock_memory = true
 # ptp = follow the Dante clock master (PTPv1, required for Dante);
 # free = local clock only (testing).
 clock = ptp
+# Dante control ports: auto = the standard ones (4440, 8800, 4455, 8700)
+# unless other Dante software on this computer (Dante Controller, Dante
+# Virtual Soundcard) already uses them, then 24440-24443; standard; or the
+# first of four ports to use. Dante Controller finds them either way.
+ports = auto
 # Local web control panel port (127.0.0.1 only).
 control_port = 8480
 
