@@ -3,9 +3,20 @@
 #include <algorithm>
 #include <cctype>
 #include <fstream>
+#include <cstdio>
 #include <sstream>
 
+#if defined(_WIN32)
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#undef interface
+#endif
+
+#include "virgil/platform.h"
+
 namespace virgil {
+
+const char* const kStockDeviceName = "Virgil";
 
 static std::string trim(const std::string& s) {
   size_t b = 0, e = s.size();
@@ -184,6 +195,75 @@ bool validate_config(Config* c, std::string* error) {
   if (c->ring_frames < need || c->ring_frames > kMaxRing)
     return fail("ring_frames must be a power of two between " + std::to_string(need) + " and " +
                 std::to_string(kMaxRing));
+  return true;
+}
+
+static bool replace_file(const std::string& from, const std::string& to) {
+#if defined(_WIN32)
+  return MoveFileExA(from.c_str(), to.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH) != 0;
+#else
+  return std::rename(from.c_str(), to.c_str()) == 0;
+#endif
+}
+
+std::string host_device_name() {
+  std::string h;
+  for (char ch : host_name()) {
+    if (h.size() >= 24) break;
+    h += std::isalnum(uint8_t(ch)) || ch == '-' ? ch : '-';
+  }
+  while (!h.empty() && h.back() == '-') h.pop_back();
+  return h.empty() ? kStockDeviceName : std::string(kStockDeviceName) + "-" + h;
+}
+
+bool replace_stock_name(const std::string& path, const std::string& name, std::string* error) {
+  std::ifstream in(path, std::ios::binary);
+  if (!in) return false;
+  std::stringstream ss;
+  ss << in.rdbuf();
+  in.close();
+  const std::string text = ss.str();
+  std::string out, section;
+  bool changed = false;
+  size_t pos = 0;
+  while (pos < text.size()) {
+    size_t end = text.find('\n', pos);
+    end = end == std::string::npos ? text.size() : end + 1;
+    std::string line = text.substr(pos, end - pos);
+    pos = end;
+    const std::string t = trim(line);
+    if (!t.empty() && t.front() == '[' && t.back() == ']') section = lower(trim(t.substr(1, t.size() - 2)));
+    const size_t eq = t.find('=');
+    if (!changed && (section.empty() || section == "device" || section == "network") && eq != std::string::npos &&
+        lower(trim(t.substr(0, eq))) == "name") {
+      std::string v = trim(t.substr(eq + 1));
+      if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+      if (v == kStockDeviceName) {
+        const bool crlf = line.size() >= 2 && line[line.size() - 2] == '\r';
+        line = "name = " + name + (crlf ? "\r\n" : "\n");
+        changed = true;
+      }
+    }
+    out += line;
+  }
+  if (!changed) return false;
+  // Same one-step replacement as saving from the control panel.
+  const std::string tmp = path + ".new";
+  {
+    std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
+    o << out;
+    o.flush();
+    if (!o) {
+      if (error) *error = "cannot write " + tmp;
+      std::remove(tmp.c_str());
+      return false;
+    }
+  }
+  if (!replace_file(tmp, path)) {
+    if (error) *error = "cannot replace " + path;
+    std::remove(tmp.c_str());
+    return false;
+  }
   return true;
 }
 

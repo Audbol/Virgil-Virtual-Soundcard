@@ -7,6 +7,8 @@
 
 [device]
 # Device name in Dante Controller: 1-31 letters, digits, '-', '_' or spaces.
+# The stock name "Virgil" is replaced by Virgil-<computer name> on first
+# start, so computers running Virgil do not clash in Dante Controller.
 name = Virgil
 # NIC on the Dante network: interface name or its IPv4 address.
 # Empty = first active non-loopback interface.

@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.2
+- **Unique device names on every platform.** Every installation used to start out named "Virgil", so two computers running Virgil conflicted in Dante Controller. Virgil now replaces the stock name with Virgil-<computer name> when it starts (and saves it, so the control panel shows it); a name you chose yourself is kept. Devices subscribed to the old "Virgil" channels need re-subscribing to the new name.
+- Includes the macOS fixes of 0.5.1 (Quit, single instance, app menu).
+
 ## 0.5.1 (macOS only)
 - Virgil Control: **Quit** now always quits. Only one copy runs (opening the app while the login item is running brings up the existing window instead of adding a second menu bar icon). While the window is open the app has a Dock icon and a menu bar with Quit (⌘Q), Settings (⌘,) and Close (⌘W), and copy and paste work in the settings fields.
 - Device name: a Mac still on the stock name "Virgil" is renamed Virgil-<computer name> by the installer, so it no longer conflicts in Dante Controller with other computers running Virgil. A name you chose yourself is kept.

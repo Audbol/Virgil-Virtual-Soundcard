@@ -53,6 +53,13 @@ bool parse_config(const std::string& text, Config* out, std::string* error);
 bool load_config(const std::string& path, Config* out, std::string* error);
 // Range checks and derived defaults. Returns false with a message if unusable.
 bool validate_config(Config* c, std::string* error);
+// Dante names must be unique on the network, and every installation starts
+// out as "Virgil": that stock name becomes Virgil-<host name>.
+extern const char* const kStockDeviceName;
+std::string host_device_name();
+// Rewrite the `name` line of [device] in the file at `path` if it is still
+// the stock name, keeping everything else. Returns false if not changed.
+bool replace_stock_name(const std::string& path, const std::string& name, std::string* error);
 // Serialise back to INI text that parse_config() reads.
 std::string format_config(const Config& c);
 

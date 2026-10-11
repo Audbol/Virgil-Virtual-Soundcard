@@ -4,7 +4,7 @@ The -x86_64 archive is for PCs, the -arm64 one for 64-bit ARM such as a
 Raspberry Pi 3/4/5 or Zero 2 W running 64-bit Raspberry Pi OS.
 
 Virtual soundcard for Dante networks with an ALSA device: the computer appears in Dante
-Controller as a device named "Virgil"; route it there.
+Controller as a device named "Virgil-<computer name>"; route it there.
 
 1. ./setup-alsa.sh
    Adds the "virgil" ALSA device to ~/.asoundrc, pointing at this folder.

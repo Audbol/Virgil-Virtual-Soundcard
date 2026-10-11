@@ -320,11 +320,22 @@ int main(int argc, char** argv) {
   g_ctx.overrides = [=](virgil::Config& c) {
     if (!iface_override.empty()) c.interface = iface_override;
     if (!name_override.empty()) c.device_name = name_override;
+    // Every installation starts out as "Virgil"; two of them on one network
+    // conflict in Dante Controller, so the stock name means Virgil-<host>.
+    else if (c.device_name == virgil::kStockDeviceName) c.device_name = virgil::host_device_name();
     if (free_run) c.clock = "free";
     if (latency) c.latency_us = latency;
     if (tx_latency) c.tx_latency_us = tx_latency;
   };
   g_ctx.overrides(cfg);
+  // Save the generated name, so the control panel shows (and keeps) it.
+  if (!config_path.empty() && name_override.empty() && cfg.device_name != virgil::kStockDeviceName) {
+    std::string err;
+    if (virgil::replace_stock_name(config_path, cfg.device_name, &err))
+      VIRGIL_LOG_INFO("device name set to %s (was the stock name Virgil)", cfg.device_name.c_str());
+    else if (!err.empty())
+      VIRGIL_LOG_WARN("could not save device name %s: %s", cfg.device_name.c_str(), err.c_str());
+  }
   if (control_port >= 0 && control_port <= 65535) cfg.control_port = uint32_t(control_port);
   g_ctx.config_path = config_path;
 

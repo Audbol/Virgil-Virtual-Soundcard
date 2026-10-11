@@ -114,6 +114,13 @@ bool lock_memory() {
 }
 
 uint32_t process_id() { return GetCurrentProcessId(); }
+std::string host_name() {
+  char buf[256];
+  DWORD n = sizeof buf;
+  if (!GetComputerNameExA(ComputerNameDnsHostname, buf, &n) && !GetComputerNameA(buf, &(n = sizeof buf)))
+    return "";
+  return std::string(buf, n);
+}
 
 bool process_alive(uint32_t pid) {
   HANDLE h = OpenProcess(SYNCHRONIZE, FALSE, pid);
@@ -208,6 +215,12 @@ bool lock_memory() { return mlockall(MCL_CURRENT | MCL_FUTURE) == 0; }
 void tune_process_timers() {}
 
 uint32_t process_id() { return uint32_t(getpid()); }
+std::string host_name() {
+  char buf[256] = {};
+  if (gethostname(buf, sizeof buf - 1) != 0) return "";
+  std::string h(buf);
+  return h.substr(0, h.find('.'));
+}
 
 bool process_alive(uint32_t pid) { return pid != 0 && (kill(pid_t(pid), 0) == 0 || errno == EPERM); }
 

@@ -1,4 +1,6 @@
+#include <cctype>
 #include <cmath>
+#include <cstdio>
 #include <cstring>
 #include <random>
 
@@ -269,6 +271,39 @@ TEST(config_parse) {
   Config lat;
   parse_config("[device]\ntx_latency_us = 1000\ntick_us = 1000\n", &lat, &err);
   CHECK(!validate_config(&lat, &err));  // below two ticks
+}
+
+TEST(config_stock_name_becomes_unique) {
+  const std::string n = host_device_name();
+  CHECK(n.rfind("Virgil", 0) == 0 && n.size() <= 31);
+  for (char ch : n) CHECK(std::isalnum(uint8_t(ch)) || ch == '-');
+  Config c;
+  std::string err;
+  c.device_name = n;
+  CHECK(validate_config(&c, &err));
+
+  const std::string path = "virgil-name-test.conf";
+  auto write = [&](const char* text) {
+    FILE* f = std::fopen(path.c_str(), "wb");
+    std::fputs(text, f);
+    std::fclose(f);
+  };
+  auto read = [&]() {
+    std::string s;
+    FILE* f = std::fopen(path.c_str(), "rb");
+    char b[512];
+    size_t k;
+    while ((k = std::fread(b, 1, sizeof b, f)) > 0) s.append(b, k);
+    std::fclose(f);
+    return s;
+  };
+  write("# name = Virgil\r\n[device]\r\nname = \"Virgil\"\r\nrx_channels = 4\r\n[ptp]\r\nname = Virgil\r\n");
+  CHECK(replace_stock_name(path, "Virgil-host", &err));
+  CHECK(read() == "# name = Virgil\r\n[device]\r\nname = Virgil-host\r\nrx_channels = 4\r\n[ptp]\r\nname = Virgil\r\n");
+  write("[device]\nname = Stage Left\n");
+  CHECK(!replace_stock_name(path, "Virgil-host", &err));
+  CHECK(read() == "[device]\nname = Stage Left\n");
+  std::remove(path.c_str());
 }
 
 TEST(config_legacy_aes67_is_ignored) {

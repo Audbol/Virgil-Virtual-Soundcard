@@ -2,6 +2,7 @@
 #pragma once
 
 #include <cstdint>
+#include <string>
 
 namespace virgil {
 
@@ -31,5 +32,8 @@ void tune_process_timers();
 
 uint32_t process_id();
 bool process_alive(uint32_t pid);
+// This computer's short network name ("studio-mac", not "studio-mac.local"),
+// or "" if the OS does not say.
+std::string host_name();
 
 }  // namespace virgil

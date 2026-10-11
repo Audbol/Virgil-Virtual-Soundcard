@@ -2,7 +2,7 @@ Virgil Virtual Soundcard - portable for Windows (x64)
 =================================================
 
 Virtual soundcard for Dante networks with an ASIO driver: the PC appears in Dante
-Controller as a device named "Virgil"; route it there.
+Controller as a device named "Virgil-<computer name>"; route it there.
 
 1. Register the ASIO driver (once):
    right-click "register-asio-driver.cmd" > Run as administrator.
