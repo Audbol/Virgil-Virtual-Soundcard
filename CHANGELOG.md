@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.5.1 (macOS only)
+- Virgil Control: **Quit** now always quits. Only one copy runs (opening the app while the login item is running brings up the existing window instead of adding a second menu bar icon). While the window is open the app has a Dock icon and a menu bar with Quit (⌘Q), Settings (⌘,) and Close (⌘W), and copy and paste work in the settings fields.
+- Device name: a Mac still on the stock name "Virgil" is renamed Virgil-<computer name> by the installer, so it no longer conflicts in Dante Controller with other computers running Virgil. A name you chose yourself is kept.
+
 ## 0.5.0
 - **Native Virgil Control on macOS (menu bar app) and Linux / Raspberry Pi (GTK app with tray icon)**, with the same window as on Windows: clock state, meters, playing apps, settings.
 - **Fewer dropouts from clock corrections.** Once locked, Virgil no longer jumps its clock by ~1 ms (and back) when software timestamps or the path delay are briefly disturbed; a jump needs five agreeing measurements. The path delay is measured from the cleanest samples and changes slowly. On Linux (Raspberry Pi), kernel receive timestamps are converted without preemption errors.

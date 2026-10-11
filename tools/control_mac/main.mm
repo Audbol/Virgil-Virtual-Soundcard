@@ -33,6 +33,9 @@ vc::StatusView g_view;
 std::mutex g_mutex;
 vc::Status g_latest;  // guarded by g_mutex
 std::atomic<bool> g_visible{false};
+std::atomic<bool> g_quitting{false};
+// Posted by a second launch so the running copy shows its window instead.
+NSString* const kShowNotification = @"org.virgil.control.show";
 NSImage* g_logo = nil;
 
 uint64_t now_ms() {
@@ -233,7 +236,27 @@ void set_autostart(bool on) {
 @implementation VCApp
 
 - (void)applicationDidFinishLaunching:(NSNotification*)n {
+  // One copy only: the login item starts the executable directly, so opening
+  // the app from Applications could otherwise add a second menu bar icon
+  // (and Quit would seem not to work while the other copy keeps running).
+  NSString* bid = [[NSBundle mainBundle] bundleIdentifier];
+  const pid_t me = getpid();
+  for (NSRunningApplication* a in [NSRunningApplication runningApplicationsWithBundleIdentifier:bid ?: @""]) {
+    if (a.processIdentifier == me) continue;
+    if (!self.startHidden)
+      [[NSDistributedNotificationCenter defaultCenter] postNotificationName:kShowNotification
+                                                                     object:nil
+                                                                   userInfo:nil
+                                                         deliverImmediately:YES];
+    _exit(0);
+  }
+  [[NSDistributedNotificationCenter defaultCenter] addObserver:self
+                                                      selector:@selector(showWindow:)
+                                                          name:kShowNotification
+                                                        object:nil];
+
   [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
+  NSApp.mainMenu = [self buildMainMenu];
   NSString* png = [[NSBundle mainBundle] pathForResource:@"virgil-256" ofType:@"png"];
   g_logo = png ? [[NSImage alloc] initWithContentsOfFile:png] : [NSApp applicationIconImage];
 
@@ -260,6 +283,38 @@ void set_autostart(bool on) {
   std::thread([self] { [self pollLoop]; }).detach();
   if (portable() && vc::http(g_port, "GET", "/api/status").status != 200) [self startService:nil];
   if (!self.startHidden) [self showWindow:nil];
+}
+
+// The app menu bar while the window is open: Quit (Cmd-Q), Settings (Cmd-,),
+// Close (Cmd-W) and an Edit menu so copy and paste work in the settings fields.
+- (NSMenu*)buildMainMenu {
+  NSMenu* bar = [[NSMenu alloc] init];
+  NSMenu* app = [[NSMenu alloc] initWithTitle:@"Virgil"];
+  [[app addItemWithTitle:@"About Virgil" action:@selector(about:) keyEquivalent:@""] setTarget:self];
+  [app addItem:[NSMenuItem separatorItem]];
+  [[app addItemWithTitle:@"Settings…" action:@selector(showSettings:) keyEquivalent:@","] setTarget:self];
+  [app addItem:[NSMenuItem separatorItem]];
+  [app addItemWithTitle:@"Hide Virgil" action:@selector(hide:) keyEquivalent:@"h"];
+  [app addItem:[NSMenuItem separatorItem]];
+  [[app addItemWithTitle:@"Quit Virgil Control" action:@selector(quit:) keyEquivalent:@"q"] setTarget:self];
+  [bar addItemWithTitle:@"" action:nil keyEquivalent:@""].submenu = app;
+
+  NSMenu* edit = [[NSMenu alloc] initWithTitle:@"Edit"];
+  [edit addItemWithTitle:@"Undo" action:@selector(undo:) keyEquivalent:@"z"];
+  [edit addItemWithTitle:@"Redo" action:@selector(redo:) keyEquivalent:@"Z"];
+  [edit addItem:[NSMenuItem separatorItem]];
+  [edit addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+  [edit addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+  [edit addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+  [edit addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+  [bar addItemWithTitle:@"Edit" action:nil keyEquivalent:@""].submenu = edit;
+
+  NSMenu* win = [[NSMenu alloc] initWithTitle:@"Window"];
+  [win addItemWithTitle:@"Close" action:@selector(performClose:) keyEquivalent:@"w"];
+  [win addItemWithTitle:@"Minimize" action:@selector(performMiniaturize:) keyEquivalent:@"m"];
+  [bar addItemWithTitle:@"Window" action:nil keyEquivalent:@""].submenu = win;
+  NSApp.windowsMenu = win;
+  return bar;
 }
 
 - (NSMenu*)buildMenu {
@@ -290,7 +345,7 @@ void set_autostart(bool on) {
 - (void)pollLoop {
   bool was_reachable = true;
   std::string was_clock;
-  while (true) {
+  while (!g_quitting) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
     if (r.status != 200 || !vc::parse_status(r.body, &s)) s = vc::Status();
@@ -329,7 +384,10 @@ void set_autostart(bool on) {
   (void)lostService;
 }
 
+// While the window is open the app is a regular one (Dock icon, menu bar,
+// Cmd-Tab, Cmd-Q); closed, it lives on as the menu bar icon only.
 - (void)showWindow:(id)sender {
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
   [NSApp activateIgnoringOtherApps:YES];
   [self.window makeKeyAndOrderFront:nil];
   g_visible = true;
@@ -337,7 +395,16 @@ void set_autostart(bool on) {
 - (BOOL)windowShouldClose:(NSWindow*)w {
   [w orderOut:nil];  // keep running in the menu bar
   g_visible = false;
+  [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
   return NO;
+}
+- (NSApplicationTerminateReply)applicationShouldTerminate:(NSApplication*)a {
+  return NSTerminateNow;
+}
+- (void)applicationWillTerminate:(NSNotification*)n {
+  // The poll thread is still running: leave without static destructors.
+  g_quitting = true;
+  _exit(0);
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)a {
   return NO;
@@ -415,7 +482,9 @@ void set_autostart(bool on) {
 }
 
 - (void)quit:(id)sender {
+  g_quitting = true;
   [NSApp terminate:nil];
+  _exit(0);  // not reached unless something vetoed termination
 }
 
 // ---- settings panel ------------------------------------------------------------------------

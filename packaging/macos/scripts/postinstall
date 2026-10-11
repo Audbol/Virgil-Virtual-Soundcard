@@ -6,6 +6,18 @@ PLIST=/Library/LaunchDaemons/org.virgil.virgild.plist
 if [ ! -f "$SUPPORT/virgil.conf" ]; then
 	cp "$SUPPORT/virgil.conf.default" "$SUPPORT/virgil.conf"
 fi
+
+# Dante names must be unique on the network: a Mac still on the stock name
+# "Virgil" (which every other Virgil computer also starts with) becomes
+# Virgil-<computer name>, as the Raspberry Pi installer does.
+CONF="$SUPPORT/virgil.conf"
+if grep -Eq '^[[:space:]]*name[[:space:]]*=[[:space:]]*"?Virgil"?[[:space:]]*$' "$CONF"; then
+	host=$(scutil --get LocalHostName 2>/dev/null || hostname -s 2>/dev/null)
+	host=$(printf '%s' "$host" | tr -c 'A-Za-z0-9-' '-' | cut -c1-24)
+	if [ -n "$host" ]; then
+		sed -i '' -E "s/^[[:space:]]*name[[:space:]]*=.*/name = Virgil-$host/" "$CONF"
+	fi
+fi
 chmod 664 "$SUPPORT/virgil.conf"
 chgrp admin "$SUPPORT/virgil.conf" 2>/dev/null || true
 mkdir -p /Library/Logs/Virgil
