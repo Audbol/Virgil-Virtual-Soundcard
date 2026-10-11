@@ -18,6 +18,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <cstring>
 #include <mutex>
 #include <string>
@@ -36,7 +37,6 @@ enum : AudioObjectID {
   kObjectID_Stream_Output = 4,
 };
 
-constexpr UInt32 kZeroTimeStampPeriod = 8192;
 #define kDeviceUID "Virgil-Virtual-Soundcard"
 #define kDeviceModelUID "Virgil-Virtual-Soundcard-Model"
 #define kManufacturer "Virgil Project"
@@ -60,6 +60,10 @@ struct State {
   UInt32 period_frames = 48;
   UInt32 rx_latency_frames = 96;
   UInt32 tx_lead_frames = 96;
+  // virgild's shared-memory ring. The zero time stamp period (and with it
+  // the largest IO buffer the HAL will use) is a quarter of it, so a whole
+  // IO cycle always fits in the ring with room to spare.
+  UInt32 ring_frames = 8192;
 
   // Clock: sample time 0 == media frame `base_frame`.
   uint64_t base_frame = 0;
@@ -76,15 +80,25 @@ struct State {
   // Reconnects to virgild (restarted, or started after IO began).
   std::thread watcher;
   std::atomic<bool> watch_run{false};
+  // Set while StopIO joins `watcher` with the mutex released; StartIO waits
+  // for it to clear before it may start a new watcher.
+  bool watcher_stopping = false;
+  std::condition_variable watcher_cv;
   std::atomic<int64_t> lost_ns{0};  // when the IO thread went free-running
   // Follows virgild's format (channels, rate, latency): virgild may start
   // after coreaudiod loaded us, or be reconfigured; the device then changes
   // through the host's configuration-change protocol.
   bool format_watcher = false;
   std::atomic<int64_t> change_requested_ns{0};  // 0 = none pending
+  // Set when a configuration change applied a new format: channel names are
+  // announced again for the new channel counts.
+  std::atomic<bool> names_dirty{false};
 };
 
-State g;
+// Never destroyed: threads that use it (the detached format watcher, a
+// running daemon watcher) may still be alive when the process exits, and
+// destroying a joinable std::thread calls std::terminate.
+State& g = *new State;
 
 mach_timebase_info_data_t timebase() {
   static mach_timebase_info_data_t tb = [] {
@@ -101,11 +115,11 @@ UInt64 ns_to_host(int64_t ns) {
 
 struct Format {
   Float64 sample_rate;
-  UInt32 in_channels, out_channels, period_frames, rx_latency_frames, tx_lead_frames;
+  UInt32 in_channels, out_channels, period_frames, rx_latency_frames, tx_lead_frames, ring_frames;
   bool operator==(const Format& o) const {
     return sample_rate == o.sample_rate && in_channels == o.in_channels && out_channels == o.out_channels &&
            period_frames == o.period_frames && rx_latency_frames == o.rx_latency_frames &&
-           tx_lead_frames == o.tx_lead_frames;
+           tx_lead_frames == o.tx_lead_frames && ring_frames == o.ring_frames;
   }
 };
 
@@ -114,11 +128,12 @@ bool daemon_format(Format* f) {
   virgil::Client c;
   if (!c.open() || !c.daemon_alive(1000000000LL)) return false;
   *f = {Float64(c.sample_rate()), c.rx_channels() ? c.rx_channels() : 1, c.tx_channels() ? c.tx_channels() : 1,
-        c.period_frames(), c.rx_latency_frames(), c.tx_lead_frames()};
+        c.period_frames(), c.rx_latency_frames(), c.tx_lead_frames(), c.ring_frames()};
   return true;
 }
 Format current_format() {
-  return {g.sample_rate, g.in_channels, g.out_channels, g.period_frames, g.rx_latency_frames, g.tx_lead_frames};
+  return {g.sample_rate,       g.in_channels,    g.out_channels, g.period_frames,
+          g.rx_latency_frames, g.tx_lead_frames, g.ring_frames};
 }
 void apply_format(const Format& f) {
   g.sample_rate = f.sample_rate;
@@ -127,7 +142,10 @@ void apply_format(const Format& f) {
   g.period_frames = f.period_frames;
   g.rx_latency_frames = f.rx_latency_frames;
   g.tx_lead_frames = f.tx_lead_frames;
+  g.ring_frames = f.ring_frames;
 }
+// Zero time stamp period; the HAL never uses an IO buffer larger than this.
+UInt32 zero_ts_period() { return std::max<UInt32>(g.ring_frames / 4, 1); }
 void load_format_from_daemon() {
   Format f;
   if (daemon_format(&f)) apply_format(f);
@@ -286,20 +304,33 @@ void notify_names(AudioServerPlugInHostRef host) {
 }
 
 void watch_format() {
+  // Names the host can already have read (virgild running when we loaded).
+  // Every later change, including virgild first appearing or coming back
+  // after it was gone, is announced.
   uint32_t names_seq = 0;
+  {
+    virgil::Client c;
+    if (c.open()) names_seq = c.names_seq();
+  }
   while (true) {
     std::this_thread::sleep_for(std::chrono::seconds(1));
     {
       virgil::Client c;
-      if (c.open() && c.names_seq() != names_seq) {
-        const bool first = names_seq == 0;
+      const bool open = c.open();
+      bool changed = g.names_dirty.exchange(false);
+      if (!open) {
+        names_seq = 0;  // virgild gone: announce its names when it returns
+      } else if (c.names_seq() != names_seq) {
         names_seq = c.names_seq();
+        changed = true;
+      }
+      if (changed) {
         AudioServerPlugInHostRef host;
         {
           std::lock_guard<std::mutex> l(g.mutex);
           host = g.host;
         }
-        if (host && !first) notify_names(host);
+        if (host) notify_names(host);
       }
     }
     Format want;
@@ -325,7 +356,10 @@ OSStatus PerformDeviceConfigurationChange(AudioServerPlugInDriverRef inDriver, A
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
   std::lock_guard<std::mutex> l(g.mutex);
   Format f;
-  if (daemon_format(&f)) apply_format(f);
+  if (daemon_format(&f)) {
+    if (!(f == current_format())) g.names_dirty = true;
+    apply_format(f);
+  }
   if (g.io_count == 0) g.client.close();
   g.change_requested_ns = 0;
   return kAudioHardwareNoError;
@@ -612,7 +646,7 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
         return kAudioHardwareNoError;
       }
       case kAudioDevicePropertyZeroTimeStampPeriod:
-        return put<UInt32>(inDataSize, outDataSize, outData, kZeroTimeStampPeriod);
+        return put<UInt32>(inDataSize, outDataSize, outData, zero_ts_period());
     }
   } else {  // streams
     switch (a->mSelector) {
@@ -704,6 +738,12 @@ bool attach_daemon_locked() {
     g.client.close();
     return false;
   }
+  if (g.client.ring_frames() < g.ring_frames) {
+    // A smaller ring than the device was configured for: an IO cycle of up
+    // to zero_ts_period() frames might not fit. Wait for the format change.
+    g.client.close();
+    return false;
+  }
   if (!g.client.acquire_tx_slot("coreaudio")) {
     g.client.close();
     return false;
@@ -741,6 +781,8 @@ void watch_daemon() {
 OSStatus StartIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32) {
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
   std::unique_lock<std::mutex> l(g.mutex);
+  // A StopIO may be joining the previous watcher with the mutex released.
+  g.watcher_cv.wait(l, [] { return !g.watcher_stopping; });
   if (g.io_count++ > 0) return kAudioHardwareNoError;
   g.free_running.store(true);
   g.free_base_ns = virgil::mono_ns();
@@ -755,10 +797,16 @@ OSStatus StopIO(AudioServerPlugInDriverRef inDriver, AudioObjectID dev, UInt32) 
   if (g.io_count == 0) return kAudioHardwareIllegalOperationError;
   if (--g.io_count == 0) {
     g.watch_run = false;
+    // StartIO waits while this is set, so io_count stays 0 and nobody
+    // touches g.watcher until the join below is done.
+    g.watcher_stopping = true;
     l.unlock();
     if (g.watcher.joinable()) g.watcher.join();
     l.lock();
-    if (g.io_count == 0) g.client.close();
+    g.watcher_stopping = false;
+    g.client.close();
+    l.unlock();
+    g.watcher_cv.notify_all();
   }
   return kAudioHardwareNoError;
 }
@@ -777,6 +825,7 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
   if (inDriver != gDriverRef || dev != kObjectID_Device) return kAudioHardwareBadObjectError;
   const int64_t now_ns = virgil::mono_ns();
   virgil::ClockAnchor a;
+  const double period = zero_ts_period();
   bool live = !g.free_running.load(std::memory_order_acquire) && g.client.is_open();
   if (live && !g.client.heartbeat_fresh(2000000000LL)) {
     lose_daemon(now_ns);  // the watcher reconnects
@@ -802,12 +851,12 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
       ++g.seed;
     }
     const double rel = a.frame_at(now_ns) - double(g.base_frame);
-    const double zero = std::floor(rel / kZeroTimeStampPeriod) * kZeroTimeStampPeriod;
+    const double zero = std::floor(rel / period) * period;
     *outSampleTime = zero;
     *outHostTime = ns_to_host(a.host_ns_at(double(g.base_frame) + zero));
   } else {
     const double rel = double(now_ns - g.free_base_ns) * g.sample_rate * 1e-9;
-    const double zero = std::floor(rel / kZeroTimeStampPeriod) * kZeroTimeStampPeriod;
+    const double zero = std::floor(rel / period) * period;
     *outSampleTime = zero;
     *outHostTime = ns_to_host(g.free_base_ns + int64_t(zero * 1e9 / g.sample_rate));
   }
@@ -830,7 +879,10 @@ OSStatus DoIOOperation(AudioServerPlugInDriverRef inDriver, AudioObjectID, Audio
                        void* ioMainBuffer, void*) {
   if (inDriver != gDriverRef) return kAudioHardwareBadObjectError;
   float* buf = static_cast<float*>(ioMainBuffer);
-  const bool live = !g.free_running.load(std::memory_order_acquire) && g.client.is_open();
+  // An IO cycle larger than a quarter of the ring would overrun it (the HAL
+  // keeps cycles within the zero time stamp period; this is a safety net).
+  const bool live = !g.free_running.load(std::memory_order_acquire) && g.client.is_open() &&
+                    frames <= g.client.ring_frames() / 4;
 
   if (op == kAudioServerPlugInIOOperationReadInput && stream == kObjectID_Stream_Input) {
     const UInt32 ch = g.in_channels;
