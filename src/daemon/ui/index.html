@@ -315,6 +315,7 @@ function render(st) {
   else if (!d.dante) setPill("bad", "Dante stack not running");
   else if (c.state === "ptp-locked") setPill("ok", "Clock locked");
   else if (c.state === "ptp-master") setPill("info", "Clock master");
+  else if (c.source === "free") setPill("warn", "Local clock only");
   else setPill("warn", "Free-running clock");
   const eb = $("errbanner"); eb.textContent = st.error ? "Audio engine error: " + st.error : ""; eb.classList.toggle("show", !!st.error);
 

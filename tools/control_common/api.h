@@ -50,6 +50,7 @@ struct Status {
   unsigned rate = 48000, tx = 0, rx = 0, latency_us = 0, tx_latency_us = 0;
   bool dante = false;
   std::string clock;  // stopped | free-run | ptp-locked | ptp-master
+  std::string clock_source;  // ptp | free (settings: local clock only)
   double offset_us = 0;
   std::string grandmaster;
   unsigned long long late_ticks = 0, clock_steps = 0;

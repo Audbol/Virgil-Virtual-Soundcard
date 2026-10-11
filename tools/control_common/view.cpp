@@ -51,6 +51,7 @@ ClockView clock_view(const Status& s) {
   if (!s.dante) return {kBad, "Dante stack not running", ""};
   if (s.clock == "ptp-locked") return {kOk, "Locked to " + s.grandmaster, fmt("offset %+.1f µs", s.offset_us)};
   if (s.clock == "ptp-master") return {kEmber, "Clock leader", "no other Dante clock present"};
+  if (s.clock_source == "free") return {kWarn, "Local clock only", "not in sync with Dante (Settings › Clock)"};
   return {kWarn, "Free-running", s.grandmaster.empty() ? "no Dante clock leader found" : "acquiring " + s.grandmaster};
 }
 

@@ -335,6 +335,7 @@ bool parse_status(const std::string& body, Status* st) {
   s.dante = d["dante"].boolean();
   const Json& c = j["clock"];
   s.clock = c["state"].str("stopped");
+  s.clock_source = c["source"].str("ptp");
   s.offset_us = c["offset_us"].num();
   s.grandmaster = c["grandmaster"].str();
   s.late_ticks = (unsigned long long)j["counters"]["late_ticks"].num();

@@ -360,6 +360,8 @@ ClockView clock_view(const vc::Status& s) {
   if (s.clock == "ptp-locked")
     return {kOk, L"Locked to " + widen(s.grandmaster), fmt(L"offset %+.1f \u00b5s", s.offset_us)};
   if (s.clock == "ptp-master") return {kEmber, L"Clock leader", L"no other Dante clock present"};
+  if (s.clock_source == "free")
+    return {kWarn, L"Local clock only", L"not in sync with Dante (Settings \u203a Clock)"};
   return {kWarn, L"Free-running", s.grandmaster.empty() ? L"no Dante clock leader found" : L"acquiring " + widen(s.grandmaster)};
 }
 

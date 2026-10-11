@@ -163,6 +163,8 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
       clock_ = std::move(p);
     }
   } else {
+    VIRGIL_LOG_WARN("clock: local only (clock = free in the settings); Dante devices will not sync with "
+                    "Virgil and Dante Controller shows it as not routable");
     clock_ = std::make_unique<FreeRunClock>();
   }
   on_clock(clock_->model(), this);
