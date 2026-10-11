@@ -241,6 +241,43 @@ TEST(servo_gate_recovers_from_lasting_shift) {
   CHECK(std::llabs(servo.model().ptp_at(local) - (master + 80000)) < 10000);
 }
 
+TEST(servo_locks_with_large_frequency_offset) {
+  // One servo update per second (4 Sync/s, best of 4), as PtpClock feeds it.
+  // A relative offset of 120 ppm (VM clocks, hosts without NTP) used to
+  // step again and again because the frequency seeding kept being postponed.
+  for (double ppm : {20.0, 120.0, -150.0}) {
+    PiServo s;
+    ClockModel start;
+    start.base_local = 5000000000LL;
+    start.base_ptp = 1000;  // far away: first step
+    s.reset_to(start);
+    const int64_t master0 = 1700000000000000000LL;
+    int steps = 0, lock_at = -1;
+    for (int i = 0; i < 300; ++i) {
+      const int64_t master = master0 + int64_t(i) * 1000000000LL;
+      const int64_t local = 5000000000LL + int64_t(double(master - master0) * (1.0 + ppm * 1e-6));
+      if (s.sample(local, master) == PiServo::kStep) ++steps;
+      if (lock_at < 0 && s.locked()) lock_at = i;
+    }
+    CHECK(steps <= 2);
+    CHECK(lock_at > 0 && lock_at < 120);
+  }
+}
+
+TEST(clock_model_cell_always_readable) {
+  ClockModelCell c;
+  CHECK(c.load().ratio == 1.0);
+  for (int i = 0; i < 5; ++i) {
+    ClockModel m;
+    m.base_local = i;
+    m.base_ptp = 10 * i;
+    m.ratio = 1.0 + i * 1e-6;
+    c.store(m);
+    const ClockModel r = c.load();
+    CHECK(r.base_local == i && r.base_ptp == 10 * i && r.ratio == m.ratio);
+  }
+}
+
 TEST(config_parse) {
   const char* text =
       "[device]\n"
@@ -386,6 +423,7 @@ TEST(diagnostics_events_and_hints) {
   c.rx_max_age_samples = 0;
   d.sample(c, cfg, t += 10000);
   c.state = kStateFreeRun;
+  c.grandmaster.clear();  // as PtpClock does when the leader is gone
   d.sample(c, cfg, t += 1000);
   j = d.json(t);
   CHECK(j.find("REAPER did not deliver its audio in time (3.0 ms of silence sent)") != std::string::npos);
@@ -405,6 +443,19 @@ TEST(diagnostics_events_and_hints) {
   d.sample(idle, cfg, t += 1000);
   CHECK(d.recent_dropouts(t) == 5);
   CHECK(d.report(t).find("[network-late]") != std::string::npos);
+  // Free-running while the leader is still known is a re-lock after a clock
+  // step, not a lost leader.
+  {
+    Diagnostics d2;
+    d2.engine_started(cfg, t);
+    EngineCounters k;
+    k.state = kStatePtpLocked;
+    k.grandmaster = "00:1d:c1:aa:bb:cc";
+    for (int i = 0; i < 5; ++i) d2.sample(k, cfg, t += 1000);
+    k.state = kStateFreeRun;
+    d2.sample(k, cfg, t += 1000);
+    CHECK(d2.json(t).find("Lost the Dante clock leader") == std::string::npos);
+  }
   // Counters that restart from zero (new engine) are not negative deltas.
   d.engine_started(cfg, t += 1000);
   EngineCounters fresh;

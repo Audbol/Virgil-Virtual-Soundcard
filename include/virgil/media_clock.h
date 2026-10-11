@@ -38,39 +38,56 @@ inline int64_t frames_to_ptp_ns(uint64_t frame, uint32_t rate) {
 }
 
 // Single-writer, many-reader container for a ClockModel without locks.
+// Two seqlocked slots: the writer fills the inactive one, then makes it
+// active. A reader never waits for the writer: whichever slot the writer is
+// not touching is consistent. (A single seqlock let a higher-priority reader,
+// the engine tick, spin forever on one CPU while the PTP thread it preempted
+// was half-way through an update.) One writer at a time.
 class ClockModelCell {
  public:
   void store(const ClockModel& m) {
+    const uint32_t a = active_.load(std::memory_order_relaxed);
+    Slot& s = slots_[a ^ 1];
     uint64_t r;
     std::memcpy(&r, &m.ratio, sizeof r);
-    uint32_t s = seq_.load(std::memory_order_relaxed);
-    seq_.store(s + 1, std::memory_order_relaxed);
+    const uint32_t q = s.seq.load(std::memory_order_relaxed);
+    s.seq.store(q + 1, std::memory_order_relaxed);
     std::atomic_thread_fence(std::memory_order_release);
-    local_.store(m.base_local, std::memory_order_relaxed);
-    ptp_.store(m.base_ptp, std::memory_order_relaxed);
-    ratio_.store(r, std::memory_order_relaxed);
-    seq_.store(s + 2, std::memory_order_release);
+    s.local.store(m.base_local, std::memory_order_relaxed);
+    s.ptp.store(m.base_ptp, std::memory_order_relaxed);
+    s.ratio.store(r, std::memory_order_relaxed);
+    s.seq.store(q + 2, std::memory_order_release);
+    active_.store(a ^ 1, std::memory_order_release);
   }
   ClockModel load() const {
-    for (;;) {
-      uint32_t s0 = seq_.load(std::memory_order_acquire);
-      if (s0 & 1) continue;
-      ClockModel m;
-      m.base_local = local_.load(std::memory_order_relaxed);
-      m.base_ptp = ptp_.load(std::memory_order_relaxed);
-      uint64_t r = ratio_.load(std::memory_order_relaxed);
-      std::atomic_thread_fence(std::memory_order_acquire);
-      if (seq_.load(std::memory_order_relaxed) != s0) continue;
-      std::memcpy(&m.ratio, &r, sizeof r);
-      return m;
-    }
+    uint32_t i = active_.load(std::memory_order_acquire);
+    ClockModel m;
+    while (!read(slots_[i], &m)) i ^= 1;
+    return m;
   }
 
  private:
-  std::atomic<uint32_t> seq_{0};
-  std::atomic<int64_t> local_{0};
-  std::atomic<int64_t> ptp_{0};
-  std::atomic<uint64_t> ratio_{0x3ff0000000000000ULL};  // 1.0
+  struct Slot {
+    std::atomic<uint32_t> seq{0};
+    std::atomic<int64_t> local{0};
+    std::atomic<int64_t> ptp{0};
+    std::atomic<uint64_t> ratio{0x3ff0000000000000ULL};  // 1.0
+  };
+  static bool read(const Slot& s, ClockModel* out) {
+    const uint32_t s0 = s.seq.load(std::memory_order_acquire);
+    if (s0 & 1) return false;
+    const int64_t local = s.local.load(std::memory_order_relaxed);
+    const int64_t ptp = s.ptp.load(std::memory_order_relaxed);
+    const uint64_t r = s.ratio.load(std::memory_order_relaxed);
+    std::atomic_thread_fence(std::memory_order_acquire);
+    if (s.seq.load(std::memory_order_relaxed) != s0) return false;
+    out->base_local = local;
+    out->base_ptp = ptp;
+    std::memcpy(&out->ratio, &r, sizeof r);
+    return true;
+  }
+  Slot slots_[2];
+  std::atomic<uint32_t> active_{0};
 };
 
 class ClockSource {

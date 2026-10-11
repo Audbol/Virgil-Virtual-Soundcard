@@ -185,7 +185,10 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
         add_locked(Kind::ClockInfo, std::string(), 0, 0, now, "Locked to the Dante clock leader " + c.grandmaster);
       else if (c.state == kStatePtpMaster)
         add_locked(Kind::ClockInfo, std::string(), 0, 0, now, "Virgil is now the clock leader");
-      else if (c.state == kStateFreeRun && prev_state_ == kStatePtpLocked && cfg.clock == "ptp")
+      // Lost only when the leader is gone; free-run with a leader is a
+      // re-lock after a clock step (reported as a clock jump).
+      else if (c.state == kStateFreeRun && prev_state_ == kStatePtpLocked && cfg.clock == "ptp" &&
+               c.grandmaster.empty())
         add_locked(Kind::ClockLost, std::string(), 1, 0, now,
                    "Lost the Dante clock leader " + prev_gm_ +
                        "; Virgil runs on its own clock (not in sync with the network) until it is back");

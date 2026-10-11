@@ -219,11 +219,17 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
     }
     nbig_ = 0;
     // Keep the frequency estimate and stay in tracking mode, so the next
-    // windows are judged with the same care.
-    count_ = count_ > 0 ? 1 : 0;
-    good_ = 0;
-    locked_ = false;
-    rms_ = 0;
+    // windows are judged with the same care. A confirmed step while tracking
+    // realigns to the same master: it stays locked (otherwise the state read
+    // 'free-run' for 16 s and diagnostics reported a lost leader). Only an
+    // initial step starts over.
+    const bool tracking = count_ > 0;
+    count_ = tracking ? 1 : 0;
+    if (!tracking) {
+      good_ = 0;
+      locked_ = false;
+      rms_ = 0;
+    }
     rejects_ = 0;
     m_.ratio = 1.0 + drift_ppb_ * 1e-9;
     last_local_ = local;
@@ -250,10 +256,14 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   big_ = 0;
   last_local_ = local;
   ++count_;
-  if (!seeded_ && count_ == 16 && local - first_local_ > 1000000000LL) {
+  if (!seeded_ && count_ >= 4 && local - first_local_ > 8000000000LL) {
     // Seed the integrator with the raw frequency offset so the first lock
-    // does not have to wait for the slow integral term (only once: after a
-    // step the running estimate is better than a 16-window measurement).
+    // does not have to wait for the slow integral term (only once: after
+    // that the running estimate is better). By elapsed time, not a window
+    // count: confirmed steps restart the count, and with a large frequency
+    // offset (VM clocks, 100+ ppm) the count never reached the seeding point
+    // and the servo stepped again and again. The raw measurement stays valid
+    // across phase steps (both ends are untouched master and local time).
     const double raw = double(master - first_master_) / double(local - first_local_);
     drift_ppb_ = (raw - 1.0) * 1e9;
     seeded_ = true;
@@ -317,6 +327,10 @@ bool PtpClock::start(const Options& o) {
     self_.uuid[0] = uint8_t((self_.uuid[0] & 0xFC) | 0x02);
   }
   self_.port = 1;
+  {
+    std::random_device rd;
+    jitter_state_ = (((uint64_t(rd()) << 32) | rd()) ^ uint64_t(mono_ns())) | 1;
+  }
   proto_ = ptp1::Header{};
   std::memset(proto_.subdomain, 0, sizeof proto_.subdomain);
   std::memcpy(proto_.subdomain, o.subdomain.data(), std::min<size_t>(15, o.subdomain.size()));
@@ -410,7 +424,12 @@ void PtpClock::run() {
       master_duties(now);
     } else if (have_master_ && have_pair_ && now >= next_delay_req_ns_) {
       send_delay_req();
-      next_delay_req_ns_ = now + 750000000LL + (int64_t(std::rand()) % 500) * 1000000LL;
+      // xorshift: per-instance jitter (std::rand was never seeded, so every
+      // instance used the same sequence).
+      jitter_state_ ^= jitter_state_ << 13;
+      jitter_state_ ^= jitter_state_ >> 7;
+      jitter_state_ ^= jitter_state_ << 17;
+      next_delay_req_ns_ = now + 750000000LL + int64_t(jitter_state_ % 500) * 1000000LL;
     }
   }
 }
@@ -452,6 +471,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     VIRGIL_LOG_INFO("ptp: better master %s appeared, leaving master role",
                  ptp1::format_uuid(src.uuid).c_str());
     is_master_ = false;
+    state_ = kStateFreeRun;  // until locked to the new master
     servo_.reset_to(cell_.load());
   }
   const bool same = have_master_ && src == master_;
@@ -465,10 +485,15 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     sync_pending_ = false;
     delay_pending_ = false;
     have_pair_ = false;
+    // The last window's Sync was measured against the previous master (or
+    // timeline): using it for the first delay of the new one rejected every
+    // delay measurement, so the clock never locked again.
+    have_best_ms_ = false;
     delay_count_ = 0;
     window_count_ = 0;
     mean_path_delay_ = 0;
     next_delay_req_ns_ = now;
+    servo_.allow_step();  // a new timeline steps at once
   }
   have_master_ = true;
   master_props_ = props;
@@ -532,7 +557,12 @@ void PtpClock::handle_general(const uint8_t* p, size_t n) {
     const int64_t t4 = receipt.ns();
     // Master-to-us leg from the least-delayed Sync of the last window (a late
     // software receive timestamp only ever adds delay).
-    const int64_t ms = have_best_ms_ ? last_best_ms_ : last_t2_ - last_t1_;
+    int64_t ms = have_best_ms_ ? last_best_ms_ : last_t2_ - last_t1_;
+    // The master-local offset moves at the relative frequency between that
+    // Sync (t2) and our Delay_Req (t3): remove it, or the path delay is
+    // biased by drift * (t3 - t2) / 2.
+    const int64_t ms_t2 = have_best_ms_ ? last_best_t2_ : last_t2_;
+    ms -= int64_t(double(delay_tx_ns_ - ms_t2) * (servo_.model().ratio - 1.0));
     int64_t d = (ms + (t4 - delay_tx_ns_)) / 2;
     // Software send timestamps are taken just after sendto(), so on fast
     // links the estimate can dip slightly below zero: clamp, don't discard.
@@ -561,7 +591,10 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   last_t2_ = t2;
   have_pair_ = true;
   if (delay_count_ == 0) return;  // need a path delay before steering
-  if (window_count_ == 0 || (t2 - t1) < (best_t2_ - best_t1_)) {
+  // Least delayed by the model's estimate of the master time at arrival; raw
+  // t2 - t1 trends with the frequency offset across the window.
+  const ClockModel mm = servo_.model();
+  if (window_count_ == 0 || mm.ptp_at(t2) - t1 < mm.ptp_at(best_t2_) - best_t1_) {
     best_t1_ = t1;
     best_t2_ = t2;
   }
@@ -570,6 +603,7 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   t1 = best_t1_;
   t2 = best_t2_;
   last_best_ms_ = t2 - t1;
+  last_best_t2_ = t2;
   have_best_ms_ = true;
   const auto r = servo_.sample(t2, t1 + mean_path_delay_);
   if (r == PiServo::kOutlier) {

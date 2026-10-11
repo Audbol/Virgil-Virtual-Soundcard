@@ -120,6 +120,12 @@ class PiServo {
     first_local_ = last_local_ = 0;
   }
   bool locked() const { return locked_; }
+  // A new master (possibly on another timeline): the next error beyond the
+  // threshold steps at once instead of waiting for confirmation windows.
+  void allow_step() {
+    count_ = 0;
+    nbig_ = 0;
+  }
   int64_t last_error_ns() const { return last_err_; }
 
   double kp = 0.03;
@@ -222,6 +228,7 @@ class PtpClock : public ClockSource {
   bool have_pair_ = false;
   int64_t best_t1_ = 0, best_t2_ = 0;  // least-delayed Sync in the current window
   int64_t last_best_ms_ = 0;            // its t2 - t1, from the last full window
+  int64_t last_best_t2_ = 0;            // and when it arrived
   bool have_best_ms_ = false;
   int window_count_ = 0;
 
@@ -233,6 +240,7 @@ class PtpClock : public ClockSource {
   int64_t delays_[9] = {};
   int delay_count_ = 0;
   int64_t mean_path_delay_ = 0;
+  uint64_t jitter_state_ = 0;  // Delay_Req timing jitter (seeded per instance)
 
   // Master mode.
   bool is_master_ = false;
