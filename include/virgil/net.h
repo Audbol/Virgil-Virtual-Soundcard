@@ -29,6 +29,7 @@ struct InterfaceInfo {
   std::string id;                // adapter GUID on Windows, else the name
   bool virtual_adapter = false;  // Hyper-V/WSL, VPN, container bridge, ...
   int score = 0;                 // automatic choice prefers the highest
+  uint8_t mac[6] = {};           // hardware address, all zero if unknown
 };
 // Active IPv4 interfaces.
 std::vector<InterfaceInfo> list_interfaces();

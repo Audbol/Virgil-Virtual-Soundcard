@@ -19,6 +19,10 @@ on:
         type: choice
         options: [all, windows, macos, linux, raspberry-pi]
         default: all
+      draft:
+        description: "Create the release as a private draft (visible to maintainers only until published)"
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -139,6 +143,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ github.event.inputs.version || github.ref_name }}
           PLATFORMS: ${{ github.event.inputs.platforms || 'all' }}
+          DRAFT: ${{ github.event.inputs.draft || 'false' }}
         run: |
           notes=packaging/release-notes.md
           if [ "$PLATFORMS" != all ]; then
@@ -152,7 +157,10 @@ jobs:
           fi
           prerelease=""
           case "$TAG" in v0.*) prerelease="--prerelease" ;; esac
+          # A draft has no tag yet; publishing it on GitHub creates the tag.
+          draft=""
+          [ "$DRAFT" = true ] && draft="--draft"
           gh release create "$TAG" dist/* \
             --repo "$GITHUB_REPOSITORY" --target "$GITHUB_SHA" \
             --title "Virgil $TAG" --notes-file "$notes" --generate-notes \
-            $prerelease
+            $prerelease $draft

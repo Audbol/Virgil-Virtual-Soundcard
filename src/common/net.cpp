@@ -16,6 +16,11 @@
 #else
 #include <arpa/inet.h>
 #include <ifaddrs.h>
+#if defined(__APPLE__)
+#include <net/if_dl.h>
+#else
+#include <netpacket/packet.h>
+#endif
 #include <net/if.h>
 #include <netinet/in.h>
 #include <sys/select.h>
@@ -147,6 +152,7 @@ std::vector<InterfaceInfo> list_interfaces() {
       i.loopback = a->IfType == IF_TYPE_SOFTWARE_LOOPBACK;
       i.virtual_adapter = virt;
       i.score = score + link_local_penalty(i.addr);
+      if (a->PhysicalAddressLength == 6) std::memcpy(i.mac, a->PhysicalAddress, 6);
       out.push_back(i);
     }
   }
@@ -168,6 +174,25 @@ std::vector<InterfaceInfo> list_interfaces() {
     if (!info.loopback && !(i->ifa_flags & IFF_RUNNING)) info.score -= 5;
     info.score += link_local_penalty(info.addr);
     out.push_back(info);
+  }
+  // Hardware addresses come as separate link-layer entries.
+  for (ifaddrs* i = ifs; i; i = i->ifa_next) {
+    if (!i->ifa_addr) continue;
+    const uint8_t* hw = nullptr;
+#if defined(__APPLE__)
+    if (i->ifa_addr->sa_family == AF_LINK) {
+      const auto* dl = reinterpret_cast<const sockaddr_dl*>(i->ifa_addr);
+      if (dl->sdl_alen == 6) hw = reinterpret_cast<const uint8_t*>(LLADDR(dl));
+    }
+#else
+    if (i->ifa_addr->sa_family == AF_PACKET) {
+      const auto* ll = reinterpret_cast<const sockaddr_ll*>(i->ifa_addr);
+      if (ll->sll_halen == 6) hw = ll->sll_addr;
+    }
+#endif
+    if (!hw) continue;
+    for (auto& info : out)
+      if (info.name == i->ifa_name) std::memcpy(info.mac, hw, 6);
   }
   freeifaddrs(ifs);
 #endif

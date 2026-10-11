@@ -4,6 +4,7 @@
 - **Dropout diagnostics.** Virgil now notices and explains dropouts: audio from the network that arrived too late for the receive latency or never arrived, apps that did not deliver their audio in time, the computer keeping Virgil's engine waiting, and clock trouble. Virgil Control shows how many dropouts the last hour had; *Dropouts…* opens the event list with a chart of the last hour, suggestions (for example the receive latency that would have covered the late audio) and *Download report*, a text file with the setup, the events and the recent log for bug reports.
 - **Channel names.** Name channels in Virgil's settings or in Dante Controller (both stay in step, and the names are saved in the configuration). ASIO and Core Audio apps show them as channel names.
 - macOS: the Virgil device now has the channel count, sample rate and latency set in Virgil. It used to keep 8 channels when Core Audio started before the Virgil service (as at boot) until Core Audio was restarted, so apps such as Live Professor saw 8 of 32 channels. It also follows later changes by itself.
+- Virgil as the clock leader (*Become clock leader when no Dante device provides one*, e.g. on a network of its own) is now synchronised and routable in Dante Controller. It used a made-up clock identity that Dante Controller could not match to any device; it now uses the network adapter's hardware address, as Dante devices do.
 - The drivers and the service must be the same version (the shared-memory layout changed); the installers update both.
 
 ## 0.5.2

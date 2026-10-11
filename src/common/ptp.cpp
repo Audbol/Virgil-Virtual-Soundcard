@@ -298,12 +298,24 @@ bool PtpClock::start(const Options& o) {
     s->enable_rx_timestamps();
   }
 
-  // 6-byte UUID: random, locally administered (like a MAC address).
-  std::random_device rd;
-  std::mt19937_64 rng((uint64_t(rd()) << 32) ^ rd() ^ uint64_t(mono_ns()) ^ o.interface_addr);
-  const uint64_t r = rng();
-  for (int i = 0; i < 6; ++i) self_.uuid[i] = uint8_t(r >> (i * 8));
-  self_.uuid[0] = uint8_t((self_.uuid[0] & 0xFC) | 0x02);
+  // 6-byte UUID: the interface's MAC address, as Dante devices use. Dante
+  // Controller matches the clock leader's identity to a device by it, so a
+  // made-up one left Virgil-as-leader unsynchronised and not routable.
+  // Random (locally administered) only if the MAC is unknown.
+  bool have_mac = false;
+  for (const auto& i : list_interfaces()) {
+    if (i.addr != o.interface_addr) continue;
+    for (uint8_t b : i.mac) have_mac |= b != 0;
+    if (have_mac) std::memcpy(self_.uuid.data(), i.mac, 6);
+    break;
+  }
+  if (!have_mac) {
+    std::random_device rd;
+    std::mt19937_64 rng((uint64_t(rd()) << 32) ^ rd() ^ uint64_t(mono_ns()) ^ o.interface_addr);
+    const uint64_t r = rng();
+    for (int i = 0; i < 6; ++i) self_.uuid[i] = uint8_t(r >> (i * 8));
+    self_.uuid[0] = uint8_t((self_.uuid[0] & 0xFC) | 0x02);
+  }
   self_.port = 1;
   proto_ = ptp1::Header{};
   std::memset(proto_.subdomain, 0, sizeof proto_.subdomain);
