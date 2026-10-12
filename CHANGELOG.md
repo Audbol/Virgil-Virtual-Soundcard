@@ -1,6 +1,6 @@
 # Changelog
 
-## 0.6.1 (not released yet)
+## 0.6.1
 - **More accurate Dante clock.** Virgil's own clock-delay measurements no longer favour the ones a busy computer delayed (they biased the clock behind the leader), the frequency is learnt from the leader alone, the servo settles faster, and "locked" is reported once the clock really is close (about 30 s, filtered, not single readings). In simulations of Windows, macOS, Linux and Raspberry Pi timing the error to the leader drops 2-5x (Windows about 47 to 18 us, Raspberry Pi 30 to 9 us). Linux uses kernel send timestamps; macOS and Windows use kernel receive timestamps where available.
 - Drivers: apps get one more tick (1 ms) to deliver their audio before it misses the network. ALSA wakes apps in step with the media clock (fewer underruns: 74 instead of 371 in a loaded test), drains completely, and rides out a failed clock read; ASIO no longer forces the host to resynchronise after a long stall when the clock did not change.
 - When Virgil hears no Dante clock leader for 15 s, Virgil Control (all platforms) and the control panel say so — "No Dante clock leader found on <adapter>", or that Dante devices were found but none leads, or that the leader was lost — with the likely fixes (another network adapter, a firewall blocking UDP 319/320, *Become clock leader*), and notify once. It used to show only "Free-running", and the reason was only in the log.
