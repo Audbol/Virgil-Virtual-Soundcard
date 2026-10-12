@@ -331,3 +331,14 @@ Known limitations:
   console falls back to `Local\`, which only that session can reach.
 * On macOS, the HAL plug-in may run inside coreaudiod's sandbox, and that may
   block opening `virgild`'s POSIX shared memory. This has not been tested.
+
+### Security notes
+
+* The audio shared memory is meant for every local user's audio apps, so on
+  Linux and macOS it is created world-readable and writable (0666; on Windows
+  the service's `Global\` section is reachable from every session). Any local
+  user can therefore read and inject audio, and can disrupt Virgil: shrinking
+  the segment (`ftruncate`) makes `virgild` and the apps using it crash with
+  `SIGBUS`. Clients validate the header they read, but nothing stops this
+  denial of service. Do not run Virgil on a computer shared with untrusted
+  local users.

@@ -393,6 +393,35 @@ TEST(config_channel_names) {
   std::remove(path.c_str());
 }
 
+TEST(device_channel_names) {
+  std::string err;
+  // No names configured: the device keeps the names it saved.
+  Config none;
+  CHECK(parse_config("[device]\ntx_channels = 3\nrx_channels = 2\n", &none, &err) && validate_config(&none, &err));
+  auto t = device_channel_names(none, true), r = device_channel_names(none, false);
+  CHECK(t.size() == 3 && r.size() == 2);
+  for (const auto& n : t) CHECK(n.empty());
+  for (const auto& n : r) CHECK(n.empty());
+  // Any name configured: every channel of both directions is named, so a
+  // saved "Kick" on tx2 cannot duplicate the configured tx1.
+  Config some;
+  CHECK(parse_config("[device]\ntx_channels = 3\nrx_channels = 2\n[channel_names]\ntx1 = Kick\n", &some, &err) &&
+        validate_config(&some, &err));
+  t = device_channel_names(some, true);
+  r = device_channel_names(some, false);
+  CHECK(t.size() == 3 && t[0] == "Kick" && t[1] == "TX 2" && t[2] == "TX 3");
+  CHECK(r.size() == 2 && r[0] == "RX 1" && r[1] == "RX 2");
+  // The defaults are only given to the device, not added to the configuration.
+  CHECK(some.tx_name(1).empty() && some.rx_names.empty());
+  CHECK(format_config(some).find("TX 2") == std::string::npos);
+  // A network rename saved in the configuration is passed on next start.
+  some.rx_names.resize(2);
+  some.rx_names[1] = "Talkback";
+  CHECK(validate_config(&some, &err));
+  r = device_channel_names(some, false);
+  CHECK(r[0] == "RX 1" && r[1] == "Talkback");
+}
+
 TEST(diagnostics_events_and_hints) {
   Config cfg;
   std::string err;

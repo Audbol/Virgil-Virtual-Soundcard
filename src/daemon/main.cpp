@@ -61,9 +61,10 @@ void usage() {
       "  -q, --quiet           warnings and errors only\n");
 }
 
-int status() {
+// `shm_name`: the configured name ("" = the default), as the daemon uses it.
+int status(const std::string& shm_name) {
   virgil::Client c;
-  if (!c.open()) {
+  if (!c.open(shm_name)) {
     std::fprintf(stderr, "virgild is not running\n");
     return 1;
   }
@@ -354,7 +355,21 @@ int main(int argc, char** argv) {
   std::signal(SIGPIPE, SIG_IGN);  // a peer that hung up is an error return, not death
 #endif
 
-  if (do_status) return status();
+  if (do_status) {
+    // The daemon's shared memory name may be configured: read it from the
+    // same file the daemon would use.
+    std::string path = config_path;
+    if (path.empty() && file_exists(virgil::default_config_path())) path = virgil::default_config_path();
+    virgil::Config sc;
+    if (!path.empty()) {
+      std::string err;
+      if (!virgil::load_config(path, &sc, &err)) {
+        std::fprintf(stderr, "%s: %s\n", path.c_str(), err.c_str());
+        return 2;
+      }
+    }
+    return status(sc.shm_name);
+  }
 
   if (!log_path.empty()) {
     if (!std::freopen(log_path.c_str(), "a", stderr)) {

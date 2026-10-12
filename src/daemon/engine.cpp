@@ -187,10 +187,14 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.rx_ring_frames = dring_;
     dc.mono_ns = &bridge_mono_ns;
     dc.log = &bridge_log;
-    // Named channels get their names; the others keep the device's own.
+    // Without configured names the device keeps its own; with any, every
+    // channel is named (configured or default) so a name the device saved
+    // earlier cannot duplicate a configured one. Only the device is told:
+    // defaults are not written into the configuration.
+    const std::vector<std::string> txs = device_channel_names(cfg_, true), rxs = device_channel_names(cfg_, false);
     std::vector<const char*> txn(cfg_.tx_channels), rxn(cfg_.rx_channels);
-    for (uint32_t i = 0; i < cfg_.tx_channels; ++i) txn[i] = i < cfg_.tx_names.size() ? cfg_.tx_names[i].c_str() : nullptr;
-    for (uint32_t i = 0; i < cfg_.rx_channels; ++i) rxn[i] = i < cfg_.rx_names.size() ? cfg_.rx_names[i].c_str() : nullptr;
+    for (uint32_t i = 0; i < cfg_.tx_channels; ++i) txn[i] = txs[i].c_str();
+    for (uint32_t i = 0; i < cfg_.rx_channels; ++i) rxn[i] = rxs[i].c_str();
     dc.tx_names = txn.data();
     dc.rx_names = rxn.data();
     // Dante software on this computer (Dante Controller's services, Dante

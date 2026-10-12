@@ -22,6 +22,11 @@
 #include <netpacket/packet.h>
 #endif
 #include <net/if.h>
+#if defined(__APPLE__)
+#include <net/if_media.h>  // after net/if.h
+#include <sys/ioctl.h>
+#include <sys/sockio.h>
+#endif
 #include <netinet/in.h>
 #include <sys/select.h>
 #include <sys/socket.h>
@@ -113,6 +118,22 @@ bool posix_virtual_name(const std::string& n) {
     if (n.compare(0, std::strlen(p), p) == 0) return true;
   return false;
 }
+// Wi-Fi by media type where the OS tells us, else by Linux naming (wl*).
+// macOS names Wi-Fi "en0"/"en1" like Ethernet, so the name says nothing there.
+bool posix_is_wifi(const std::string& n, int probe_fd) {
+#if defined(__APPLE__)
+  if (probe_fd >= 0) {
+    ifmediareq ifmr;
+    std::memset(&ifmr, 0, sizeof ifmr);
+    std::strncpy(ifmr.ifm_name, n.c_str(), sizeof ifmr.ifm_name - 1);
+    if (ioctl(probe_fd, SIOCGIFMEDIA, &ifmr) == 0)
+      return IFM_TYPE(ifmr.ifm_current ? ifmr.ifm_current : ifmr.ifm_active) == IFM_IEEE80211;
+  }
+#else
+  (void)probe_fd;
+#endif
+  return n.compare(0, 2, "wl") == 0;
+}
 #endif
 int link_local_penalty(uint32_t addr) { return (addr >> 16) == 0xA9FE ? -1 : 0; }  // 169.254/16
 }  // namespace
@@ -159,6 +180,11 @@ std::vector<InterfaceInfo> list_interfaces() {
 #else
   ifaddrs* ifs = nullptr;
   if (getifaddrs(&ifs) != 0) return out;
+#if defined(__APPLE__)
+  const int probe_fd = socket(AF_INET, SOCK_DGRAM, 0);  // for SIOCGIFMEDIA
+#else
+  const int probe_fd = -1;
+#endif
   for (ifaddrs* i = ifs; i; i = i->ifa_next) {
     if (!i->ifa_addr || i->ifa_addr->sa_family != AF_INET || !(i->ifa_flags & IFF_UP)) continue;
     InterfaceInfo info;
@@ -167,14 +193,17 @@ std::vector<InterfaceInfo> list_interfaces() {
     info.loopback = (i->ifa_flags & IFF_LOOPBACK) != 0;
     info.id = info.name;
     info.virtual_adapter = posix_virtual_name(info.name);
-    // Wired names first (eth*, en* on Linux and macOS's en0), Wi-Fi next.
-    info.score = (info.name.compare(0, 2, "wl") == 0) ? 2 : 4;
+    // Wired first, Wi-Fi next (by media type on macOS, by name elsewhere).
+    info.score = posix_is_wifi(info.name, probe_fd) ? 2 : 4;
     if (info.virtual_adapter) info.score -= 10;
     // Up but no carrier (cable unplugged): last resort only.
     if (!info.loopback && !(i->ifa_flags & IFF_RUNNING)) info.score -= 5;
     info.score += link_local_penalty(info.addr);
     out.push_back(info);
   }
+#if defined(__APPLE__)
+  if (probe_fd >= 0) ::close(probe_fd);
+#endif
   // Hardware addresses come as separate link-layer entries.
   for (ifaddrs* i = ifs; i; i = i->ifa_next) {
     if (!i->ifa_addr) continue;

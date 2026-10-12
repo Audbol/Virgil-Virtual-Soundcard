@@ -247,6 +247,20 @@ bool validate_config(Config* c, std::string* error) {
   return true;
 }
 
+std::vector<std::string> device_channel_names(const Config& c, bool tx) {
+  bool any = false;
+  for (const auto* v : {&c.tx_names, &c.rx_names})
+    for (const auto& n : *v) any |= !n.empty();
+  const uint32_t n = tx ? c.tx_channels : c.rx_channels;
+  std::vector<std::string> out(n);
+  if (!any) return out;
+  for (uint32_t i = 0; i < n; ++i) {
+    out[i] = tx ? c.tx_name(i) : c.rx_name(i);
+    if (out[i].empty()) out[i] = default_channel_name(tx, i + 1);
+  }
+  return out;
+}
+
 static bool replace_file(const std::string& from, const std::string& to);
 
 // Written to disk before it replaces the old file, which is replaced in one
