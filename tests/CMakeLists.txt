@@ -24,8 +24,4 @@ target_link_libraries(virgil_tone PRIVATE virgil_client)
 
 # Windows: checks desktop audio capture (WASAPI loopback, process loopback) on a
 # PC without Virgil; writes a WAV file. Not installed.
-if(WIN32)
-  add_executable(desktop_audio_probe desktop_audio_probe.cpp ${CMAKE_SOURCE_DIR}/tools/control_win/wasapi.cpp)
-  target_include_directories(desktop_audio_probe PRIVATE ${CMAKE_SOURCE_DIR}/tools/control_win)
-  target_link_libraries(desktop_audio_probe PRIVATE virgil_client ole32)
-endif()
+# (built from the top-level CMakeLists.txt, so release builds include it)

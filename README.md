@@ -333,9 +333,9 @@ gain_db = 0
 ```
 
 To check capture on a PC without Virgil, the Windows build has
-`desktop_audio_probe.exe` (in `build-win/tests`, not installed):
-`desktop_audio_probe list` shows the Windows build, output devices and apps
-with audio sessions; `desktop_audio_probe capture --app chrome.exe --seconds 5`
+`desktop-audio-probe.exe` (in the Windows portable zip):
+`desktop-audio-probe list` shows the Windows build, output devices and apps
+with audio sessions; `desktop-audio-probe capture --app chrome.exe --seconds 5`
 (or `--device default`, `--device 1`, `--pid 1234`, `--all-apps`) records to
 `capture.wav` and prints packet statistics and the device clock's offset from
 the PC clock.

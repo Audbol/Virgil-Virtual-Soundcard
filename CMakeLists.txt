@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(virgil VERSION 0.6.1 LANGUAGES C CXX)
+project(virgil VERSION 0.6.2 LANGUAGES C CXX)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -153,6 +153,14 @@ else()
 endif()
 if(NOT WIN32)
   target_link_libraries(virgil-control PRIVATE virgil_client)
+endif()
+
+  # Desktop audio capture tester for Windows (shipped in the portable zip):
+  # lists devices / apps playing audio and captures a WAV file.
+if(WIN32)
+  add_executable(desktop-audio-probe tests/desktop_audio_probe.cpp tools/control_win/wasapi.cpp)
+  target_include_directories(desktop-audio-probe PRIVATE tools/control_win)
+  target_link_libraries(desktop-audio-probe PRIVATE virgil_client ole32)
 endif()
 
 install(TARGETS virgild virgil-latency-probe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
