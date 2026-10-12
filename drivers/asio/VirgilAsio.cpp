@@ -5,8 +5,9 @@
 // step with the Dante network: no resampling, no drift.
 //
 // Latency per direction = ASIO buffer + virgild receive latency (input) or
-// ASIO buffer + virgild transmit lead + one packet (output), reported exactly
-// through getLatencies().
+// ASIO buffer + virgild transmit lead + one packet (output), reported
+// through getLatencies() (driver latency only: the Dante network latency is
+// not included, as with Dante Virtual Soundcard).
 //
 // Build needs the Steinberg ASIO SDK (common/asio.h, common/iasiodrv.h):
 //   cmake -DASIO_SDK_DIR=C:/path/to/asiosdk ...
@@ -236,6 +237,11 @@ class VirgilAsio : public IASIO {
     Lock l(mu_);
     if (!client_.is_open()) return ASE_NotPresent;
     const long b = long(session_ ? session_->frames : kPreferred);
+    // Driver latency only, as Dante Virtual Soundcard reports it: the ASIO
+    // buffer plus virgild's own buffering (receive latency in; transmit lead
+    // and the engine tick out). The Dante network latency on top (the
+    // receiver's latency setting, and our transmit latency) is not included,
+    // so a recording made through the network lands that much later.
     *in = b + long(client_.rx_latency_frames());
     *out = b + long(client_.tx_lead_frames() + client_.period_frames());
     return ASE_OK;
@@ -484,12 +490,16 @@ class VirgilAsio : public IASIO {
     const uint32_t rxch = client_.rx_channels(), txch = client_.tx_channels();
     auto alive = [&r] { return r->go.load(std::memory_order_acquire); };
 
+    // Last good anchor: a read that races the daemon's update reuses it
+    // (same timeline only) instead of skipping a wakeup.
+    virgil::Client::AnchorCache anchor_cache;
+    uint64_t steps = client_.clock_steps();
     double now = 0;
-    client_.frame_now(&now);
+    client_.frame_now(&now, steps, &anchor_cache);
     uint64_t t = (uint64_t(now) / B + 1) * B;  // first boundary
-    uint64_t k = 0;
+    uint64_t k = 0;    // callbacks made (buffer half = k & 1)
+    uint64_t pos = 0;  // samplePosition of the next callback
     ASIOTime time_info{};
-    uint64_t steps = client_.header()->clock_steps.load();
     bool reset_requested = false;
     // How far the next callback may sit from "now" before we realign: a
     // couple of buffers ahead, a quarter ring behind.
@@ -513,30 +523,38 @@ class VirgilAsio : public IASIO {
       }
       // Step count before the anchor (the daemon counts a step once the new
       // anchor is out), so a new count always comes with the new anchor.
-      const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_acquire);
+      const uint64_t cur_steps = client_.clock_steps();
       virgil::ClockAnchor a;
-      if (!client_.anchor(&a)) {
+      if (!client_.anchor(&a, cur_steps, &anchor_cache)) {
         // The daemon is mid-update (its tick thread was preempted while
-        // publishing): try again shortly. Leaving the loop here would end
-        // playback for good while the host keeps waiting for callbacks.
+        // publishing) on a timeline we have no anchor of yet: try again
+        // shortly. Leaving the loop here would end playback for good while
+        // the host keeps waiting for callbacks.
         virgil::sleep_until_ns(virgil::mono_ns() + 1000000);
         continue;
       }
       const int64_t now_ns = virgil::mono_ns();
       const double now_frame = a.frame_at(now_ns);
       // Realign when the timeline moved (PTP relock, engine restarted with a
-      // new clock) or when we are far off it for any other reason: a
-      // callback that is due years from now, or one so late that the rings
-      // have wrapped, would otherwise silence playback until the host
-      // restarts the driver.
-      if (cur_steps != steps || double(t) > now_frame + double(max_ahead) ||
-          double(t) + double(max_behind) < now_frame) {
+      // new clock) or when the next callback is due implausibly far ahead:
+      // positions from before mean nothing, so ask the host to resync.
+      if (cur_steps != steps || double(t) > now_frame + double(max_ahead)) {
         steps = cur_steps;
         t = (uint64_t(now_frame) / B + 1) * B;
-        if (cb.asioMessage) {
+        if (k > 0 && cb.asioMessage) {
           cb.asioMessage(kAsioResyncRequest, 0, nullptr, nullptr);
           if (!alive()) return;
         }
+      } else if (double(t) + double(max_behind) < now_frame) {
+        // A stall (host callback, or this thread descheduled) so long that
+        // catching up would read and write audio the rings no longer hold.
+        // The timeline itself is fine, so no resync: like hardware after an
+        // overrun, skip the missed buffers and go on at the next boundary.
+        // samplePosition jumps by the skipped frames, so it keeps matching
+        // systemTime and the media clock; the buffer halves keep alternating.
+        const uint64_t next = (uint64_t(now_frame) / B + 1) * B;
+        if (k > 0) pos += next - t;  // nothing to skip before the first callback
+        t = next;
       }
       const int64_t deadline = a.host_ns_at(double(t));
       if (deadline - now_ns > max_sleep_ns) {
@@ -557,7 +575,7 @@ class VirgilAsio : public IASIO {
           dst[f] = virgil::float_to_s32(client_.rx_frame(in_start + f)[c.channel]);
       }
 
-      position_ = int64_t(k) * B;
+      position_ = int64_t(pos);
       switch_ns_ = deadline;
       if (s.time_info) {
         std::memset(&time_info, 0, sizeof time_info);
@@ -565,7 +583,7 @@ class VirgilAsio : public IASIO {
         ti.flags = kSystemTimeValid | kSamplePositionValid | kSampleRateValid | kSpeedValid;
         ti.speed = 1.0;
         ti.sampleRate = rate;
-        to_asio64(int64_t(k) * B, &ti.samplePosition.hi, &ti.samplePosition.lo);
+        to_asio64(int64_t(pos), &ti.samplePosition.hi, &ti.samplePosition.lo);
         to_asio64(deadline, &ti.systemTime.hi, &ti.systemTime.lo);
         cb.bufferSwitchTimeInfo(&time_info, idx, ASIOTrue);
       } else {
@@ -591,6 +609,7 @@ class VirgilAsio : public IASIO {
       client_.note_written(out_start + B);
       client_.touch();
       t += B;
+      pos += B;
       ++k;
     }
   }

@@ -141,6 +141,13 @@ bool Client::frame_now(double* out) const {
   return true;
 }
 
+bool Client::frame_now(double* out, uint64_t steps, AnchorCache* cache) const {
+  ClockAnchor a;
+  if (!hdr_ || !anchor(&a, steps, cache)) return false;
+  *out = a.frame_at(mono_ns());
+  return true;
+}
+
 bool Client::acquire_tx_slot(const char* name) {
   if (!hdr_) return false;
   if (slot_ >= 0) return true;

@@ -46,8 +46,31 @@ class Client {
   uint32_t tx_lead_frames() const { return tx_lead_; }
 
   bool anchor(ClockAnchor* out) const { return read_anchor(hdr_, out); }
+  // read_anchor gives up when the daemon keeps republishing while we read
+  // (its tick thread preempted mid-update). A caller that keeps one of these
+  // per thread then falls back to the last good anchor, as long as it is from
+  // the same timeline: `steps` is clock_steps read before this call. A failed
+  // read without such a fallback still returns false.
+  struct AnchorCache {
+    ClockAnchor anchor;
+    uint64_t steps = 0;
+    bool valid = false;
+  };
+  bool anchor(ClockAnchor* out, uint64_t steps, AnchorCache* cache) const {
+    if (anchor(out)) {
+      cache->anchor = *out;
+      cache->steps = steps;
+      cache->valid = true;
+      return true;
+    }
+    if (!cache->valid || cache->steps != steps) return false;
+    *out = cache->anchor;
+    return true;
+  }
+  uint64_t clock_steps() const { return hdr_->clock_steps.load(std::memory_order_acquire); }
   // Interpolated media frame "now". Returns false if no clock yet.
   bool frame_now(double* out) const;
+  bool frame_now(double* out, uint64_t steps, AnchorCache* cache) const;
 
   // Playback mixing slot. Must be held to use write_tx / tx_frame.
   bool acquire_tx_slot(const char* name);
@@ -57,10 +80,14 @@ class Client {
   void touch();  // refresh slot heartbeat; call at least every few hundred ms
 
   // Earliest media frame a playback write can still reach the network with.
-  // Anything older has been (or is being) consumed by the daemon; writing it
-  // would leave stale audio in the ring that replays one ring later.
+  // The daemon publishes now_frames = N at tick N and then mixes [N - P, N),
+  // so every frame >= N stays writable until tick N + P. Anything older has
+  // been (or is being) consumed; writing it would leave stale audio in the
+  // ring. A writer preempted between reading this and writing can still land
+  // in a slot consumed meanwhile: the daemon silences each client ring a
+  // quarter ring behind the tick, so such audio is lost, never replayed.
   uint64_t tx_horizon() const {
-    return hdr_->now_frames.load(std::memory_order_acquire) + period_;
+    return hdr_->now_frames.load(std::memory_order_acquire);
   }
 
   // Interleaved float I/O at absolute media frame positions. Channels beyond

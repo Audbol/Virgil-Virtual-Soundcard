@@ -24,8 +24,22 @@ static long g_size = 0;
 static double g_phase = 0;
 static std::vector<int32_t> g_rec;
 static long g_switches = 0;
+// samplePosition must advance by whole buffers: by one each callback, by
+// more after a stall the driver skipped (the frames it skipped).
+static long long g_last_pos = -1;
+static long g_bad_pos = 0, g_skips = 0, g_resyncs = 0;
 
 static ASIOTime* on_switch_ti(ASIOTime* t, long idx, ASIOBool) {
+  if (t) {
+    const long long pos = (long long)(((unsigned long long)t->timeInfo.samplePosition.hi << 32) |
+                                      t->timeInfo.samplePosition.lo);
+    if (g_last_pos >= 0) {
+      const long long d = pos - g_last_pos;
+      if (d <= 0 || d % g_size != 0) ++g_bad_pos;
+      else if (d != g_size) ++g_skips;
+    }
+    g_last_pos = pos;
+  }
   auto* out = static_cast<int32_t*>(g_bufs[0].buffers[idx]);
   auto* in = static_cast<int32_t*>(g_bufs[1].buffers[idx]);
   for (long i = 0; i < g_size; ++i) {
@@ -39,8 +53,9 @@ static ASIOTime* on_switch_ti(ASIOTime* t, long idx, ASIOBool) {
 static void on_switch(long idx, ASIOBool d) { on_switch_ti(nullptr, idx, d); }
 static void on_rate(ASIOSampleRate) {}
 static long on_message(long sel, long value, void*, double*) {
-  if (sel == kAsioSelectorSupported) return value == kAsioSupportsTimeInfo;
+  if (sel == kAsioSelectorSupported) return value == kAsioSupportsTimeInfo || value == kAsioResyncRequest;
   if (sel == kAsioSupportsTimeInfo) return 1;
+  if (sel == kAsioResyncRequest) return ++g_resyncs, 1;
   return 0;
 }
 
@@ -101,5 +116,6 @@ int main(int argc, char** argv) {
   }
   std::printf("buffer switches %ld, recorded %zu frames, sine from frame %zu: %zu frames checked, "
               "%ld discontinuities\n", g_switches, g_rec.size(), first, n, bad);
-  return (n > 48000 && bad == 0) ? 0 : 1;
+  std::printf("samplePosition: %ld bad steps, %ld skips, %ld resync requests\n", g_bad_pos, g_skips, g_resyncs);
+  return (n > 48000 && bad == 0 && g_bad_pos == 0) ? 0 : 1;
 }

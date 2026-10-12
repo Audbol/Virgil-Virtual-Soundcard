@@ -8,7 +8,11 @@
 // rate conversion or drift correction is needed anywhere.
 //
 // Latency: input safety offset = virgild rx latency, output safety offset =
-// virgild tx lead; both directions add one engine tick of device latency.
+// virgild tx lead + one tick; both directions add one engine tick of device
+// latency. Driver latency only, as Dante Virtual Soundcard reports it: the
+// Dante network latency (the receiver's latency setting, our transmit
+// latency) is not included, so a recording made through the network lands
+// that much later than the HAL's latency compensation assumes.
 #include <CoreAudio/AudioServerPlugIn.h>
 #include <CoreFoundation/CoreFoundation.h>
 #include <mach/mach_time.h>
@@ -74,8 +78,10 @@ struct State {
   int64_t free_base_ns = 0;
   std::atomic<UInt64> seed{1};
   uint64_t last_steps = 0;
-  // Last good anchor, used when a read races the daemon publishing a new one.
+  // Last good anchor, used when a read races the daemon publishing a new one,
+  // and the clock_steps read just before it (its timeline).
   virgil::ClockAnchor last_anchor;
+  uint64_t last_anchor_steps = 0;
   bool have_anchor = false;
   // Reconnects to virgild (restarted, or started after IO began).
   std::thread watcher;
@@ -620,7 +626,8 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
       case kAudioDevicePropertyDeviceCanBeDefaultSystemDevice:
         return put<UInt32>(inDataSize, outDataSize, outData, 1);
       case kAudioDevicePropertyLatency:
-        // One engine tick of buffering each way.
+        // One engine tick of buffering each way (driver latency only; the
+        // Dante network latency is not included, see the top of the file).
         return put<UInt32>(inDataSize, outDataSize, outData, g.period_frames);
       case kAudioDevicePropertySafetyOffset:
         return put<UInt32>(inDataSize, outDataSize, outData,
@@ -833,13 +840,19 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
   }
   // Read before the anchor: the daemon counts a clock step only once the new
   // timeline's anchor is published, so that anchor is at least this new.
-  const uint64_t steps = live ? g.client.header()->clock_steps.load(std::memory_order_acquire) : 0;
+  uint64_t steps = live ? g.client.header()->clock_steps.load(std::memory_order_acquire) : 0;
   if (live) {
     if (g.client.anchor(&a)) {
       g.last_anchor = a;
+      g.last_anchor_steps = steps;
       g.have_anchor = true;
     } else if (g.have_anchor) {
-      a = g.last_anchor;  // a read raced the daemon's update: keep the timeline
+      // A read raced the daemon's update: stay on the last good anchor's
+      // timeline. Never pair it with a newer step count (that would start
+      // the new timeline from the old anchor); a step is taken up on the
+      // next good read.
+      a = g.last_anchor;
+      steps = g.last_anchor_steps;
     } else {
       live = false;
     }

@@ -14,6 +14,7 @@
 #include <time.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <cerrno>
 #include <climits>
 #include <cmath>
@@ -22,6 +23,7 @@
 #include <vector>
 
 #include "virgil/client.h"
+#include "virgil/platform.h"
 #include "virgil/sample_convert.h"
 
 namespace {
@@ -45,6 +47,10 @@ struct VirgilPcm {
   uint32_t prefill_ch = 0;     // device channel count `prefill` is laid out for
   std::vector<float> scratch;  // one frame, device channel count
   bool small_buffer_hinted = false;  // hint at most once per open
+  snd_pcm_uframes_t avail_min = 0;   // from sw_params; 0 = period_size
+  // Last good clock anchor of this stream's timeline: a read that races the
+  // daemon publishing a new one falls back to it instead of an xrun.
+  virgil::Client::AnchorCache anchor_cache;
 };
 
 // (Re)attach to virgild. `wait_ms` rides out an engine restart (settings applied
@@ -133,11 +139,74 @@ inline void store_sample(const snd_pcm_channel_area_t& a, snd_pcm_uframes_t fram
   }
 }
 
-bool media_now(VirgilPcm* p, uint64_t* out) {
+// `steps`: the daemon's clock_steps, read before this call.
+bool media_now(VirgilPcm* p, uint64_t steps, uint64_t* out) {
   double f;
-  if (!p->client.frame_now(&f)) return false;
+  if (!p->client.frame_now(&f, steps, &p->anchor_cache)) return false;
   *out = uint64_t(f);
   return true;
+}
+
+snd_pcm_uframes_t avail_min(const VirgilPcm* p) {
+  return p->avail_min ? p->avail_min : p->io.period_size;
+}
+
+// The poll timer. While running it is a one-shot at the media-clock moment
+// the application's wait ends: avail reaching avail_min (a drain: the
+// buffer played out). It follows the PTP rate and phase, so the app wakes
+// with the full buffer - avail_min of margin rather than up to a period
+// later at whatever phase a free-running interval timer happens to have.
+// Re-armed wherever that moment changes (start, transfer, poll_revents when
+// not ready, prepare, stop). Without a clock (not started, xrun, daemon
+// gone) it ticks once per Virgil tick, so a waiting app still sees the state
+// change.
+void arm_timer(VirgilPcm* p) {
+  const snd_pcm_ioplug_t* io = &p->io;
+  itimerspec its{};
+  virgil::ClockAnchor a;
+  if (p->running && !p->xrun && p->client.is_open() && io->rate &&
+      p->client.anchor(&a, p->clock_steps, &p->anchor_cache)) {
+    // `appl` as the caller left it: no sync_appl here, transfer() has
+    // already counted the forward alsa-lib makes only after it returns.
+    // Media frame at which the wait ends (see update_hw for hw).
+    uint64_t target;
+    const bool draining = io->stream == SND_PCM_STREAM_PLAYBACK && io->state == SND_PCM_STATE_DRAINING;
+    if (draining) {
+      // Drained once the daemon's tick has taken the last frame (update_hw):
+      // the tick at the first boundary at or after its end.
+      const uint64_t P = std::max<uint32_t>(1, p->client.period_frames());
+      target = (p->start_frame + p->appl + P - 1) / P * P;
+    } else if (io->stream == SND_PCM_STREAM_PLAYBACK) {
+      // avail = buffer - (appl - hw) >= avail_min.
+      const uint64_t need = uint64_t(io->buffer_size) - std::min<uint64_t>(io->buffer_size, avail_min(p));
+      target = p->start_frame + (p->appl > need ? p->appl - need : 0);
+    } else {
+      // avail = hw - appl >= avail_min.
+      target = p->start_frame + p->appl + avail_min(p) + p->client.rx_latency_frames();
+    }
+    const int64_t now = virgil::mono_ns();
+    // host_ns_at truncates: 1 us late so the wake sees the frame reached.
+    int64_t at = a.host_ns_at(double(target)) + 1000;
+    // Never one long sleep on one anchor: a clock step or a lost daemon
+    // must still wake the app within a few ms to report the xrun.
+    at = std::min<int64_t>(at, now + 20000000);
+    // Already due: fire at once (an absolute time in the past expires
+    // immediately). A drain waiting on a tick that is late polls gently.
+    if (at <= now) at = draining ? now + 100000 : now;
+    if (at <= 0) at = 1;      // it_value 0 would disarm
+    its.it_value.tv_sec = time_t(at / 1000000000LL);
+    its.it_value.tv_nsec = long(at % 1000000000LL);
+    timerfd_settime(p->timer_fd, TFD_TIMER_ABSTIME, &its, nullptr);
+    return;
+  }
+  const uint32_t tick = p->client.is_open() ? p->client.period_frames() : uint32_t(io->period_size);
+  const uint32_t rate = io->rate ? io->rate : (p->client.is_open() ? p->client.sample_rate() : 48000);
+  int64_t ns = int64_t(tick ? tick : 48) * 1000000000LL / rate;
+  if (ns <= 0) ns = 1000000;
+  its.it_interval.tv_sec = time_t(ns / 1000000000LL);
+  its.it_interval.tv_nsec = long(ns % 1000000000LL);
+  its.it_value = its.it_interval;
+  timerfd_settime(p->timer_fd, 0, &its, nullptr);
 }
 
 // Advance hw from the media clock. Returns false on xrun / daemon loss.
@@ -145,19 +214,30 @@ bool update_hw(VirgilPcm* p) {
   sync_appl(p);
   if (!p->running) return !p->xrun;
   uint64_t now;
-  if (!p->client.daemon_alive() || !media_now(p, &now)) return false;
+  if (!p->client.daemon_alive()) return false;
   // The timeline moved (PTP lock, master change, engine restart): positions
   // from before are meaningless, so report an xrun and let the app restart.
-  if (p->client.header()->clock_steps.load(std::memory_order_acquire) != p->clock_steps) {
+  // Read before the anchor (see virgil_start).
+  if (p->client.clock_steps() != p->clock_steps) {
     p->xrun = true;
     return false;
   }
+  if (!media_now(p, p->clock_steps, &now)) return false;
   p->client.touch();
   if (p->io.stream == SND_PCM_STREAM_PLAYBACK) {
-    // A frame counts as consumed once its media time is within one daemon
-    // packet of now: after that it can no longer make it onto the wire.
-    const uint64_t horizon = now + p->client.period_frames();
-    p->hw = horizon > p->start_frame ? horizon - p->start_frame : 0;
+    // A frame counts as consumed once its media time is reached. The daemon
+    // takes it at the end of its tick (tx_horizon), up to one tick later, so
+    // this is the earliest it can go; never report less than the daemon has.
+    const uint64_t consumed = p->client.tx_horizon();
+    const uint64_t horizon = std::max<uint64_t>(now, consumed);
+    uint64_t hw = horizon > p->start_frame ? horizon - p->start_frame : 0;
+    // Draining: the stream stops (and our slot goes inactive, which the
+    // daemon no longer mixes) as soon as hw reaches appl, so hold hw short
+    // of it until the daemon has really taken the last frame, up to one
+    // tick after its media time. hw never goes backwards.
+    if (p->io.state == SND_PCM_STATE_DRAINING && p->appl > 0 && consumed < p->start_frame + p->appl)
+      hw = std::min(hw, std::max(p->hw, p->appl - 1));
+    p->hw = hw;
     if (p->hw > p->appl) p->xrun = true;
   } else {
     const uint64_t ready = now - p->client.rx_latency_frames();
@@ -186,8 +266,9 @@ int virgil_start(snd_pcm_ioplug_t* io) {
   // The step count before the anchor: the daemon counts a step only once
   // the new timeline's anchor is out, so the anchor read next is at least
   // as new as this count (a later step is caught by update_hw).
-  const uint64_t steps = p->client.header()->clock_steps.load(std::memory_order_acquire);
-  if (!media_now(p, &now)) return start_xrun(io);
+  const uint64_t steps = p->client.clock_steps();
+  p->anchor_cache.valid = false;  // a new stream: no fallback from before
+  if (!media_now(p, steps, &now)) return start_xrun(io);
   const uint32_t ch = device_channels(p);
   if (io->stream == SND_PCM_STREAM_PLAYBACK &&
       (ch != p->prefill_ch || p->prefill.size() != size_t(io->buffer_size) * ch))
@@ -210,6 +291,7 @@ int virgil_start(snd_pcm_ioplug_t* io) {
   p->hw = 0;
   p->running = true;
   p->xrun = false;
+  arm_timer(p);
   return 0;
 }
 
@@ -217,6 +299,7 @@ int virgil_stop(snd_pcm_ioplug_t* io) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   p->running = false;
   if (io->stream == SND_PCM_STREAM_PLAYBACK && p->client.is_open()) p->client.set_tx_active(false);
+  arm_timer(p);
   return 0;
 }
 
@@ -273,6 +356,7 @@ snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_ar
   p->appl += size;
   p->last_appl_ptr += size;
   if (p->boundary && p->last_appl_ptr >= p->boundary) p->last_appl_ptr -= p->boundary;
+  if (p->running) arm_timer(p);
   return snd_pcm_sframes_t(size);
 }
 
@@ -299,13 +383,8 @@ int virgil_prepare(snd_pcm_ioplug_t* io) {
     p->prefill.assign(size_t(io->buffer_size) * p->prefill_ch, 0.f);
     p->client.set_tx_active(false);
   }
-  // Wake the application once per period.
-  const int64_t ns = int64_t(io->period_size) * 1000000000LL / io->rate;
-  itimerspec its{};
-  its.it_interval.tv_sec = time_t(ns / 1000000000LL);
-  its.it_interval.tv_nsec = long(ns % 1000000000LL);
-  its.it_value = its.it_interval;
-  timerfd_settime(p->timer_fd, 0, &its, nullptr);
+  p->anchor_cache.valid = false;  // ensure_client may have switched daemons
+  arm_timer(p);  // not running: the per-tick fallback until start()
   return 0;
 }
 
@@ -357,16 +436,19 @@ int virgil_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
                      unsigned short* revents) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (nfds != 1) return -EINVAL;
-  if (pfd->revents & POLLIN) {
+  const bool fired = (pfd->revents & POLLIN) != 0;
+  auto rearm = [&] {
     uint64_t expirations;
-    if (read(p->timer_fd, &expirations, sizeof expirations) < 0) { /* spurious */ }
-  }
+    if (fired && read(p->timer_fd, &expirations, sizeof expirations) < 0) { /* spurious */ }
+    arm_timer(p);
+  };
   const unsigned short ready = io->stream == SND_PCM_STREAM_PLAYBACK ? POLLOUT : POLLIN;
   if (!update_hw(p)) {
     // Wake the app so its next read/write reaches pointer(), which reports
     // -EPIPE (xrun). POLLERR here would surface as a fatal -EIO instead of
     // the recoverable xrun that lets it re-prepare after an engine restart.
     *revents = ready;
+    rearm();
     return 0;
   }
   uint64_t avail;
@@ -374,16 +456,38 @@ int virgil_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
     avail = io->buffer_size - std::min<uint64_t>(io->buffer_size, p->appl - std::min(p->appl, p->hw));
   else
     avail = p->running ? p->hw - std::min(p->appl, p->hw) : 0;
-  *revents = avail >= io->period_size ? ready : 0;
+  *revents = avail >= avail_min(p) ? ready : 0;
+  if (*revents && p->running && io->state != SND_PCM_STATE_DRAINING) {
+    // Ready: level-triggered like a hardware device. The timer stays
+    // expired (the fd readable) until transfer() re-arms it for the next
+    // wait; one that has not fired yet (revents asked without a poll) is
+    // made to fire now.
+    if (!fired) arm_timer(p);
+  } else {
+    rearm();  // not ready yet (or draining): sleep until it will be
+  }
+  return 0;
+}
+
+int virgil_sw_params(snd_pcm_ioplug_t* io, snd_pcm_sw_params_t* params) {
+  auto* p = static_cast<VirgilPcm*>(io->private_data);
+  snd_pcm_uframes_t v = 0;
+  if (snd_pcm_sw_params_get_avail_min(params, &v) < 0) v = 0;
+  p->avail_min = v;
+  if (p->running) {
+    sync_appl(p);
+    arm_timer(p);
+  }
   return 0;
 }
 
 int virgil_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   update_hw(p);
+  // Playback: frames until the last one written reaches its media time
+  // (hw is the media clock itself, see update_hw).
   if (io->stream == SND_PCM_STREAM_PLAYBACK)
-    *delay = snd_pcm_sframes_t(p->appl - std::min(p->appl, p->hw)) +
-             snd_pcm_sframes_t(p->client.period_frames());
+    *delay = snd_pcm_sframes_t(p->appl - std::min(p->appl, p->hw));
   else
     *delay = snd_pcm_sframes_t(p->hw - std::min(p->appl, p->hw)) +
              snd_pcm_sframes_t(p->client.rx_latency_frames());
@@ -410,6 +514,7 @@ const snd_pcm_ioplug_callback_t kCallbacks = [] {
   c.poll_descriptors = virgil_poll_descriptors;
   c.poll_revents = virgil_poll_revents;
   c.delay = virgil_delay;
+  c.sw_params = virgil_sw_params;
   return c;
 }();
 
