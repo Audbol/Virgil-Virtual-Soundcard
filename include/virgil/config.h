@@ -16,7 +16,13 @@ struct Config {
   uint32_t tx_channels = 8;        // Dante transmit channels (computer -> network)
   uint32_t rx_channels = 8;        // Dante receive channels (network -> computer)
   uint32_t latency_us = 4000;      // Dante receive latency
-  uint32_t tx_latency_us = 4000;   // Dante transmit latency
+  // Dante transmit latency. Windows wakes the sending thread a few ms late
+  // now and then (seen in user reports), so it gets more margin.
+#if defined(_WIN32)
+  uint32_t tx_latency_us = 6000;
+#else
+  uint32_t tx_latency_us = 4000;
+#endif
   uint32_t tick_us = 1000;         // internal mixing period
   uint32_t tx_lead_us = 0;         // drivers' playback margin; 0 = two ticks
   uint32_t ring_frames = 0;        // 0 = auto

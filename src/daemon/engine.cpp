@@ -75,8 +75,11 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     VIRGIL_LOG_ERROR("cannot find network interface '%s'", cfg_.interface.c_str());
     return false;
   }
+  // macOS does not implement mlockall: nothing to warn about there.
+#if !defined(__APPLE__)
   if (cfg_.lock_memory && !lock_memory())
     VIRGIL_LOG_WARN("mlockall failed; page faults may cause dropouts (raise RLIMIT_MEMLOCK)");
+#endif
 
   // --- shared memory soundcard ---
   std::string shm_name = cfg_.shm_name.empty() ? default_shm_name() : cfg_.shm_name;
