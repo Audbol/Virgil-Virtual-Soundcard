@@ -29,6 +29,7 @@
 #include <cstdarg>
 #include <cmath>
 #include <cstdio>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
@@ -36,6 +37,7 @@
 
 #include "api.h"
 #include "resource.h"
+#include "settings_model.h"
 
 namespace {
 
@@ -90,11 +92,13 @@ const unsigned kBg = 0x15171A, kPanel = 0x1B1E22, kLine = 0x2A2E34, kText = 0xE9
 // ---- app state ---------------------------------------------------------------------------
 
 const wchar_t* kWindowClass = L"VirgilControlWindow";
-const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3;
+const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3,
+           WM_APP_DONE = WM_APP + 4,   // a worker's request finished (lParam: Job*)
+           WM_APP_SAVED = WM_APP + 5;  // to the settings dialog: its POST finished (lParam: Job*)
 const UINT kTrayId = 1;
 enum {
-  ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_CONFIG_FOLDER, ID_ABOUT, ID_DIAG,
-  ID_STOP, ID_START
+  ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_ABOUT, ID_DIAG, ID_STOP, ID_START,
+  ID_BROWSER
 };
 
 HINSTANCE g_inst;
@@ -106,6 +110,9 @@ vc::Status g_status;         // guarded by g_mutex
 std::atomic<bool> g_visible{false};
 std::atomic<bool> g_quit{false};
 bool g_told_about_tray = false;
+HICON g_icon_small;          // tray, window and dialog icon (loaded once)
+HWND g_settings_dlg;         // the open settings dialog, if any (UI thread only)
+int g_pending = 0;           // command id whose request is in flight, 0 = none (UI thread only)
 
 // Meter display state (UI thread only).
 struct MeterState {
@@ -257,9 +264,24 @@ struct Button {
   D2D1_RECT_F r{};
   std::wstring label;
   int id = 0;
-  bool hover = false, down = false, primary = false, visible = false;
+  bool primary = false, visible = false, disabled = false;
 };
 std::vector<Button> g_buttons;  // rebuilt each paint
+// Hover and press are kept by command id, not by slot: the buttons change
+// between running and stopped, and a release must trigger what was pressed.
+int g_hover_id = 0, g_press_id = 0;
+
+// Commands that talk to the service; disabled while one of them is in flight.
+bool is_request(int id) { return id == ID_STOP || id == ID_START || id == ID_RESTART || id == ID_SETTINGS; }
+bool busy() { return g_pending != 0; }
+// A button's label, or what it is doing while its request is in flight.
+const wchar_t* button_label(int id, const wchar_t* idle) {
+  if (id != g_pending) return idle;
+  if (id == ID_STOP) return L"Stopping\u2026";
+  if (id == ID_START) return L"Starting\u2026";
+  if (id == ID_RESTART) return L"Restarting\u2026";
+  return idle;
+}
 
 const float kW = 640, kHeader = 76, kFooter = 56, kMeterH = 150, kPad = 22;
 
@@ -344,10 +366,12 @@ void draw_meter_group(float x, float y, const wchar_t* caption, unsigned n, cons
 
 void draw_button(Button& b) {
   b.visible = true;
-  const unsigned bg = b.primary ? kEmber : (b.down ? 0x2C3137 : b.hover ? 0x262A30 : kPanel);
-  fill_round(b.r, 4, bg);
-  if (!b.primary) stroke_round(b.r, 4, b.hover ? 0x4A5058 : 0x383D44);
-  text(b.label, g_f_button, b.r, b.primary ? 0x1A0D06 : kText);
+  b.disabled = busy() && is_request(b.id);
+  const bool hover = !b.disabled && b.id == g_hover_id, down = hover && b.id == g_press_id;
+  const unsigned bg = b.primary ? kEmber : (down ? 0x2C3137 : hover ? 0x262A30 : kPanel);
+  fill_round(b.r, 4, bg, b.disabled && b.primary ? 0.5f : 1.f);
+  if (!b.primary) stroke_round(b.r, 4, hover ? 0x4A5058 : 0x383D44);
+  text(b.label, g_f_button, b.r, b.primary ? 0x1A0D06 : b.disabled ? kDim : kText);
 }
 
 struct ClockView {
@@ -408,8 +432,7 @@ void paint(HWND hwnd) {
        kText);
   if (!cv.line2.empty()) text(cv.line2, g_f_sub, D2D1::RectF(cx + 16, 40, W - kPad, 58), kMuted);
 
-  g_buttons.resize(6);
-  for (auto& b : g_buttons) b.visible = false;
+  g_buttons.assign(6, Button());
 
   if (!s.reachable) {
     text(L"The Virgil service is not running.", g_f_big, D2D1::RectF(0, kHeader + 70, W, kHeader + 100), kText);
@@ -427,7 +450,7 @@ void paint(HWND hwnd) {
          D2D1::RectF(0, kHeader + 100, W, kHeader + 120), kMuted);
     Button& b = g_buttons[0];
     b.id = ID_START;
-    b.label = L"Start Virgil";
+    b.label = button_label(ID_START, L"Start Virgil");
     b.primary = true;
     b.r = D2D1::RectF(W / 2 - 70, kHeader + 140, W / 2 + 70, kHeader + 172);
     draw_button(b);
@@ -479,9 +502,9 @@ void paint(HWND hwnd) {
     float bx = W - kPad;
     for (size_t k = 0; k < right.size(); ++k) {
       Button& b = g_buttons[1 + k];
-      const float w = std::max(64.f, text_width(right[k].label, g_f_button) + 28);
       b.id = right[k].id;
-      b.label = right[k].label;
+      b.label = button_label(b.id, right[k].label);
+      const float w = std::max(64.f, text_width(b.label, g_f_button) + 28);
       b.primary = false;
       b.r = D2D1::RectF(bx - w, H - kFooter + 12, bx, H - 12);
       draw_button(b);
@@ -533,6 +556,47 @@ void start_service() {
   }
 }
 
+// Requests to the service run on a worker thread so a slow or hung service
+// never freezes the window; the result comes back as WM_APP_DONE.
+enum class JobKind { Stop, Start, Restart, LoadSettings, SaveSettings };
+struct Job {
+  JobKind kind;
+  std::string body;      // SaveSettings: the configuration to POST
+  vc::HttpResult r, r2;  // LoadSettings: /api/config and /api/interfaces
+};
+
+bool run_job(int id, JobKind kind, std::string body = std::string()) {
+  if (busy()) return false;
+  g_pending = id;
+  InvalidateRect(g_hwnd, nullptr, FALSE);
+  Job* job = new Job{kind, std::move(body), {}, {}};
+  const HWND target = g_hwnd;
+  const unsigned port = g_port;
+  std::thread([job, target, port] {
+    switch (job->kind) {
+      case JobKind::Stop: job->r = vc::http(port, "POST", "/api/stop"); break;
+      case JobKind::Start: job->r = vc::http(port, "POST", "/api/start"); break;
+      case JobKind::Restart: job->r = vc::http(port, "POST", "/api/restart"); break;
+      case JobKind::LoadSettings:
+        job->r = vc::http(port, "GET", "/api/config");
+        if (job->r.status == 200) job->r2 = vc::http(port, "GET", "/api/interfaces");
+        break;
+      case JobKind::SaveSettings: job->r = vc::http(port, "POST", "/api/config", job->body); break;
+    }
+    if (!PostMessageW(target, WM_APP_DONE, 0, reinterpret_cast<LPARAM>(job))) delete job;  // window gone
+  }).detach();
+  return true;
+}
+
+// The service's error message from a failed request.
+std::wstring request_error(const vc::HttpResult& r) {
+  if (!r.status) return L"Could not reach the Virgil service.";
+  vc::Json j;
+  std::string err = "HTTP " + std::to_string(r.status);
+  if (vc::parse_json(r.body, &j)) err = j["error"].str(err);
+  return widen(err);
+}
+
 void restart_engine() {
   bool reachable;
   {
@@ -540,7 +604,7 @@ void restart_engine() {
     reachable = g_status.reachable;
   }
   if (!reachable) return start_service();
-  vc::http(g_port, "POST", "/api/restart");
+  run_job(ID_RESTART, JobKind::Restart);
 }
 
 std::wstring log_path() {
@@ -608,8 +672,7 @@ void tray_add() {
   nid.uID = kTrayId;
   nid.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
   nid.uCallbackMessage = WM_APP_TRAY;
-  nid.hIcon = static_cast<HICON>(LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_VIRGIL), IMAGE_ICON,
-                                            GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+  nid.hIcon = g_icon_small;  // loaded once in wWinMain; re-adding after TaskbarCreated reuses it
   wcsncpy(nid.szTip, g_tip.empty() ? L"Virgil" : g_tip.c_str(), 127);
   Shell_NotifyIconW(NIM_ADD, &nid);
 }
@@ -657,7 +720,6 @@ void hide_window() {
   }
 }
 
-void show_settings();
 // Dropout details and the channel name editor live in the control panel.
 void open_page(const wchar_t* anchor) {
   const std::wstring url = L"http://127.0.0.1:" + std::to_wstring(g_port) + L"/" + anchor;
@@ -675,13 +737,19 @@ void tray_menu() {
   AppendMenuW(m, MF_STRING | MF_GRAYED, 0, (widen(s.reachable ? s.name : "Virgil") + L":  " + cv.line1).c_str());
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING, ID_OPEN, L"Open Virgil Control");
-  AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_SETTINGS, L"Settings\u2026");
-  AppendMenuW(m, MF_STRING, ID_RESTART, s.reachable ? L"Restart audio engine" : L"Start Virgil service");
+  const bool stopped = s.reachable && s.state == "stopped";
+  const UINT req = busy() ? MF_GRAYED : 0;
+  AppendMenuW(m, MF_STRING | (s.reachable && (!busy() || g_settings_dlg) ? 0 : MF_GRAYED), ID_SETTINGS,
+              L"Settings\u2026");
+  // Like the web panel: nothing to restart while Virgil is stopped.
+  AppendMenuW(m, MF_STRING | req | (stopped ? MF_GRAYED : 0), ID_RESTART,
+              s.reachable ? L"Restart audio engine" : L"Start Virgil service");
   if (s.reachable)
-    AppendMenuW(m, MF_STRING, s.state == "stopped" ? ID_START : ID_STOP,
-                s.state == "stopped" ? L"Start Virgil" : L"Stop Virgil");
+    AppendMenuW(m, MF_STRING | req, stopped ? ID_START : ID_STOP, stopped ? L"Start Virgil" : L"Stop Virgil");
+  AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
+  AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_DIAG, L"Dropouts and diagnostics\u2026");
+  AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_BROWSER, L"Open control panel in browser");
   AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
-  AppendMenuW(m, MF_STRING, ID_DIAG, L"Dropouts and diagnostics");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING | (autostart_enabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
   AppendMenuW(m, MF_STRING, ID_ABOUT, L"About Virgil\u2026");
@@ -696,20 +764,32 @@ void tray_menu() {
 }
 
 void command(int id) {
+  if (id == ID_SETTINGS && g_settings_dlg) {  // already open: bring it up instead of a second one
+    SetForegroundWindow(g_settings_dlg);
+    return;
+  }
+  if (is_request(id) && busy()) return;
   switch (id) {
     case ID_OPEN: show_window(); break;
-    case ID_SETTINGS: show_settings(); break;
+    case ID_SETTINGS: run_job(ID_SETTINGS, JobKind::LoadSettings); break;  // the dialog opens when loaded
     case ID_DIAG: open_page(L"#diagnostics"); break;
+    case ID_BROWSER: open_page(L""); break;
     case ID_RESTART: restart_engine(); break;
-    case ID_STOP:
-      if (MessageBoxW(g_hwnd,
-                      L"Audio to and from the Dante network stops, Virgil leaves the network (its ports are "
-                      L"free, e.g. for Dante Virtual Soundcard) and apps cannot use its soundcard until you "
-                      L"start it again. It stays stopped after a restart of the computer.",
-                      L"Stop Virgil?", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) == IDOK)
-        vc::http(g_port, "POST", "/api/stop");
+    case ID_STOP: {
+      static bool asking = false;  // the tray menu stays usable while the question is up
+      if (asking) break;
+      asking = true;
+      const int answer = MessageBoxW(
+          g_hwnd,
+          L"Audio to and from the Dante network stops, Virgil leaves the network (its ports are "
+          L"free, e.g. for Dante Virtual Soundcard) and apps cannot use its soundcard until you "
+          L"start it again. It stays stopped after a restart of the computer.",
+          L"Stop Virgil?", MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2);
+      asking = false;
+      if (answer == IDOK) run_job(ID_STOP, JobKind::Stop);
       break;
-    case ID_START: vc::http(g_port, "POST", "/api/start"); break;
+    }
+    case ID_START: run_job(ID_START, JobKind::Start); break;
     case ID_LOG: ShellExecuteW(g_hwnd, L"open", log_path().c_str(), nullptr, nullptr, SW_SHOWNORMAL); break;
     case ID_AUTOSTART: set_autostart(!autostart_enabled()); break;
     case ID_QUIT: DestroyWindow(g_hwnd); break;
@@ -741,24 +821,39 @@ std::wstring tray_text(const vc::Status& s) {
   if (s.reachable) {
     unsigned playing = 0;
     for (const auto& c : s.clients) playing += c.active;
-    if (playing) t += fmt(L"\n%u app(s) playing", playing);
+    if (playing) t += fmt(L"\n%u %s playing", playing, playing == 1 ? L"app" : L"apps");
   }
   return t.substr(0, 127);
 }
 
+// Polls in a row that must fail before the service counts as gone: one lost
+// or slow request (e.g. while the engine restarts) is not worth an alarm.
+const int kFailuresUntilGone = 3;
+
 void poll_thread() {
-  bool was_reachable = true;
+  // Not reachable yet: if the service is still starting (login, portable
+  // start) the first failures are no news and must not raise a balloon.
+  bool was_reachable = false;
+  int failures = 0;
   std::string was_clock;
   DWORD lost_since = 0;
   bool lost_told = false;
   while (!g_quit) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
-    if (r.status != 200 || !vc::parse_status(r.body, &s)) s = vc::Status();
+    const bool ok = r.status == 200 && vc::parse_status(r.body, &s);
+    failures = ok ? 0 : failures + 1;
     {
       std::lock_guard<std::mutex> l(g_mutex);
-      // Meters are drained per request by the daemon; keep a frame's worth.
-      g_status = s;
+      if (ok || failures >= kFailuresUntilGone) {
+        // Meters are drained per request by the daemon; keep a frame's worth.
+        g_status = ok ? s : vc::Status();
+      } else {
+        // A missed poll: keep showing the last status, but let the meters fall.
+        g_status.meter_tx.clear();
+        g_status.meter_rx.clear();
+      }
+      s = g_status;
     }
     // Notifications on state changes worth knowing about while hidden.
     if (was_reachable && !s.reachable)
@@ -781,135 +876,167 @@ void poll_thread() {
 
 // ---- settings dialog -------------------------------------------------------------------
 
+// Per dialog, in DWLP_USER (owned by show_settings, which outlives the dialog).
 struct SettingsData {
-  std::string conf;
-  std::vector<vc::Interface> ifaces;
+  std::string conf;     // /api/config as loaded; the form is applied onto it
+  vc::SettingsForm form;
+  bool saving = false;  // POST in flight
 };
 
-void combo_add(HWND d, int id, const std::wstring& s) { SendDlgItemMessageW(d, id, CB_ADDSTRING, 0, (LPARAM)s.c_str()); }
+SettingsData* settings_data(HWND d) { return reinterpret_cast<SettingsData*>(GetWindowLongPtrW(d, DWLP_USER)); }
+
+void combo_add(HWND d, int id, const std::wstring& s) {
+  SendDlgItemMessageW(d, id, CB_ADDSTRING, 0, reinterpret_cast<LPARAM>(s.c_str()));
+}
 std::wstring get_text(HWND d, int id) {
   wchar_t buf[512];
   GetDlgItemTextW(d, id, buf, 512);
   return buf;
 }
-std::wstring ms_text(const std::string& us) {
-  const double ms = std::atof(us.c_str()) / 1000.0;
-  wchar_t b[32];
-  swprintf(b, 32, L"%g", ms);
-  return b;
+
+// Channel count field: 0..64 (0 = that direction off). False if not a number.
+bool read_channels(HWND d, int id, unsigned* out) {
+  const std::wstring t = get_text(d, id);
+  wchar_t* end = nullptr;
+  const unsigned long n = std::wcstoul(t.c_str(), &end, 10);
+  if (t.empty() || end == t.c_str() || *end || n > 64) return false;
+  *out = unsigned(n);
+  return true;
 }
 
+// Latency field in ms. Accepts ',' as the decimal separator ("3,5") as well as
+// '.', and hands the model a '.' string (it parses in the C locale).
+bool read_ms(HWND d, int id, std::string* out) {
+  std::wstring t = get_text(d, id);
+  std::replace(t.begin(), t.end(), L',', L'.');
+  while (!t.empty() && t.back() == L' ') t.pop_back();
+  while (!t.empty() && t.front() == L' ') t.erase(t.begin());
+  wchar_t* end = nullptr;
+  const double v = std::wcstod(t.c_str(), &end);
+  if (t.empty() || end == t.c_str() || *end || !(v > 0)) return false;
+  *out = narrow(t);
+  return true;
+}
+
+void settings_error(HWND d, const std::wstring& msg) { SetDlgItemTextW(d, IDC_ERR, msg.c_str()); }
+
 INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
-  static SettingsData* data;
   switch (msg) {
     case WM_INITDIALOG: {
-      data = reinterpret_cast<SettingsData*>(lp);
-      const std::string& c = data->conf;
-      HICON ic = static_cast<HICON>(LoadImageW(g_inst, MAKEINTRESOURCEW(IDI_VIRGIL), IMAGE_ICON, 16, 16, 0));
-      SendMessageW(d, WM_SETICON, ICON_SMALL, (LPARAM)ic);
-      std::string name = vc::conf_get(c, "device", "name");
-      SetDlgItemTextW(d, IDC_NAME, widen(name.empty() ? "Virgil" : name).c_str());
+      SetWindowLongPtrW(d, DWLP_USER, lp);
+      g_settings_dlg = d;
+      const SettingsData& data = *reinterpret_cast<SettingsData*>(lp);
+      const vc::SettingsForm& f = data.form;
+      if (g_icon_small) SendMessageW(d, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_icon_small));
+      SetDlgItemTextW(d, IDC_NAME, widen(f.name).c_str());
       SendDlgItemMessageW(d, IDC_NAME, EM_LIMITTEXT, 31, 0);
-      const std::string cur_if = vc::conf_get(c, "device", "interface");
-      combo_add(d, IDC_IFACE, L"Automatic (prefers wired Ethernet)");
-      int sel = 0, i = 1;
-      for (const auto& f : data->ifaces) {
-        if (f.loopback) continue;
-        combo_add(d, IDC_IFACE, widen(f.name + "  (" + f.address + ")" + (f.virt ? "  virtual" : "")));
-        if (!cur_if.empty() && (cur_if == f.name || cur_if == f.address)) sel = i;
-        ++i;
-      }
-      SendDlgItemMessageW(d, IDC_IFACE, CB_SETCURSEL, sel, 0);
-      const char* rates[] = {"44100", "48000", "88200", "96000"};
-      std::string rate = vc::conf_get(c, "device", "sample_rate");
-      if (rate.empty()) rate = "48000";
-      for (int k = 0; k < 4; ++k) {
-        combo_add(d, IDC_RATE, widen(std::string(rates[k]) + " Hz"));
-        if (rate == rates[k]) SendDlgItemMessageW(d, IDC_RATE, CB_SETCURSEL, k, 0);
-      }
-      std::string tx = vc::conf_get(c, "device", "tx_channels"), rx = vc::conf_get(c, "device", "rx_channels");
-      SetDlgItemTextW(d, IDC_TXCH, widen(tx.empty() ? "8" : tx).c_str());
-      SetDlgItemTextW(d, IDC_RXCH, widen(rx.empty() ? "8" : rx).c_str());
-      for (const wchar_t* v : {L"1", L"2", L"4", L"5", L"10", L"20"}) combo_add(d, IDC_RXLAT, v);
-      for (const wchar_t* v : {L"3.5", L"4", L"5", L"6", L"10", L"20"}) combo_add(d, IDC_TXLAT, v);
-      const std::string rl = vc::conf_get(c, "device", "latency_us"), tl = vc::conf_get(c, "device", "tx_latency_us");
-      SetDlgItemTextW(d, IDC_RXLAT, rl.empty() ? L"4" : ms_text(rl).c_str());
-      SetDlgItemTextW(d, IDC_TXLAT, tl.empty() ? L"4" : ms_text(tl).c_str());
+      // Includes a "not connected" entry for a configured interface that is
+      // missing right now, so Apply keeps it instead of resetting to Automatic.
+      for (const auto& l : f.iface_labels()) combo_add(d, IDC_IFACE, widen(l));
+      SendDlgItemMessageW(d, IDC_IFACE, CB_SETCURSEL, WPARAM(f.iface_index), 0);
+      for (const char* l : vc::kRateLabels) combo_add(d, IDC_RATE, widen(l));
+      SendDlgItemMessageW(d, IDC_RATE, CB_SETCURSEL, WPARAM(f.rate_index), 0);
+      SendDlgItemMessageW(d, IDC_TXSPIN, UDM_SETRANGE32, 0, 64);
+      SendDlgItemMessageW(d, IDC_RXSPIN, UDM_SETRANGE32, 0, 64);
+      SetDlgItemTextW(d, IDC_TXCH, std::to_wstring(f.tx_channels).c_str());
+      SetDlgItemTextW(d, IDC_RXCH, std::to_wstring(f.rx_channels).c_str());
+      for (const char* v : vc::kRxLatencies) combo_add(d, IDC_RXLAT, widen(v));
+      for (const char* v : vc::kTxLatencies) combo_add(d, IDC_TXLAT, widen(v));
+      SetDlgItemTextW(d, IDC_RXLAT, widen(f.rx_latency_ms).c_str());
+      SetDlgItemTextW(d, IDC_TXLAT, widen(f.tx_latency_ms).c_str());
       combo_add(d, IDC_CLOCK, L"Follow the Dante clock leader (PTP)");
       combo_add(d, IDC_CLOCK, L"Local clock only (testing)");
-      SendDlgItemMessageW(d, IDC_CLOCK, CB_SETCURSEL, vc::conf_get(c, "device", "clock") == "free" ? 1 : 0, 0);
-      const std::string mc = vc::conf_get(c, "ptp", "master_capable");
-      CheckDlgButton(d, IDC_MASTER, (mc == "true" || mc == "1" || mc == "yes") ? BST_CHECKED : BST_UNCHECKED);
+      SendDlgItemMessageW(d, IDC_CLOCK, CB_SETCURSEL, f.local_clock ? 1 : 0, 0);
+      CheckDlgButton(d, IDC_MASTER, f.master_capable ? BST_CHECKED : BST_UNCHECKED);
+      std::string path;
+      {
+        std::lock_guard<std::mutex> l(g_mutex);
+        path = g_status.config_path;
+      }
+      if (!path.empty()) SetDlgItemTextW(d, IDC_CONFPATH, (L"Configuration: " + widen(path)).c_str());
       return TRUE;
     }
+    case WM_DESTROY:
+      if (g_settings_dlg == d) g_settings_dlg = nullptr;
+      break;
     case WM_CTLCOLORSTATIC:
       if (GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == IDC_ERR) {
         SetTextColor(reinterpret_cast<HDC>(wp), RGB(190, 40, 30));
         SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
-        return (INT_PTR)GetSysColorBrush(COLOR_BTNFACE);
+        return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE));
       }
       break;
-    case WM_COMMAND:
+    case WM_APP_SAVED: {  // from the main window: our POST finished
+      SettingsData* data = settings_data(d);
+      const Job* job = reinterpret_cast<const Job*>(lp);
+      if (!data || !job) return TRUE;
+      data->saving = false;
+      if (job->r.status == 200) {
+        EndDialog(d, 1);
+      } else {
+        settings_error(d, request_error(job->r));
+        EnableWindow(GetDlgItem(d, IDOK), TRUE);
+      }
+      return TRUE;
+    }
+    case WM_COMMAND: {
+      SettingsData* data = settings_data(d);
+      if (!data) break;
       if (LOWORD(wp) == IDC_NAMES) {  // the editor lives in the control panel
         open_page(L"#channels");
         EndDialog(d, 0);
         return TRUE;
       }
-      if (LOWORD(wp) == IDCANCEL) {
+      if (LOWORD(wp) == IDCANCEL) {  // a POST in flight still completes; its result is dropped
         EndDialog(d, 0);
         return TRUE;
       }
       if (LOWORD(wp) == IDOK) {
-        std::string c = data->conf;
-        c = vc::conf_set(c, "device", "name", narrow(get_text(d, IDC_NAME)));
-        const int si = int(SendDlgItemMessageW(d, IDC_IFACE, CB_GETCURSEL, 0, 0));
-        std::string iface;
-        int i = 1;
-        for (const auto& f : data->ifaces) {
-          if (f.loopback) continue;
-          if (i++ == si) iface = f.name;
+        if (data->saving) return TRUE;
+        vc::SettingsForm f = data->form;
+        f.name = narrow(get_text(d, IDC_NAME));
+        f.iface_index = std::max(0, int(SendDlgItemMessageW(d, IDC_IFACE, CB_GETCURSEL, 0, 0)));
+        f.rate_index = int(SendDlgItemMessageW(d, IDC_RATE, CB_GETCURSEL, 0, 0));
+        if (!read_channels(d, IDC_TXCH, &f.tx_channels) || !read_channels(d, IDC_RXCH, &f.rx_channels)) {
+          settings_error(d, L"Enter a channel count from 0 to 64 for each direction.");
+          return TRUE;
         }
-        c = vc::conf_set(c, "device", "interface", iface);
-        const char* rates[] = {"44100", "48000", "88200", "96000"};
-        const int ri = int(SendDlgItemMessageW(d, IDC_RATE, CB_GETCURSEL, 0, 0));
-        c = vc::conf_set(c, "device", "sample_rate", rates[ri < 0 || ri > 3 ? 1 : ri]);
-        c = vc::conf_set(c, "device", "tx_channels", narrow(get_text(d, IDC_TXCH)));
-        c = vc::conf_set(c, "device", "rx_channels", narrow(get_text(d, IDC_RXCH)));
-        auto us = [](const std::wstring& ms) { return std::to_string(long(std::wcstod(ms.c_str(), nullptr) * 1000 + 0.5)); };
-        c = vc::conf_set(c, "device", "latency_us", us(get_text(d, IDC_RXLAT)));
-        c = vc::conf_set(c, "device", "tx_latency_us", us(get_text(d, IDC_TXLAT)));
-        c = vc::conf_set(c, "device", "clock",
-                         SendDlgItemMessageW(d, IDC_CLOCK, CB_GETCURSEL, 0, 0) == 1 ? "free" : "ptp");
-        c = vc::conf_set(c, "ptp", "master_capable", IsDlgButtonChecked(d, IDC_MASTER) ? "true" : "false");
-        SetDlgItemTextW(d, IDC_ERR, L"Applying\u2026");
-        const auto r = vc::http(g_port, "POST", "/api/config", c);
-        if (r.status == 200) {
-          EndDialog(d, 1);
-        } else {
-          vc::Json j;
-          std::string err = "Could not reach the Virgil service.";
-          if (r.status && vc::parse_json(r.body, &j)) err = j["error"].str("HTTP " + std::to_string(r.status));
-          SetDlgItemTextW(d, IDC_ERR, widen(err).c_str());
+        if (!read_ms(d, IDC_RXLAT, &f.rx_latency_ms) || !read_ms(d, IDC_TXLAT, &f.tx_latency_ms)) {
+          settings_error(d, L"Enter the latency in milliseconds, for example 4 or 3.5.");
+          return TRUE;
         }
+        f.local_clock = SendDlgItemMessageW(d, IDC_CLOCK, CB_GETCURSEL, 0, 0) == 1;
+        f.master_capable = IsDlgButtonChecked(d, IDC_MASTER) == BST_CHECKED;
+        if (!run_job(ID_SETTINGS, JobKind::SaveSettings, vc::apply_settings(data->conf, f))) {
+          settings_error(d, L"Virgil is busy with another request. Try again in a moment.");
+          return TRUE;
+        }
+        data->saving = true;
+        EnableWindow(GetDlgItem(d, IDOK), FALSE);
+        settings_error(d, L"Applying…");
         return TRUE;
       }
       break;
+    }
   }
   return FALSE;
 }
 
-void show_settings() {
-  SettingsData data;
-  const auto c = vc::http(g_port, "GET", "/api/config");
-  if (c.status != 200) {
-    MessageBoxW(g_hwnd, L"The Virgil service is not running, so its settings cannot be changed now.", L"Virgil",
-                MB_ICONINFORMATION);
+// Opens the (modal) dialog with what LoadSettings fetched.
+void show_settings(const std::string& conf, const std::vector<vc::Interface>& ifaces) {
+  if (g_settings_dlg) {
+    SetForegroundWindow(g_settings_dlg);
     return;
   }
-  data.conf = c.body;
-  data.ifaces = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
+  SettingsData data;
+  data.conf = conf;
+  data.form = vc::load_settings(conf, ifaces);
+  // An explicit 0 (direction off) is a valid setting; show it as such.
+  if (vc::conf_get(conf, "device", "tx_channels") == "0") data.form.tx_channels = 0;
+  if (vc::conf_get(conf, "device", "rx_channels") == "0") data.form.rx_channels = 0;
   DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS), IsWindowVisible(g_hwnd) ? g_hwnd : nullptr,
                   settings_proc, reinterpret_cast<LPARAM>(&data));
+  g_settings_dlg = nullptr;
 }
 
 // ---- window --------------------------------------------------------------------------------
@@ -921,6 +1048,16 @@ UINT dpi_for(HWND h) {
   return fn && h ? fn(h) : 96;
 }
 
+// The frame for a client rect at the window's DPI. AdjustWindowRectEx uses the
+// system DPI, which is wrong on other monitors under PerMonitorV2;
+// AdjustWindowRectExForDpi (Windows 10 1607+) is looked up at run time.
+void adjust_for_dpi(RECT* r, DWORD style, DWORD ex_style, UINT dpi) {
+  using Fn = BOOL(WINAPI*)(LPRECT, DWORD, BOOL, DWORD, UINT);
+  static Fn fn = reinterpret_cast<Fn>(
+      reinterpret_cast<void*>(GetProcAddress(GetModuleHandleW(L"user32.dll"), "AdjustWindowRectExForDpi")));
+  if (!fn || !fn(r, style, FALSE, ex_style, dpi)) AdjustWindowRectEx(r, style, FALSE, ex_style);
+}
+
 void resize_to_content(HWND h) {
   vc::Status s;
   {
@@ -929,17 +1066,50 @@ void resize_to_content(HWND h) {
   }
   const float scale = g_dpi / 96.f;
   RECT r{0, 0, LONG(window_w(s) * scale), LONG(window_h() * scale)};
-  AdjustWindowRectEx(&r, DWORD(GetWindowLongW(h, GWL_STYLE)), FALSE, 0);
+  adjust_for_dpi(&r, DWORD(GetWindowLongW(h, GWL_STYLE)), DWORD(GetWindowLongW(h, GWL_EXSTYLE)), UINT(g_dpi));
   RECT cur;
   GetWindowRect(h, &cur);
   if (cur.right - cur.left != r.right - r.left || cur.bottom - cur.top != r.bottom - r.top)
     SetWindowPos(h, nullptr, 0, 0, r.right - r.left, r.bottom - r.top, SWP_NOMOVE | SWP_NOZORDER | SWP_NOACTIVATE);
 }
 
-Button* hit(float x, float y) {
-  for (auto& b : g_buttons)
-    if (b.visible && x >= b.r.left && x <= b.r.right && y >= b.r.top && y <= b.r.bottom) return &b;
-  return nullptr;
+// The enabled button under a client point (pixels), as its command id (0: none).
+int hit(LPARAM lp) {
+  const float x = GET_X_LPARAM(lp) * 96.f / g_dpi, y = GET_Y_LPARAM(lp) * 96.f / g_dpi;
+  for (const auto& b : g_buttons)
+    if (b.visible && !b.disabled && x >= b.r.left && x <= b.r.right && y >= b.r.top && y <= b.r.bottom)
+      return b.id;
+  return 0;
+}
+
+// A request from run_job finished (UI thread).
+void job_done(std::unique_ptr<Job> job) {
+  g_pending = 0;
+  InvalidateRect(g_hwnd, nullptr, FALSE);
+  switch (job->kind) {
+    case JobKind::Stop:
+    case JobKind::Start:
+    case JobKind::Restart:
+      if (job->r.status != 200) {
+        const wchar_t* what = job->kind == JobKind::Stop    ? L"Could not stop Virgil"
+                              : job->kind == JobKind::Start ? L"Could not start Virgil"
+                                                            : L"Could not restart the audio engine";
+        tray_balloon(what, request_error(job->r), true);
+      }
+      break;
+    case JobKind::LoadSettings:
+      if (job->r.status != 200) {
+        MessageBoxW(g_hwnd, L"The Virgil service is not running, so its settings cannot be changed now.",
+                    L"Virgil", MB_ICONINFORMATION);
+        break;
+      }
+      // Modal: runs its own message loop until the dialog closes.
+      show_settings(job->r.body, vc::parse_interfaces(job->r2.body));
+      break;
+    case JobKind::SaveSettings:
+      if (g_settings_dlg) SendMessageW(g_settings_dlg, WM_APP_SAVED, 0, reinterpret_cast<LPARAM>(job.get()));
+      break;
+  }
 }
 
 LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
@@ -987,6 +1157,9 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_APP_SHOW:
       show_window();
       return 0;
+    case WM_APP_DONE:
+      job_done(std::unique_ptr<Job>(reinterpret_cast<Job*>(lp)));
+      return 0;
     case WM_COMMAND:
       command(LOWORD(wp));
       return 0;
@@ -1010,31 +1183,31 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       return 0;
     }
     case WM_MOUSEMOVE: {
-      const float x = GET_X_LPARAM(lp) * 96.f / g_dpi, y = GET_Y_LPARAM(lp) * 96.f / g_dpi;
-      Button* b = hit(x, y);
-      for (auto& o : g_buttons) o.hover = &o == b;
-      SetCursor(LoadCursorW(nullptr, b ? IDC_HAND : IDC_ARROW));
+      g_hover_id = hit(lp);
+      SetCursor(LoadCursorW(nullptr, g_hover_id ? IDC_HAND : IDC_ARROW));
       TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
       TrackMouseEvent(&t);
       return 0;
     }
     case WM_MOUSELEAVE:
-      for (auto& o : g_buttons) o.hover = o.down = false;
+      g_hover_id = 0;
+      if (GetCapture() != h) g_press_id = 0;
       return 0;
-    case WM_LBUTTONDOWN: {
-      Button* b = hit(GET_X_LPARAM(lp) * 96.f / g_dpi, GET_Y_LPARAM(lp) * 96.f / g_dpi);
-      if (b) b->down = true;
+    case WM_LBUTTONDOWN:
+      g_press_id = hit(lp);  // the command pressed, whatever the buttons become meanwhile
       SetCapture(h);
       return 0;
-    }
     case WM_LBUTTONUP: {
+      const int pressed = g_press_id;
+      g_press_id = 0;
       ReleaseCapture();
-      Button* b = hit(GET_X_LPARAM(lp) * 96.f / g_dpi, GET_Y_LPARAM(lp) * 96.f / g_dpi);
-      const bool was_down = b && b->down;
-      for (auto& o : g_buttons) o.down = false;
-      if (was_down) command(b->id);
+      // Only if released over a button that still does what was pressed.
+      if (pressed && hit(lp) == pressed) command(pressed);
       return 0;
     }
+    case WM_CAPTURECHANGED:
+      if (reinterpret_cast<HWND>(lp) != h) g_press_id = 0;
+      return 0;
     case WM_SETCURSOR:
       if (LOWORD(lp) == HTCLIENT) return TRUE;  // set in WM_MOUSEMOVE
       break;
@@ -1068,7 +1241,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   }
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES};
+  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS};
   InitCommonControlsEx(&icc);
   create_device_independent();
   first_run_defaults();
@@ -1083,7 +1256,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   wc.lpfnWndProc = wnd_proc;
   wc.hInstance = inst;
   wc.hIcon = LoadIconW(inst, MAKEINTRESOURCEW(IDI_VIRGIL));
-  wc.hIconSm = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_VIRGIL), IMAGE_ICON, 16, 16, 0));
+  // One small icon for the window, the tray (also re-added after Explorer
+  // restarts) and the settings dialog; destroyed at exit.
+  g_icon_small = static_cast<HICON>(LoadImageW(inst, MAKEINTRESOURCEW(IDI_VIRGIL), IMAGE_ICON,
+                                               GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0));
+  wc.hIconSm = g_icon_small;
   wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
   wc.lpszClassName = kWindowClass;
   RegisterClassExW(&wc);
@@ -1094,6 +1271,9 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   AdjustWindowRectEx(&r, style, FALSE, 0);
   g_hwnd = CreateWindowExW(0, kWindowClass, L"Virgil", style, CW_USEDEFAULT, CW_USEDEFAULT, r.right - r.left,
                            r.bottom - r.top, nullptr, nullptr, inst, nullptr);
+  // The size above is in 96-DPI pixels; now that the window has its monitor's
+  // DPI (g_dpi, from WM_CREATE), size it for that.
+  resize_to_content(g_hwnd);
   tray_add();
   std::thread poller(poll_thread);
   if (!tray_only) show_window();
@@ -1106,6 +1286,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   g_quit = true;
   poller.join();
   discard_device();
+  if (g_icon_small) DestroyIcon(g_icon_small);
   CloseHandle(single);
   CoUninitialize();
   return 0;

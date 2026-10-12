@@ -109,7 +109,7 @@ if(APPLE)
 elseif(WIN32)
   # Native tray app with a Direct2D status window and a settings dialog.
   add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_common/api.cpp
-                 tools/control_win/control.rc)
+                 tools/control_common/settings_model.cpp tools/control_win/control.rc)
   target_include_directories(virgil-control PRIVATE tools/control_win tools/control_common branding)
   if(MINGW)
     target_link_options(virgil-control PRIVATE -municode)

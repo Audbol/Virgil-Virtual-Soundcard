@@ -1,5 +1,6 @@
 // Virgil Control (Windows) resources. CMake puts branding/ on the include path.
 #include <windows.h>
+#include <commctrl.h>
 #include "resource.h"
 
 IDI_VIRGIL ICON "virgil.ico"
@@ -18,9 +19,11 @@ BEGIN
     LTEXT           "Sample rate:", -1, 16, 56, 96, 9
     COMBOBOX        IDC_RATE, 118, 54, 70, 80, CBS_DROPDOWNLIST | WS_TABSTOP
     LTEXT           "Channels out / in:", -1, 16, 72, 96, 9
-    EDITTEXT        IDC_TXCH, 118, 70, 30, 13, ES_NUMBER
-    LTEXT           "/", -1, 152, 72, 6, 9
-    EDITTEXT        IDC_RXCH, 160, 70, 30, 13, ES_NUMBER
+    EDITTEXT        IDC_TXCH, 118, 70, 34, 13, ES_NUMBER
+    CONTROL         "", IDC_TXSPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
+    LTEXT           "/", -1, 156, 72, 6, 9
+    EDITTEXT        IDC_RXCH, 164, 70, 34, 13, ES_NUMBER
+    CONTROL         "", IDC_RXSPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
     PUSHBUTTON      "Channel names...", IDC_NAMES, 204, 69, 70, 15
 
     GROUPBOX        "Latency", -1, 7, 90, 276, 48
@@ -35,7 +38,7 @@ BEGIN
     AUTOCHECKBOX    "Become clock leader when no Dante device provides one", IDC_MASTER, 16, 172, 258, 10
 
     LTEXT           "", IDC_ERR, 7, 194, 276, 18
-    LTEXT           "", IDC_CONFPATH, 7, 220, 160, 9
+    LTEXT           "", IDC_CONFPATH, 7, 220, 160, 9, SS_PATHELLIPSIS | SS_NOPREFIX
     DEFPUSHBUTTON   "Apply", IDOK, 172, 216, 52, 15
     PUSHBUTTON      "Cancel", IDCANCEL, 230, 216, 52, 15
 END
