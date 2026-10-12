@@ -43,7 +43,81 @@ uint64_t now_ms() {
   return uint64_t(duration_cast<milliseconds>(steady_clock::now().time_since_epoch()).count());
 }
 
-NSString* ns(const std::string& s) { return [NSString stringWithUTF8String:s.c_str()] ?: @""; }
+// Invalid UTF-8 sequences (an app or channel name the daemon passed through
+// as raw bytes) become U+FFFD instead of blanking the whole string.
+std::string utf8_sanitize(const std::string& s) {
+  std::string out;
+  out.reserve(s.size());
+  size_t i = 0;
+  const size_t n = s.size();
+  while (i < n) {
+    const unsigned char c = static_cast<unsigned char>(s[i]);
+    if (c < 0x80) {
+      out += char(c);
+      ++i;
+      continue;
+    }
+    size_t len = 0;
+    unsigned cp = 0, min = 0;
+    if ((c & 0xE0) == 0xC0) len = 2, cp = c & 0x1F, min = 0x80;
+    else if ((c & 0xF0) == 0xE0) len = 3, cp = c & 0x0F, min = 0x800;
+    else if ((c & 0xF8) == 0xF0) len = 4, cp = c & 0x07, min = 0x10000;
+    bool ok = len != 0 && i + len <= n;
+    for (size_t k = 1; ok && k < len; ++k) {
+      const unsigned char d = static_cast<unsigned char>(s[i + k]);
+      if ((d & 0xC0) != 0x80) ok = false;
+      else cp = (cp << 6) | (d & 0x3F);
+    }
+    if (ok && (cp < min || cp > 0x10FFFF || (cp >= 0xD800 && cp <= 0xDFFF))) ok = false;
+    if (ok) {
+      out.append(s, i, len);
+      i += len;
+    } else {
+      out += "\xEF\xBF\xBD";
+      ++i;
+    }
+  }
+  return out;
+}
+
+NSString* ns(const std::string& s) {
+  if (s.empty()) return @"";
+  NSString* r = [[NSString alloc] initWithBytes:s.data() length:s.size() encoding:NSUTF8StringEncoding];
+  if (!r) {
+    const std::string clean = utf8_sanitize(s);
+    r = [[NSString alloc] initWithBytes:clean.data() length:clean.size() encoding:NSUTF8StringEncoding];
+  }
+  return r ?: @"";
+}
+
+// Banner notification (service lost, clock lost), like the tray balloons on
+// Windows and the desktop notifications on Linux. NSUserNotification is
+// deprecated but needs no extra framework, entitlement or permission prompt.
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+void notify(NSString* title, NSString* text) {
+  NSUserNotification* n = [[NSUserNotification alloc] init];
+  n.title = title;
+  n.informativeText = text;
+  [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:n];
+}
+#pragma clang diagnostic pop
+
+// Runs `block` on the main thread for a background request that may end in a
+// modal alert. Not dispatch_get_main_queue(): that queue is serial, so a modal
+// run inside one of its blocks would hold back every later main-queue block
+// (the status updates) until the alert is closed.
+void on_main(void (^block)(void)) {
+  CFRunLoopPerformBlock(CFRunLoopGetMain(), kCFRunLoopCommonModes, block);
+  CFRunLoopWakeUp(CFRunLoopGetMain());
+}
+
+// A queue for the blocking control API requests the user starts.
+dispatch_queue_t background() { return dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0); }
+
+// Consecutive failed polls before the service counts as not running, so one
+// slow reply (engine restart, busy machine) does not flash "not running".
+constexpr int kFailuresUntilUnreachable = 3;
 
 NSColor* color(unsigned c, float a = 1.f) {
   return [NSColor colorWithSRGBRed:((c >> 16) & 255) / 255.0
@@ -228,13 +302,23 @@ void set_autostart(bool on) {
 
 // ---- application ---------------------------------------------------------------------------
 
-@interface VCApp : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate>
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+@interface VCApp : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, NSUserNotificationCenterDelegate>
+#pragma clang diagnostic pop
 @property(strong) NSWindow* window;
 @property(strong) VCView* view;
 @property(strong) NSStatusItem* item;
 @property(strong) NSMenuItem* autostartItem;
 @property(strong) NSMenuItem* runItem;  // Stop Virgil / Start Virgil
 @property BOOL startHidden;
+// A start/stop/restart request or a settings save is on its way (main thread only).
+@property BOOL busy;
+// The settings are being fetched, or the settings dialog is open (or saving).
+@property BOOL settingsLoading;
+@property(strong) NSAlert* settingsAlert;
+@property(strong) NSTextField* settingsError;
+@property(copy) std::string (^settingsCollect)(void);  // the form's fields as virgil.conf text
 @end
 
 @implementation VCApp
@@ -283,6 +367,10 @@ void set_autostart(bool on) {
   self.item.button.image = icon;
   self.item.button.toolTip = @"Virgil";
   self.item.menu = [self buildMenu];
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+  [NSUserNotificationCenter defaultUserNotificationCenter].delegate = self;
+#pragma clang diagnostic pop
 
   std::thread([self] { [self pollLoop]; }).detach();
   if (portable() && vc::http(g_port, "GET", "/api/status").status != 200) [self startService:nil];
@@ -334,7 +422,7 @@ void set_autostart(bool on) {
   add(@"Restart audio engine", @selector(restartEngine:));
   self.runItem = add(@"Stop Virgil", @selector(toggleRunning:));
   [m addItem:[NSMenuItem separatorItem]];
-  add(@"Dropouts and diagnostics", @selector(openDiagnostics:));
+  add(@"Dropouts and diagnostics…", @selector(openDiagnostics:));
   add(@"Open control panel in browser", @selector(openBrowser:));
   add(@"Show log", @selector(showLog:));
   self.autostartItem = add(@"Start at login", @selector(toggleAutostart:));
@@ -350,28 +438,60 @@ void set_autostart(bool on) {
   self.runItem.title = s.state == "stopped" ? @"Start Virgil" : @"Stop Virgil";
 }
 
+// Menu items (status item menu and the app menu) are enabled here: NSMenu
+// asks before showing them (autoenablesItems).
+- (BOOL)validateMenuItem:(NSMenuItem*)item {
+  const vc::Status& s = g_view.status();
+  const SEL a = item.action;
+  if (a == @selector(toggleRunning:)) return s.reachable && !self.busy;
+  if (a == @selector(restartEngine:)) return s.reachable && s.state != "stopped" && !self.busy;
+  if (a == @selector(showSettings:)) return !self.busy || self.settingsAlert != nil;
+  return YES;
+}
+
 - (void)pollLoop {
-  bool was_reachable = true;
+  // false at first: no "service stopped" notice when it was not running at launch.
+  bool was_reachable = false;
   std::string was_clock;
+  uint64_t lost_since = 0;
+  bool lost_told = false;
+  int failures = 0;
   while (!g_quitting) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
-    if (r.status != 200 || !vc::parse_status(r.body, &s)) s = vc::Status();
-    {
-      std::lock_guard<std::mutex> l(g_mutex);
-      g_latest = s;
+    const bool ok = r.status == 200 && vc::parse_status(r.body, &s);
+    failures = ok ? 0 : failures + 1;
+    // A missed poll or two keeps the last good status on screen.
+    const bool unreachable = !ok && (!was_reachable || failures >= kFailuresUntilUnreachable);
+    if (ok || unreachable) {
+      if (!ok) s = vc::Status();
+      {
+        std::lock_guard<std::mutex> l(g_mutex);
+        g_latest = s;
+      }
+      int event = 0;  // 1 = service lost, 2 = Dante clock lost
+      if (was_reachable && !s.reachable) event = 1;
+      // Not when Virgil was stopped on purpose (or is restarting).
+      if (s.reachable && s.state == "running" && was_clock == "ptp-locked" && s.clock != "ptp-locked" &&
+          !lost_since)
+        lost_since = now_ms();
+      if (s.state != "running") lost_since = 0;
+      if (s.clock == "ptp-locked") lost_since = 0, lost_told = false;
+      if (lost_since && !lost_told && now_ms() - lost_since > 5000) {
+        lost_told = true;
+        event = 2;
+      }
+      was_reachable = s.reachable;
+      was_clock = s.clock;
+      dispatch_async(dispatch_get_main_queue(), ^{
+        [self applyStatus:event];
+      });
     }
-    const bool lost_service = was_reachable && !s.reachable;
-    was_reachable = s.reachable;
-    was_clock = s.clock;
-    dispatch_async(dispatch_get_main_queue(), ^{
-      [self applyStatus:lost_service];
-    });
     std::this_thread::sleep_for(std::chrono::milliseconds(g_visible ? 80 : 1000));
   }
 }
 
-- (void)applyStatus:(bool)lostService {
+- (void)applyStatus:(int)event {
   vc::Status s;
   {
     std::lock_guard<std::mutex> l(g_mutex);
@@ -389,8 +509,21 @@ void set_autostart(bool on) {
   }
   self.item.button.toolTip = ns(vc::tray_tooltip(s));
   if (g_visible) self.view.needsDisplay = YES;
-  (void)lostService;
+  if (event == 1) notify(@"Virgil service stopped", @"Audio to and from the Dante network has stopped.");
+  if (event == 2)
+    notify(@"Dante clock lost", @"Virgil is running on its own clock; check the network connection.");
 }
+
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+// Show the banners even while the window is in front; clicking one opens it.
+- (BOOL)userNotificationCenter:(NSUserNotificationCenter*)center shouldPresentNotification:(NSUserNotification*)n {
+  return YES;
+}
+- (void)userNotificationCenter:(NSUserNotificationCenter*)center didActivateNotification:(NSUserNotification*)n {
+  [self showWindow:nil];
+}
+#pragma clang diagnostic pop
 
 // While the window is open the app is a regular one (Dock icon, menu bar,
 // Cmd-Tab, Cmd-Q); closed, it lives on as the menu bar icon only.
@@ -422,7 +555,23 @@ void set_autostart(bool on) {
   return YES;
 }
 
+// POSTs to the control API off the main thread; `failure` is shown if the
+// service does not answer. Further requests wait until this one is done.
+- (void)post:(const char*)path failure:(NSString*)failure {
+  if (self.busy) return;
+  self.busy = YES;
+  const std::string p = path;
+  dispatch_async(background(), ^{
+    const bool ok = vc::http(g_port, "POST", p).status == 200;
+    on_main(^{
+      self.busy = NO;
+      if (!ok) alert(failure);
+    });
+  });
+}
+
 - (void)stopVirgil:(id)sender {
+  if (self.busy) return;
   NSAlert* a = [[NSAlert alloc] init];
   a.messageText = @"Stop Virgil?";
   a.informativeText = @"Audio to and from the Dante network stops, Virgil leaves the network and apps cannot use "
@@ -431,10 +580,10 @@ void set_autostart(bool on) {
   [a addButtonWithTitle:@"Cancel"];
   [NSApp activateIgnoringOtherApps:YES];
   if ([a runModal] != NSAlertFirstButtonReturn) return;
-  if (vc::http(g_port, "POST", "/api/stop").status != 200) alert(@"The Virgil service is not running.");
+  [self post:"/api/stop" failure:@"The Virgil service is not running."];
 }
 - (void)startVirgil:(id)sender {
-  if (vc::http(g_port, "POST", "/api/start").status != 200) alert(@"The Virgil service is not running.");
+  [self post:"/api/start" failure:@"The Virgil service is not running."];
 }
 - (void)toggleRunning:(id)sender {
   if (g_view.status().state == "stopped") [self startVirgil:sender];
@@ -442,8 +591,7 @@ void set_autostart(bool on) {
 }
 
 - (void)restartEngine:(id)sender {
-  if (vc::http(g_port, "POST", "/api/restart").status != 200)
-    alert(@"The Virgil service is not running, so the audio engine cannot be restarted.");
+  [self post:"/api/restart" failure:@"The Virgil service is not running, so the audio engine cannot be restarted."];
 }
 
 - (void)startService:(id)sender {
@@ -524,13 +672,65 @@ void set_autostart(bool on) {
 // ---- settings panel ------------------------------------------------------------------------
 
 - (void)showSettings:(id)sender {
-  const auto c = vc::http(g_port, "GET", "/api/config");
-  if (c.status != 200) {
-    alert(@"The Virgil service is not running, so its settings cannot be changed now.");
+  // Already open: bring it forward (while it saves it is hidden; nothing to do).
+  if (self.settingsAlert) {
+    if (self.settingsAlert.window.visible) {
+      [NSApp activateIgnoringOtherApps:YES];
+      [self.settingsAlert.window makeKeyAndOrderFront:nil];
+    }
     return;
   }
-  const auto ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
-  vc::SettingsForm f = vc::load_settings(c.body, ifs);
+  if (self.settingsLoading || self.busy) return;
+  self.settingsLoading = YES;
+  dispatch_async(background(), ^{
+    const vc::HttpResult c = vc::http(g_port, "GET", "/api/config");
+    std::vector<vc::Interface> ifs;
+    if (c.status == 200) ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
+    on_main(^{
+      self.settingsLoading = NO;
+      if (c.status != 200) {
+        alert(@"The Virgil service is not running, so its settings cannot be changed now.");
+        return;
+      }
+      [self openSettings:c.body interfaces:ifs];
+    });
+  });
+}
+
+// Runs the settings dialog again after a failed save (with the error shown),
+// until it is applied or cancelled. The save itself runs off the main thread.
+- (void)runSettings {
+  NSAlert* a = self.settingsAlert;
+  [NSApp activateIgnoringOtherApps:YES];
+  const NSModalResponse response = [a runModal];
+  if (response != NSAlertFirstButtonReturn) {
+    self.settingsAlert = nil;
+    self.settingsError = nil;
+    self.settingsCollect = nil;
+    if (response == NSAlertThirdButtonReturn) [self openPage:"#channels"];
+    return;
+  }
+  const std::string conf = self.settingsCollect();
+  self.busy = YES;
+  dispatch_async(background(), ^{
+    std::string e;
+    const bool ok = vc::save_settings(g_port, conf, &e);
+    on_main(^{
+      self.busy = NO;
+      if (ok) {
+        self.settingsAlert = nil;
+        self.settingsError = nil;
+        self.settingsCollect = nil;
+        return;
+      }
+      self.settingsError.stringValue = ns(e);
+      [self runSettings];
+    });
+  });
+}
+
+- (void)openSettings:(const std::string&)conf interfaces:(const std::vector<vc::Interface>&)ifs {
+  const vc::SettingsForm f = vc::load_settings(conf, ifs);
 
   auto label = [](NSString* s) {
     NSTextField* t = [NSTextField labelWithString:s];
@@ -597,24 +797,25 @@ void set_autostart(bool on) {
   [grid.topAnchor constraintEqualToAnchor:box.topAnchor].active = YES;
   a.accessoryView = box;
   if (@available(macOS 10.14, *)) a.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
-  [NSApp activateIgnoringOtherApps:YES];
 
-  NSModalResponse response;
-  while ((response = [a runModal]) == NSAlertFirstButtonReturn) {
-    f.name = name.stringValue.UTF8String ?: "";
-    f.iface_index = int(iface.indexOfSelectedItem);
-    f.rate_index = int(rate.indexOfSelectedItem);
-    f.tx_channels = unsigned(std::max(1, txch.intValue));
-    f.rx_channels = unsigned(std::max(1, rxch.intValue));
-    f.rx_latency_ms = rxl.stringValue.UTF8String ?: "4";
-    f.tx_latency_ms = txl.stringValue.UTF8String ?: "4";
-    f.local_clock = clock.indexOfSelectedItem == 1;
-    f.master_capable = master.state == NSControlStateValueOn;
-    std::string e;
-    if (vc::save_settings(g_port, vc::apply_settings(c.body, f), &e)) break;
-    err.stringValue = ns(e);
-  }
-  if (response == NSAlertThirdButtonReturn) [self openPage:"#channels"];
+  const std::string base = conf;  // a copy: blocks would capture the reference itself
+  self.settingsAlert = a;
+  self.settingsError = err;
+  self.settingsCollect = ^std::string(void) {
+    vc::SettingsForm g = f;
+    g.name = name.stringValue.UTF8String ?: "";
+    g.iface_index = int(iface.indexOfSelectedItem);
+    g.rate_index = int(rate.indexOfSelectedItem);
+    // 0 is allowed (receive or transmit only); the daemon insists on one direction.
+    g.tx_channels = unsigned(std::max(0, txch.intValue));
+    g.rx_channels = unsigned(std::max(0, rxch.intValue));
+    g.rx_latency_ms = rxl.stringValue.UTF8String ?: "4";
+    g.tx_latency_ms = txl.stringValue.UTF8String ?: "4";
+    g.local_clock = clock.indexOfSelectedItem == 1;
+    g.master_capable = master.state == NSControlStateValueOn;
+    return vc::apply_settings(base, g);
+  };
+  [self runSettings];
 }
 
 @end
