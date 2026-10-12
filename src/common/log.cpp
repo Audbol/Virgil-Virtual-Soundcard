@@ -42,7 +42,9 @@ void rotate_log_locked() {
   std::rename(g_log_path.c_str(), old.c_str());
   if (!std::freopen(g_log_path.c_str(), "a", stderr)) {
     // Could not reopen: keep stderr usable and stop rotating.
-    std::freopen(kNullDevice, "w", stderr);
+    if (!std::freopen(kNullDevice, "w", stderr)) {
+      // nothing more to do: logging is lost either way
+    }
     g_log_path.clear();
     return;
   }
