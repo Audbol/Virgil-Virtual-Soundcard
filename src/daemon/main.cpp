@@ -105,8 +105,9 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
 
   virgil::ControlServer control(&ctx);
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);
+  bool panel_up = false;
   if (control_port) {
-    if (control.start(control_port))
+    if ((panel_up = control.start(control_port)))
       VIRGIL_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
     else
       VIRGIL_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
@@ -182,7 +183,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
         rc = 1;
         // Without the panel nobody can fix it from here: exit (the service
         // manager restarts us). With it, stay up and show the error.
-        if (!control_port) break;
+        if (!panel_up) break;
         set_status("error", err.empty() ? "engine failed to start" : err);
       }
     }
@@ -383,6 +384,7 @@ int main(int argc, char** argv) {
       return 2;
     }
     std::setvbuf(stderr, nullptr, _IOLBF, 1024);
+    virgil::set_log_file(log_path);
   }
 
   if (config_path.empty() && file_exists(virgil::default_config_path()))

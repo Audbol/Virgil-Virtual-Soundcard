@@ -486,6 +486,9 @@ class VirgilAsio : public IASIO {
         }
         if (!alive()) return;
       }
+      // Step count before the anchor (the daemon counts a step once the new
+      // anchor is out), so a new count always comes with the new anchor.
+      const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_acquire);
       virgil::ClockAnchor a;
       if (!client_.anchor(&a)) {
         // The daemon is mid-update (its tick thread was preempted while
@@ -496,7 +499,6 @@ class VirgilAsio : public IASIO {
       }
       const int64_t now_ns = virgil::mono_ns();
       const double now_frame = a.frame_at(now_ns);
-      const uint64_t cur_steps = client_.header()->clock_steps.load(std::memory_order_relaxed);
       // Realign when the timeline moved (PTP relock, engine restarted with a
       // new clock) or when we are far off it for any other reason: a
       // callback that is due years from now, or one so late that the rings

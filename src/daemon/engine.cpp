@@ -231,10 +231,17 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
       if (reason.empty() || reason.find("in use") != std::string::npos ||
           reason.find("AddrInUse") != std::string::npos)
         VIRGIL_LOG_ERROR("Dante device failed to start%s%s (is another Virgil or Inferno instance "
-                         "running? Dante ports 4400/4455/8700/8800 must be free)",
+                         "running? Dante ports 4440/4455/8700/8800 must be free)",
                          reason.empty() ? "" : ": ", reason.c_str());
       else
         VIRGIL_LOG_ERROR("Dante device failed to start: %s", reason.c_str());
+      // Nothing may call back into this engine (a task of the failed start
+      // can outlive it): clear the rename hook as stop() would.
+      {
+        std::lock_guard<std::mutex> l(g_engine_mutex);
+        if (g_engine == this) g_engine = nullptr;
+      }
+      vg_dante_set_rename_callback(nullptr);
       clock_.reset();
       return false;
     }
@@ -349,8 +356,10 @@ void Engine::tick_loop() {
   const int64_t overdue_ns = std::max<int64_t>(period_ns, int64_t(cfg_.tx_lead_frames()) * 1000000000LL / rate);
 
   // A new engine (reload) may run on a different timeline than the one
-  // connected drivers were following: tell them to realign.
-  hdr_->clock_steps.fetch_add(1, std::memory_order_relaxed);
+  // connected drivers were following: tell them to realign. Counted once the
+  // new timeline's anchor is published, so a driver that sees the new count
+  // also sees the new anchor.
+  bool step_pending = true;
 
   ClockModel m = clock_->model();
   uint64_t next = (ptp_ns_to_frames(m.ptp_at(mono_ns()), rate) / P + 1) * P;
@@ -362,7 +371,7 @@ void Engine::tick_loop() {
     if (deadline - now > resync_ns || now - deadline > resync_ns) {
       // Clock stepped (PTP lock, master change) or we were descheduled for a
       // long time: realign instead of bursting or stalling.
-      hdr_->clock_steps.fetch_add(1, std::memory_order_relaxed);
+      step_pending = true;
       resyncs_.fetch_add(1, std::memory_order_relaxed);
       next = (ptp_ns_to_frames(m.ptp_at(now), rate) / P + 1) * P;
       clear_rings();
@@ -383,6 +392,10 @@ void Engine::tick_loop() {
     a.frame = next;
     a.frames_per_ns = double(rate) * 1e-9 * m.ratio;
     publish_anchor(hdr_, a);
+    if (step_pending) {
+      hdr_->clock_steps.fetch_add(1, std::memory_order_release);
+      step_pending = false;
+    }
     hdr_->now_frames.store(next, std::memory_order_release);
     hdr_->heartbeat_ns.store(mono_ns(), std::memory_order_release);
     hdr_->state.store(clock_->state(), std::memory_order_relaxed);
@@ -423,6 +436,13 @@ void Engine::tick_loop() {
           }
           std::memset(src, 0, sizeof(float) * txch);  // consumed
         }
+        // A driver that was preempted past a tick may still write frames
+        // that tick already mixed; they would play one ring later. Silence
+        // the slots a quarter ring behind (well past any late write, well
+        // before the next lap and beyond how far ahead drivers write).
+        const uint64_t z = start + ring - ring / 4;
+        for (uint32_t f = 0; f < P; ++f)
+          std::memset(cring + size_t((z + f) & mask) * txch, 0, sizeof(float) * txch);
       }
       float peaks[kMaxChannels] = {};
       for (uint32_t f = 0; f < P; ++f) {
@@ -498,9 +518,11 @@ void Engine::reclaim_clients(int64_t now) {
     const uint32_t pid = s.pid.load(std::memory_order_acquire);
     if (pid == 0) continue;
     if (!process_alive(pid)) {
-      VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, slot_name(s).c_str(), pid);
-      s.active.store(0, std::memory_order_release);
-      s.pid.store(0, std::memory_order_release);
+      // Only if the slot still belongs to that process: it may have released
+      // it and another app taken it meanwhile (acquiring resets `active`).
+      uint32_t expected = pid;
+      if (s.pid.compare_exchange_strong(expected, 0, std::memory_order_acq_rel))
+        VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, slot_name(s).c_str(), pid);
       client_stalled_[i] = false;
       continue;
     }

@@ -831,6 +831,9 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
     lose_daemon(now_ns);  // the watcher reconnects
     live = false;
   }
+  // Read before the anchor: the daemon counts a clock step only once the new
+  // timeline's anchor is published, so that anchor is at least this new.
+  const uint64_t steps = live ? g.client.header()->clock_steps.load(std::memory_order_acquire) : 0;
   if (live) {
     if (g.client.anchor(&a)) {
       g.last_anchor = a;
@@ -843,7 +846,6 @@ OSStatus GetZeroTimeStamp(AudioServerPlugInDriverRef inDriver, AudioObjectID dev
   }
   if (live) {
     // Clock steps (PTP relock) move the media timeline: start a new one.
-    const uint64_t steps = g.client.header()->clock_steps.load(std::memory_order_relaxed);
     if (steps != g.last_steps) {
       g.last_steps = steps;
       double f = a.frame_at(now_ns);

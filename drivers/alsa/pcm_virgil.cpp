@@ -147,7 +147,7 @@ bool update_hw(VirgilPcm* p) {
   if (!p->client.daemon_alive() || !media_now(p, &now)) return false;
   // The timeline moved (PTP lock, master change, engine restart): positions
   // from before are meaningless, so report an xrun and let the app restart.
-  if (p->client.header()->clock_steps.load(std::memory_order_relaxed) != p->clock_steps) {
+  if (p->client.header()->clock_steps.load(std::memory_order_acquire) != p->clock_steps) {
     p->xrun = true;
     return false;
   }
@@ -182,12 +182,16 @@ int virgil_start(snd_pcm_ioplug_t* io) {
   if (!p->client.is_open() || !p->client.daemon_alive() ||
       (io->stream == SND_PCM_STREAM_PLAYBACK && !p->client.has_tx_slot()))
     return start_xrun(io);
+  // The step count before the anchor: the daemon counts a step only once
+  // the new timeline's anchor is out, so the anchor read next is at least
+  // as new as this count (a later step is caught by update_hw).
+  const uint64_t steps = p->client.header()->clock_steps.load(std::memory_order_acquire);
   if (!media_now(p, &now)) return start_xrun(io);
   const uint32_t ch = device_channels(p);
   if (io->stream == SND_PCM_STREAM_PLAYBACK &&
       (ch != p->prefill_ch || p->prefill.size() != size_t(io->buffer_size) * ch))
     return start_xrun(io);
-  p->clock_steps = p->client.header()->clock_steps.load(std::memory_order_relaxed);
+  p->clock_steps = steps;
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
     p->client.clear_pending_tx();  // nothing from before the last stop may replay
     p->lead = p->client.tx_lead_frames() + p->client.period_frames();

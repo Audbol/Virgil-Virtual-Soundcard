@@ -435,6 +435,7 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
   const bool enabled = check.enabled;
   {
     std::lock_guard<std::mutex> l(ctx_->mutex);
+    ctx_->run_override = -1;  // the saved file says whether Virgil runs now
     if (enabled) ctx_->status = "restarting";
     else if (ctx_->status != "stopped") ctx_->status = "stopping";
   }

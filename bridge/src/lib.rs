@@ -452,9 +452,20 @@ pub unsafe extern "C" fn vg_dante_stop(handle: *mut std::ffi::c_void) {
         let _ = s.send(());
     }
     if let Some(t) = h.thread.take() {
-        let _ = t.join();
+        // A stack whose start hung (timed out) may never get to the stop
+        // signal: wait a while, then leave it rather than hang the caller.
+        let give_up = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !t.is_finished() && std::time::Instant::now() < give_up {
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+        if t.is_finished() {
+            let _ = t.join();
+        } else {
+            log_line(0, "dante: did not stop within 10 s; leaving it behind");
+        }
     }
-    // Inferno may still hold views until its threads are gone; they are.
+    // Inferno may still hold views until its threads are gone; past this
+    // point none of them touches the rings.
     *h.valid.write().unwrap() = false;
 }
 
