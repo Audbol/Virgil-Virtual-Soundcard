@@ -20,6 +20,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
@@ -41,6 +43,7 @@ static const char kDriverName[] = "Virgil";
 static HINSTANCE g_module = nullptr;
 static std::atomic<long> g_objects{0};
 static std::atomic<long> g_locks{0};
+static std::atomic<long> g_threads{0};  // buffer threads still running (maybe detached)
 
 namespace {
 
@@ -49,12 +52,50 @@ void to_asio64(int64_t v, unsigned long* hi, unsigned long* lo) {
   *lo = static_cast<unsigned long>(uint64_t(v) & 0xffffffffu);
 }
 
+// Lifecycle and threading model
+// -----------------------------
+// Hosts call stop()/disposeBuffers()/init()/Release() from any thread, and
+// some do it synchronously from inside our callbacks (bufferSwitch, or the
+// kAsioResetRequest/kAsioResyncRequest asioMessage), i.e. on the buffer thread
+// itself. So:
+//  * Each start() creates a Run: a generation token (`go`) plus a reference to
+//    the Session (buffers + a copy of the host callbacks). The buffer thread
+//    only uses its own Run, so disposeBuffers() never frees memory the thread
+//    still reads: the Session lives until the last Run using it is gone.
+//  * stop() clears the Run's `go` and retires its thread. A thread is joined
+//    by whichever later call runs on another thread (stop, start, init,
+//    disposeBuffers, the destructor); it never joins itself.
+//  * After every host callback returns, the buffer thread re-checks `go`
+//    before it touches the driver again: when the callback stopped us (or
+//    even released the last reference and deleted the driver), it leaves
+//    without touching `this`.
+//  * A new Run waits for every retired thread to have finished before its
+//    first callback, so the host never sees two buffer threads at once.
+//  * The lifecycle lock is never held while joining or while calling the
+//    host, so callbacks may re-enter the driver freely.
 class VirgilAsio : public IASIO {
  public:
   VirgilAsio() { ++g_objects; }
   virtual ~VirgilAsio() {
-    stop();
-    disposeBuffers();
+    {
+      Lock l(mu_);
+      stop_locked();
+      session_.reset();
+    }
+    // Released from inside one of our own callbacks: that thread is still
+    // running (and leaves without touching us, its Run is stopped), so it
+    // cannot be joined here; detach it. Every other thread is joined.
+    std::vector<Worker> all;
+    {
+      Lock l(mu_);
+      all.swap(retired_);
+    }
+    for (auto& w : all) {
+      if (!w.th.joinable()) continue;
+      if (w.th.get_id() == std::this_thread::get_id()) w.th.detach();
+      else w.th.join();
+    }
+    if (client_.is_open()) client_.set_tx_active(false);
     --g_objects;
   }
 
@@ -78,6 +119,11 @@ class VirgilAsio : public IASIO {
 
   // IASIO
   ASIOBool init(void*) override {
+    // A host may init() again (e.g. after a reset request) without disposing
+    // first: tear the old stream down before the client is reopened, the
+    // buffer thread reads its shared memory.
+    disposeBuffers();
+    Lock l(mu_);
     if (!client_.open()) {
       set_error("Cannot open the Virgil soundcard: is the Virgil service running?");
       return ASIOFalse;
@@ -105,32 +151,62 @@ class VirgilAsio : public IASIO {
   }
   void getDriverName(char* name) override { std::strcpy(name, "Virgil ASIO"); }
   long getDriverVersion() override { return 1; }
-  void getErrorMessage(char* s) override { std::strcpy(s, error_); }
+  void getErrorMessage(char* s) override {
+    Lock l(mu_);
+    std::strcpy(s, error_);
+  }
 
   ASIOError start() override {
-    if (!callbacks_ || buffer_frames_ == 0) return ASE_NotPresent;
-    if (running_) return ASE_OK;
+    // Join threads stopped earlier (from other threads than this one) first.
+    reap();
+    Lock l(mu_);
+    if (!session_ || !client_.is_open()) return ASE_NotPresent;
+    if (run_) return ASE_OK;  // already running: idempotent
     if (!client_.daemon_alive()) return ASE_HWMalfunction;
-    running_ = true;
+    auto r = std::make_shared<Run>();
+    r->session = session_;
+    // Earlier generations still finishing (stopped from inside their own
+    // callback, or being joined by another thread right now): the new thread
+    // waits for them before it calls the host.
+    runs_.erase(std::remove_if(runs_.begin(), runs_.end(),
+                               [](const std::shared_ptr<Run>& p) {
+                                 return p->exited.load(std::memory_order_acquire);
+                               }),
+                runs_.end());
+    r->previous = runs_;
     client_.clear_pending_tx();  // nothing from before the last stop may replay
     client_.set_tx_active(true);
-    thread_ = std::thread([this] { run(); });
+    position_ = 0;
+    try {
+      ++g_threads;
+      thread_ = std::thread([this, r] {
+        run(r);
+        // Nothing of the driver may be touched past this point: it may be gone.
+        r->exited.store(true, std::memory_order_release);
+        --g_threads;
+      });
+    } catch (...) {
+      --g_threads;
+      client_.set_tx_active(false);
+      return ASE_HWMalfunction;
+    }
+    runs_.push_back(r);
+    run_ = std::move(r);
+    running_ = true;
     return ASE_OK;
   }
 
   ASIOError stop() override {
-    running_ = false;
-    if (thread_.joinable()) {
-      // A host may handle our reset/resync message synchronously and call
-      // stop() from the buffer thread itself; it ends on its own then.
-      if (std::this_thread::get_id() == thread_.get_id()) thread_.detach();
-      else thread_.join();
+    {
+      Lock l(mu_);
+      stop_locked();
     }
-    if (client_.is_open()) client_.set_tx_active(false);
+    reap();
     return ASE_OK;
   }
 
   ASIOError getChannels(long* in, long* out) override {
+    Lock l(mu_);
     if (!client_.is_open()) return ASE_NotPresent;
     *in = in_ch_;
     *out = out_ch_;
@@ -138,8 +214,9 @@ class VirgilAsio : public IASIO {
   }
 
   ASIOError getLatencies(long* in, long* out) override {
+    Lock l(mu_);
     if (!client_.is_open()) return ASE_NotPresent;
-    const long b = long(buffer_frames_ ? buffer_frames_ : kPreferred);
+    const long b = long(session_ ? session_->frames : kPreferred);
     *in = b + long(client_.rx_latency_frames());
     *out = b + long(client_.tx_lead_frames() + client_.period_frames());
     return ASE_OK;
@@ -154,10 +231,12 @@ class VirgilAsio : public IASIO {
   }
 
   ASIOError canSampleRate(ASIOSampleRate rate) override {
+    Lock l(mu_);
     if (!client_.is_open()) return ASE_NotPresent;
     return std::fabs(rate - double(client_.sample_rate())) < 0.5 ? ASE_OK : ASE_NoClock;
   }
   ASIOError getSampleRate(ASIOSampleRate* rate) override {
+    Lock l(mu_);
     if (!client_.is_open()) return ASE_NotPresent;
     *rate = client_.sample_rate();
     return ASE_OK;
@@ -169,7 +248,7 @@ class VirgilAsio : public IASIO {
   }
 
   ASIOError getClockSources(ASIOClockSource* clocks, long* num) override {
-    if (*num < 1) return ASE_InvalidParameter;
+    if (!clocks || !num || *num < 1) return ASE_InvalidParameter;
     std::memset(clocks, 0, sizeof *clocks);
     clocks->index = 0;
     clocks->associatedChannel = -1;
@@ -181,6 +260,7 @@ class VirgilAsio : public IASIO {
   }
   ASIOError setClockSource(long ref) override { return ref == 0 ? ASE_OK : ASE_InvalidParameter; }
 
+  // Called from the host's callback on the buffer thread: lock free.
   ASIOError getSamplePosition(ASIOSamples* pos, ASIOTimeStamp* ts) override {
     if (!running_) return ASE_SPNotAdvancing;
     to_asio64(position_.load(), &pos->hi, &pos->lo);
@@ -189,13 +269,15 @@ class VirgilAsio : public IASIO {
   }
 
   ASIOError getChannelInfo(ASIOChannelInfo* info) override {
+    Lock l(mu_);
     const bool in = info->isInput != ASIOFalse;
     if (info->channel < 0 || info->channel >= (in ? in_ch_ : out_ch_)) return ASE_InvalidParameter;
     info->type = ASIOSTInt32LSB;
     info->channelGroup = 0;
     info->isActive = ASIOFalse;
-    for (const auto& c : (in ? inputs_ : outputs_))
-      if (c.channel == info->channel) info->isActive = ASIOTrue;
+    if (session_)
+      for (const auto& c : (in ? session_->inputs : session_->outputs))
+        if (c.channel == info->channel) info->isActive = ASIOTrue;
     // The channel's name in Dante Controller when it has one ("3 Kick In").
     const std::string dante = client_.channel_name(!in, uint32_t(info->channel));
     const std::string dflt = std::string(in ? "RX " : "TX ") + std::to_string(info->channel + 1);
@@ -207,43 +289,60 @@ class VirgilAsio : public IASIO {
   }
 
   ASIOError createBuffers(ASIOBufferInfo* infos, long n, long size, ASIOCallbacks* cb) override {
-    if (!client_.is_open()) return ASE_NotPresent;
-    if (size < kMin || size > kMax || !cb) return ASE_InvalidMode;
-    if (size > long(client_.ring_frames() / 4)) return ASE_InvalidMode;
+    // Replaces any previous buffers (and stops their stream).
     disposeBuffers();
-    for (long i = 0; i < n; ++i) {
-      ASIOBufferInfo& bi = infos[i];
-      const bool in = bi.isInput != ASIOFalse;
-      if (bi.channelNum < 0 || bi.channelNum >= (in ? in_ch_ : out_ch_)) {
-        disposeBuffers();
-        return ASE_InvalidParameter;
+    if (n < 0 || (n > 0 && !infos)) return ASE_InvalidParameter;
+    if (size < kMin || size > kMax || !cb) return ASE_InvalidMode;
+    if (!(cb->bufferSwitch || cb->bufferSwitchTimeInfo)) return ASE_InvalidMode;
+    auto s = std::make_shared<Session>();
+    {
+      Lock l(mu_);
+      if (!client_.is_open()) return ASE_NotPresent;
+      if (size > long(client_.ring_frames() / 4)) return ASE_InvalidMode;
+      for (long i = 0; i < n; ++i) {
+        const ASIOBufferInfo& bi = infos[i];
+        const bool in = bi.isInput != ASIOFalse;
+        if (bi.channelNum < 0 || bi.channelNum >= (in ? in_ch_ : out_ch_)) return ASE_InvalidParameter;
       }
-      Channel c;
-      c.channel = bi.channelNum;
-      c.data.assign(size_t(size) * 2, 0);
-      (in ? inputs_ : outputs_).push_back(std::move(c));
+    }
+    try {
+      for (long i = 0; i < n; ++i) {
+        Channel c;
+        c.channel = infos[i].channelNum;
+        c.data.assign(size_t(size) * 2, 0);
+        (infos[i].isInput != ASIOFalse ? s->inputs : s->outputs).push_back(std::move(c));
+      }
+    } catch (...) {
+      return ASE_NoMemory;
     }
     // Hand out the double-buffer halves once all channels are allocated.
     size_t ii = 0, oo = 0;
     for (long i = 0; i < n; ++i) {
-      Channel& c = infos[i].isInput != ASIOFalse ? inputs_[ii++] : outputs_[oo++];
+      Channel& c = infos[i].isInput != ASIOFalse ? s->inputs[ii++] : s->outputs[oo++];
       infos[i].buffers[0] = c.data.data();
       infos[i].buffers[1] = c.data.data() + size;
     }
-    buffer_frames_ = uint32_t(size);
-    callbacks_ = cb;
-    time_info_ = cb->asioMessage &&
-                 cb->asioMessage(kAsioSelectorSupported, kAsioSupportsTimeInfo, nullptr, nullptr) == 1 &&
-                 cb->asioMessage(kAsioSupportsTimeInfo, 0, nullptr, nullptr) == 1;
+    s->frames = uint32_t(size);
+    s->cb = *cb;  // our own copy: the thread never reads host memory for it
+    // Asked without the lock held: the host may call back into the driver.
+    s->time_info = cb->bufferSwitchTimeInfo && cb->asioMessage &&
+                   cb->asioMessage(kAsioSelectorSupported, kAsioSupportsTimeInfo, nullptr, nullptr) == 1 &&
+                   cb->asioMessage(kAsioSupportsTimeInfo, 0, nullptr, nullptr) == 1;
+    if (!s->time_info && !s->cb.bufferSwitch) return ASE_InvalidMode;
+    Lock l(mu_);
+    session_ = std::move(s);
     return ASE_OK;
   }
 
   ASIOError disposeBuffers() override {
-    stop();
-    inputs_.clear();
-    outputs_.clear();
-    callbacks_ = nullptr;
-    buffer_frames_ = 0;
+    {
+      Lock l(mu_);
+      stop_locked();
+      // A thread still running (stopped from inside its own callback) keeps
+      // the session alive through its Run; the memory goes when it exits.
+      session_.reset();
+    }
+    reap();
     return ASE_OK;
   }
 
@@ -267,9 +366,30 @@ class VirgilAsio : public IASIO {
   ASIOError outputReady() override { return ASE_NotPresent; }
 
  private:
+  using Lock = std::lock_guard<std::recursive_mutex>;
+
   struct Channel {
     long channel = 0;
-    std::vector<int32_t> data;  // two halves of buffer_frames_ each
+    std::vector<int32_t> data;  // two halves of `frames` each
+  };
+  // What createBuffers() set up. Its layout is fixed once published; only the
+  // sample data changes (written by the buffer thread and the host).
+  struct Session {
+    std::vector<Channel> inputs, outputs;
+    uint32_t frames = 0;
+    ASIOCallbacks cb{};
+    bool time_info = false;
+  };
+  // One start()..stop() generation of the buffer thread.
+  struct Run {
+    std::shared_ptr<Session> session;
+    std::atomic<bool> go{true};
+    std::atomic<bool> exited{false};
+    std::vector<std::shared_ptr<Run>> previous;  // must exit before our first callback
+  };
+  struct Worker {
+    std::thread th;
+    std::shared_ptr<Run> run;
   };
 
   static constexpr long kMin = 32;
@@ -282,13 +402,62 @@ class VirgilAsio : public IASIO {
     error_[sizeof error_ - 1] = 0;
   }
 
-  // Buffer-switch thread: wakes on media-clock buffer boundaries.
-  void run() {
-    const uint32_t B = buffer_frames_;
-    virgil::set_realtime_priority(0, int64_t(B) * 1000000000LL / client_.sample_rate());
+  // Ends the current generation (if any) and retires its thread. Never joins:
+  // that happens in reap(), without the lock. Caller holds mu_.
+  void stop_locked() {
+    if (run_) {
+      run_->go.store(false, std::memory_order_release);
+      retired_.push_back(Worker{std::move(thread_), std::move(run_)});
+      run_.reset();
+    }
+    running_ = false;
+    if (client_.is_open()) client_.set_tx_active(false);
+  }
+
+  // Joins every retired buffer thread except the calling one (a thread
+  // cannot join itself; it is left for a later call from another thread).
+  void reap() {
+    std::vector<Worker> joinable;
+    {
+      Lock l(mu_);
+      for (size_t i = 0; i < retired_.size();) {
+        Worker& w = retired_[i];
+        if (!w.th.joinable()) {
+          retired_.erase(retired_.begin() + long(i));
+        } else if (w.th.get_id() != std::this_thread::get_id()) {
+          joinable.push_back(std::move(w));
+          retired_.erase(retired_.begin() + long(i));
+        } else {
+          ++i;
+        }
+      }
+    }
+    for (auto& w : joinable) w.th.join();
+  }
+
+  // Buffer-switch thread: wakes on media-clock buffer boundaries. It reads the
+  // driver only while r->go holds; the host's callbacks may clear it (or even
+  // delete the driver), so it is re-checked after each one before going on.
+  void run(const std::shared_ptr<Run>& r) {
+    // Let threads stopped from inside their own callback finish first.
+    for (const auto& p : r->previous)
+      while (!p->exited.load(std::memory_order_acquire)) {
+        if (!r->go.load(std::memory_order_acquire)) return;
+        virgil::sleep_until_ns(virgil::mono_ns() + 1000000);
+      }
+    r->previous.clear();
+    if (!r->go.load(std::memory_order_acquire)) return;
+
+    Session& s = *r->session;
+    const ASIOCallbacks& cb = s.cb;
+    const uint32_t B = s.frames;
+    const uint32_t rate = client_.sample_rate();
+    if (B == 0 || rate == 0) return;
+    virgil::set_realtime_priority(0, int64_t(B) * 1000000000LL / rate);
     const uint32_t rx_lat = client_.rx_latency_frames();
     const uint32_t out_off = B + client_.tx_lead_frames();
     const uint32_t rxch = client_.rx_channels(), txch = client_.tx_channels();
+    auto alive = [&r] { return r->go.load(std::memory_order_acquire); };
 
     double now = 0;
     client_.frame_now(&now);
@@ -299,19 +468,23 @@ class VirgilAsio : public IASIO {
     bool reset_requested = false;
     // How far the next callback may sit from "now" before we realign: a
     // couple of buffers ahead, a quarter ring behind.
-    const uint64_t max_ahead = 2 * uint64_t(B) + client_.sample_rate() / 20;
+    const uint64_t max_ahead = 2 * uint64_t(B) + rate / 20;
     const uint64_t max_behind = client_.ring_frames() / 4;
     const int64_t max_sleep_ns = 20000000;
 
-    while (running_) {
+    while (alive()) {
       // virgild gone for >2 s (settings changed the soundcard layout, or it was
       // restarted): ask the host to re-initialise us so init() reconnects.
       // Shorter gaps (settings applied with the same layout) ride through on
-      // the extrapolated clock.
-      if (!reset_requested && !client_.heartbeat_fresh(2000000000LL) && callbacks_->asioMessage &&
-          callbacks_->asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr)) {
-        callbacks_->asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
+      // the extrapolated clock. Hosts often stop/dispose/release us right in
+      // this callback.
+      if (!reset_requested && !client_.heartbeat_fresh(2000000000LL) && cb.asioMessage) {
         reset_requested = true;
+        if (cb.asioMessage(kAsioSelectorSupported, kAsioResetRequest, nullptr, nullptr)) {
+          if (!alive()) return;
+          cb.asioMessage(kAsioResetRequest, 0, nullptr, nullptr);
+        }
+        if (!alive()) return;
       }
       virgil::ClockAnchor a;
       if (!client_.anchor(&a)) {
@@ -333,7 +506,10 @@ class VirgilAsio : public IASIO {
           double(t) + double(max_behind) < now_frame) {
         steps = cur_steps;
         t = (uint64_t(now_frame) / B + 1) * B;
-        if (callbacks_->asioMessage) callbacks_->asioMessage(kAsioResyncRequest, 0, nullptr, nullptr);
+        if (cb.asioMessage) {
+          cb.asioMessage(kAsioResyncRequest, 0, nullptr, nullptr);
+          if (!alive()) return;
+        }
       }
       const int64_t deadline = a.host_ns_at(double(t));
       if (deadline - now_ns > max_sleep_ns) {
@@ -342,12 +518,12 @@ class VirgilAsio : public IASIO {
         continue;
       }
       virgil::sleep_until_ns(deadline, 50000);
-      if (!running_) break;
+      if (!alive()) return;
 
       const long idx = long(k & 1);
       // Capture: the B frames ending rx_lat before now.
       const uint64_t in_start = t - B - rx_lat;
-      for (auto& c : inputs_) {
+      for (auto& c : s.inputs) {
         int32_t* dst = c.data.data() + size_t(idx) * B;
         if (uint32_t(c.channel) >= rxch) continue;
         for (uint32_t f = 0; f < B; ++f)
@@ -356,18 +532,20 @@ class VirgilAsio : public IASIO {
 
       position_ = int64_t(k) * B;
       switch_ns_ = deadline;
-      if (time_info_) {
+      if (s.time_info) {
         std::memset(&time_info, 0, sizeof time_info);
         AsioTimeInfo& ti = time_info.timeInfo;
         ti.flags = kSystemTimeValid | kSamplePositionValid | kSampleRateValid | kSpeedValid;
         ti.speed = 1.0;
-        ti.sampleRate = client_.sample_rate();
+        ti.sampleRate = rate;
         to_asio64(int64_t(k) * B, &ti.samplePosition.hi, &ti.samplePosition.lo);
         to_asio64(deadline, &ti.systemTime.hi, &ti.systemTime.lo);
-        callbacks_->bufferSwitchTimeInfo(&time_info, idx, ASIOTrue);
+        cb.bufferSwitchTimeInfo(&time_info, idx, ASIOTrue);
       } else {
-        callbacks_->bufferSwitch(idx, ASIOTrue);
+        cb.bufferSwitch(idx, ASIOTrue);
       }
+      // The host may have stopped, disposed or released us in there.
+      if (!alive()) return;
 
       // Playback: the host filled half `idx`; it plays one buffer later.
       // Frames whose slot the daemon already consumed (we woke very late)
@@ -379,7 +557,7 @@ class VirgilAsio : public IASIO {
         if (out_start + f < horizon) continue;
         float* dst = client_.tx_frame(out_start + f);
         for (uint32_t c = 0; c < txch; ++c) dst[c] = 0.f;
-        for (const auto& c : outputs_)
+        for (const auto& c : s.outputs)
           if (uint32_t(c.channel) < txch)
             dst[c.channel] = virgil::s32_to_float(c.data[size_t(idx) * B + f]);
       }
@@ -391,15 +569,19 @@ class VirgilAsio : public IASIO {
   }
 
   std::atomic<long> refs_{1};
+  // Guards everything below except the atomics; never held while joining a
+  // thread or calling the host. Recursive so a host re-entering the driver
+  // from a callback made under it cannot deadlock.
+  std::recursive_mutex mu_;
   virgil::Client client_;
   char error_[128] = "";
   long in_ch_ = 0, out_ch_ = 0;
-  std::vector<Channel> inputs_, outputs_;
-  uint32_t buffer_frames_ = 0;
-  ASIOCallbacks* callbacks_ = nullptr;
-  bool time_info_ = false;
+  std::shared_ptr<Session> session_;  // set by createBuffers()
+  std::shared_ptr<Run> run_;          // current generation, null when stopped
+  std::thread thread_;                // runs run_
+  std::vector<Worker> retired_;       // stopped threads not joined yet
+  std::vector<std::shared_ptr<Run>> runs_;  // generations that may not have exited
   std::atomic<bool> running_{false};
-  std::thread thread_;
   std::atomic<int64_t> position_{0};
   std::atomic<int64_t> switch_ns_{0};
 };
@@ -461,7 +643,7 @@ STDAPI DllGetClassObject(REFCLSID clsid, REFIID riid, LPVOID* ppv) {
   return g_factory.QueryInterface(riid, ppv);
 }
 
-STDAPI DllCanUnloadNow() { return (g_objects == 0 && g_locks == 0) ? S_OK : S_FALSE; }
+STDAPI DllCanUnloadNow() { return (g_objects == 0 && g_locks == 0 && g_threads == 0) ? S_OK : S_FALSE; }
 
 STDAPI DllRegisterServer() {
   char path[MAX_PATH];
