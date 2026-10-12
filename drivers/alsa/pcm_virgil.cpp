@@ -15,6 +15,7 @@
 #include <unistd.h>
 
 #include <cerrno>
+#include <climits>
 #include <cmath>
 #include <cstring>
 #include <string>
@@ -35,9 +36,13 @@ struct VirgilPcm {
   uint64_t start_frame = 0;  // media frame of stream position 0
   uint64_t clock_steps = 0;  // daemon's clock_steps when the stream started
   uint64_t hw = 0;           // frames consumed (playback) / produced (capture)
-  uint64_t appl = 0;         // frames written (playback) / read (capture)
+  uint64_t appl = 0;         // frames written (playback) / read (capture),
+                             // unwrapped mirror of io.appl_ptr (see sync_appl)
+  snd_pcm_uframes_t last_appl_ptr = 0;  // io.appl_ptr that `appl` reflects
+  snd_pcm_uframes_t boundary = 0;       // wrap point of io.appl_ptr
   uint32_t lead = 0;         // playback: start offset ahead of the media clock
   std::vector<float> prefill;  // playback data written before start()
+  uint32_t prefill_ch = 0;     // device channel count `prefill` is laid out for
   std::vector<float> scratch;  // one frame, device channel count
 };
 
@@ -70,6 +75,32 @@ bool ensure_client(VirgilPcm* p, int wait_ms = 0) {
 uint32_t device_channels(const VirgilPcm* p) {
   return p->io.stream == SND_PCM_STREAM_PLAYBACK ? p->client.tx_channels()
                                                  : p->client.rx_channels();
+}
+
+// alsa-lib wraps appl_ptr / hw_ptr at pcm->boundary, which is not exported to
+// ioplug plugins; it is derived from buffer_size the same way alsa-lib does.
+snd_pcm_uframes_t compute_boundary(snd_pcm_uframes_t buffer_size) {
+  const snd_pcm_uframes_t lmax = snd_pcm_uframes_t(LONG_MAX);
+  snd_pcm_uframes_t b = buffer_size;
+  if (!b) return 0;
+  while (b * 2 <= lmax - buffer_size) b *= 2;
+  return b;
+}
+
+// Bring `appl` in line with io->appl_ptr. snd_pcm_rewind / snd_pcm_forward
+// move appl_ptr without any plugin callback, so every position computation
+// starts from appl_ptr rather than from what transfer() has seen.
+void sync_appl(VirgilPcm* p) {
+  const snd_pcm_uframes_t cur = p->io.appl_ptr;
+  int64_t d = int64_t(cur) - int64_t(p->last_appl_ptr);
+  if (p->boundary) {
+    const int64_t b = int64_t(p->boundary);
+    if (d < -b / 2) d += b;
+    else if (d > b / 2) d -= b;
+  }
+  // A rewind can never reach before stream position 0.
+  p->appl = d < 0 && uint64_t(-d) > p->appl ? 0 : p->appl + uint64_t(d);
+  p->last_appl_ptr = cur;
 }
 
 // Sample at (area, frame) <-> float.
@@ -110,6 +141,7 @@ bool media_now(VirgilPcm* p, uint64_t* out) {
 
 // Advance hw from the media clock. Returns false on xrun / daemon loss.
 bool update_hw(VirgilPcm* p) {
+  sync_appl(p);
   if (!p->running) return !p->xrun;
   uint64_t now;
   if (!p->client.daemon_alive() || !media_now(p, &now)) return false;
@@ -129,16 +161,32 @@ bool update_hw(VirgilPcm* p) {
   } else {
     const uint64_t ready = now - p->client.rx_latency_frames();
     p->hw = ready > p->start_frame ? ready - p->start_frame : 0;
-    if (p->hw - p->appl > p->io.buffer_size) p->xrun = true;
+    if (p->hw > p->appl && p->hw - p->appl > p->io.buffer_size) p->xrun = true;
   }
   return !p->xrun;
 }
 
+// Fail start() as an xrun: the application re-prepares (which reconnects and
+// re-validates against the daemon) instead of seeing a fatal error.
+int start_xrun(snd_pcm_ioplug_t* io) {
+  snd_pcm_ioplug_set_state(io, SND_PCM_STATE_XRUN);
+  return -EPIPE;
+}
+
 int virgil_start(snd_pcm_ioplug_t* io) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
+  sync_appl(p);
+  // No reconnect here: the prefill and hw params were set up for the client
+  // attached at prepare(). If that daemon is gone, let prepare() switch.
   uint64_t now;
-  if (!ensure_client(p) || !media_now(p, &now)) return -ENODEV;
+  if (!p->client.is_open() || !p->client.daemon_alive() ||
+      (io->stream == SND_PCM_STREAM_PLAYBACK && !p->client.has_tx_slot()))
+    return start_xrun(io);
+  if (!media_now(p, &now)) return start_xrun(io);
   const uint32_t ch = device_channels(p);
+  if (io->stream == SND_PCM_STREAM_PLAYBACK &&
+      (ch != p->prefill_ch || p->prefill.size() != size_t(io->buffer_size) * ch))
+    return start_xrun(io);
   p->clock_steps = p->client.header()->clock_steps.load(std::memory_order_relaxed);
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
     p->client.clear_pending_tx();  // nothing from before the last stop may replay
@@ -177,8 +225,13 @@ snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_ar
                                snd_pcm_uframes_t offset, snd_pcm_uframes_t size) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!p->client.is_open()) return -ENODEV;
+  // io->appl_ptr is the stream position of the first frame of this chunk
+  // (alsa-lib advances it after transfer returns), so rewinds and forwards
+  // since the last call are picked up here.
+  sync_appl(p);
   const uint32_t ch = device_channels(p);
   const uint32_t n = std::min<uint32_t>(io->channels, ch);
+  if (io->stream == SND_PCM_STREAM_PLAYBACK && !p->running && ch != p->prefill_ch) return -EPIPE;
 
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
     const uint64_t too_late = p->running ? p->client.tx_horizon() : 0;
@@ -211,18 +264,34 @@ snd_pcm_sframes_t virgil_transfer(snd_pcm_ioplug_t* io, const snd_pcm_channel_ar
         store_sample(areas[c], offset + f, io->format, c < n ? src[c] : 0.f);
     }
   }
+  // Account for the forward alsa-lib does once we return.
   p->appl += size;
+  p->last_appl_ptr += size;
+  if (p->boundary && p->last_appl_ptr >= p->boundary) p->last_appl_ptr -= p->boundary;
   return snd_pcm_sframes_t(size);
 }
+
+uint32_t max_buffer_frames(const virgil::Client& c);
 
 int virgil_prepare(snd_pcm_ioplug_t* io) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!ensure_client(p, 3000)) return -ENODEV;
+  // ensure_client may have switched to a restarted virgild. The stream's hw
+  // params were negotiated against the old layout; refuse rather than run
+  // with mismatched geometry.
+  if (p->client.sample_rate() != io->rate || device_channels(p) != io->channels ||
+      io->buffer_size > max_buffer_frames(p->client)) {
+    SNDERR("virgil: daemon layout changed (rate/channels/buffer); reopen the device");
+    return -ENODEV;
+  }
   p->running = false;
   p->xrun = false;
   p->hw = p->appl = 0;
+  p->boundary = compute_boundary(io->buffer_size);
+  p->last_appl_ptr = io->appl_ptr;
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
-    p->prefill.assign(size_t(io->buffer_size) * p->client.tx_channels(), 0.f);
+    p->prefill_ch = p->client.tx_channels();
+    p->prefill.assign(size_t(io->buffer_size) * p->prefill_ch, 0.f);
     p->client.set_tx_active(false);
   }
   // Wake the application once per period.
@@ -279,7 +348,7 @@ int virgil_poll_revents(snd_pcm_ioplug_t* io, pollfd* pfd, unsigned int nfds,
   if (io->stream == SND_PCM_STREAM_PLAYBACK)
     avail = io->buffer_size - std::min<uint64_t>(io->buffer_size, p->appl - std::min(p->appl, p->hw));
   else
-    avail = p->running ? p->hw - p->appl : 0;
+    avail = p->running ? p->hw - std::min(p->appl, p->hw) : 0;
   *revents = avail >= io->period_size ? ready : 0;
   return 0;
 }
@@ -291,7 +360,8 @@ int virgil_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
     *delay = snd_pcm_sframes_t(p->appl - std::min(p->appl, p->hw)) +
              snd_pcm_sframes_t(p->client.period_frames());
   else
-    *delay = snd_pcm_sframes_t(p->hw - p->appl) + snd_pcm_sframes_t(p->client.rx_latency_frames());
+    *delay = snd_pcm_sframes_t(p->hw - std::min(p->appl, p->hw)) +
+             snd_pcm_sframes_t(p->client.rx_latency_frames());
   return 0;
 }
 
