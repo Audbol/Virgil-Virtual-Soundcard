@@ -30,14 +30,32 @@ struct EngineCounters {
   std::string grandmaster;
   uint64_t late_ticks = 0;     // engine woke up late (computer busy)
   uint64_t overdue_ticks = 0;  // so late that audio missed its slot (a dropout)
-  uint64_t resyncs = 0;        // media clock realigned while running
+  // Runs of consecutive overdue ticks (one stall and the catch-up after it
+  // are one episode), long stalls included.
+  uint64_t overdue_episodes = 0;
+  // Stalls longer than the resync limit on an unchanged clock: the engine
+  // skipped ahead (audio paused) without realigning the drivers.
+  uint64_t stalls = 0;
+  int64_t max_late_ns = 0;     // latest tick wake-up since the last sample
+  uint64_t resyncs = 0;        // media clock realigned while running (clock steps)
+  // Frames of received audio that Inferno wrote after the engine had handed
+  // them to the apps for the last time: arrived too late and lost.
+  uint64_t rx_lost_late_samples = 0;
   int64_t max_offset_ns = 0;   // largest |PTP offset| since the last sample
   uint64_t rx_packets = 0, rx_late_packets = 0, rx_gaps = 0, rx_missing_samples = 0;
+  // rx_late_packets: older than the receive latency on arrival (Inferno). The
+  // engine's second copy usually still saves them: rx_lost_late_samples
+  // counts what was actually lost.
   uint64_t rx_max_age_samples = 0;  // since the last sample
   // Dante sending thread woke up after the transmit latency (audio to the
   // network dropped); since the process started.
   uint64_t tx_late_wakeups = 0, tx_dropped_samples = 0, tx_clock_jumps = 0;
   uint64_t tx_max_lag_samples = 0;  // since the last sample
+  // Near misses of the sending thread (not dropouts): worst lag of any
+  // wakeup since the last sample, and wakeups later than 0.5 / 1 / 2 / 4 ms
+  // (cumulative, since the process started).
+  uint64_t tx_max_wakeup_lag_samples = 0;
+  uint64_t tx_lag_over[4] = {};
   struct App {
     uint32_t slot = 0, pid = 0;
     std::string name;
@@ -142,6 +160,10 @@ class Engine {
   // Diagnostics.
   std::atomic<uint64_t> resyncs_{0};
   std::atomic<uint64_t> overdue_ticks_{0};
+  std::atomic<uint64_t> overdue_episodes_{0};
+  std::atomic<uint64_t> stalls_{0};
+  std::atomic<int64_t> max_late_ns_{0};
+  std::atomic<uint64_t> rx_lost_late_{0};
   std::atomic<int64_t> max_offset_ns_{0};
   std::array<std::atomic<uint64_t>, kMaxTxClients> underrun_ticks_{};
   std::array<uint32_t, kMaxTxClients> underrun_pid_{};  // tick thread only

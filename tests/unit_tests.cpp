@@ -1,11 +1,14 @@
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <random>
 
 #include "virgil/client.h"
 #include "virgil/config.h"
+#include "virgil/engine.h"
 #include "virgil/media_clock.h"
 #include "virgil/platform.h"
 #include "virgil/ptp.h"
@@ -458,15 +461,18 @@ TEST(diagnostics_events_and_hints) {
   c.apps.push_back(app);
   for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);  // past the start-up grace
   CHECK(d.recent_dropouts(t) == 0);
-  // Two seconds of late packets merge into one event; the hint asks for more latency.
+  // Two seconds of lost late audio merge into one event; the hint asks for more latency.
   c.rx_late_packets += 10;
+  c.rx_lost_late_samples += 48;
   c.rx_max_age_samples = 48 * 5;  // 5 ms at 48 kHz, latency 4 ms
   d.sample(c, cfg, t += 1000);
   c.rx_late_packets += 3;
+  c.rx_lost_late_samples += 96;
   d.sample(c, cfg, t += 1000);
   CHECK(d.recent_dropouts(t) == 1);
   std::string j = d.json(t);
-  CHECK(j.find("13 packets from the network arrived too late") != std::string::npos);
+  CHECK(j.find("3.0 ms of audio from the network arrived too late and was lost (packets up to 5.0 ms old") !=
+        std::string::npos);
   CHECK(j.find("Raise Receive latency to 10 ms") != std::string::npos);
   // An app that missed its deadline; lost network audio; a lost clock leader.
   c.apps[0].underrun_ticks += 3;
@@ -742,6 +748,230 @@ TEST(control_no_clock_leader_notice) {
     CHECK(alone.seconds_without_master() > 0.0);
     alone.stop();
   }
+}
+
+TEST(diagnostics_near_late_packets_and_lost_late_audio) {
+  Config cfg;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  // Packets older than the receive latency that the second copy still
+  // played: a statistic, not a dropout, and no latency hint.
+  c.rx_late_packets += 7;
+  c.rx_max_age_samples = 48 * 5;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 0);
+  std::string j = d.json(t);
+  CHECK(j.find("\"network_late_packets\":7") != std::string::npos);
+  CHECK(j.find("Raise Receive latency") == std::string::npos);
+  CHECK(d.report(t).find("7 network packets older than the receive latency, still played") != std::string::npos);
+  // Audio that arrived after its last copy was lost: a dropout, with a hint
+  // from the worst age seen.
+  c.rx_max_age_samples = 0;
+  c.rx_lost_late_samples += 24;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 1);
+  j = d.json(t);
+  CHECK(j.find("0.5 ms of audio from the network arrived too late and was lost (receive latency") !=
+        std::string::npos);
+  CHECK(j.find("Raise Receive latency to 10 ms") != std::string::npos);
+  // Sending thread near misses: in the report and JSON, not dropouts.
+  c.tx_max_wakeup_lag_samples = 48 * 3;
+  c.tx_lag_over[0] += 5;
+  c.tx_lag_over[1] += 3;
+  c.tx_lag_over[2] += 1;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 1);
+  CHECK(d.json(t).find("\"over_1ms\":3") != std::string::npos);
+  CHECK(d.report(t).find("worst 3.0 ms; over 0.5 ms 5, over 1 ms 3, over 2 ms 1, over 4 ms 0") !=
+        std::string::npos);
+}
+
+TEST(diagnostics_engine_stall_is_one_episode_and_not_the_apps_fault) {
+  Config cfg;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  EngineCounters::App app;
+  app.pid = 9;
+  app.name = "REAPER";
+  c.apps.push_back(app);
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  // One 45 ms stall: 44 overdue catch-up ticks, one episode; the app missed
+  // those ticks too, in this second and the next.
+  c.overdue_ticks += 44;
+  c.overdue_episodes += 1;
+  c.max_late_ns = 45000000;
+  c.apps[0].underrun_ticks += 40;
+  d.sample(c, cfg, t += 1000);
+  c.max_late_ns = 0;
+  c.apps[0].underrun_ticks += 4;
+  c.apps[0].late_frames += 96;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 1);
+  std::string j = d.json(t);
+  CHECK(j.find("The computer stalled ~45 ms: Virgil's audio engine and apps waited") != std::string::npos);
+  CHECK(j.find("REAPER did not deliver") == std::string::npos);
+  CHECK(j.find("\"engine-late\":1") != std::string::npos);
+#if defined(_WIN32)
+  CHECK(j.find("LatencyMon") != std::string::npos);
+#endif
+  CHECK(d.report(t).find("longest computer stall 45.0 ms") != std::string::npos);
+  // Later, on its own, the app is charged again.
+  c.apps[0].underrun_ticks += 2;
+  d.sample(c, cfg, t += 5000);
+  CHECK(d.json(t).find("REAPER did not deliver its audio in time (2.0 ms") != std::string::npos);
+  // Two more stalls in consecutive seconds merge, the longest kept.
+  c.overdue_episodes += 1;
+  c.overdue_ticks += 3;
+  c.max_late_ns = 3000000;
+  d.sample(c, cfg, t += 5000);
+  c.overdue_episodes += 1;
+  c.overdue_ticks += 70;
+  c.max_late_ns = 70000000;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.json(t).find("The computer stalled 2 times, up to ~70 ms") != std::string::npos);
+}
+
+namespace {
+// A clock for engine tests that can step or hold up the engine's thread (its
+// model() is called by the tick thread every tick).
+struct TestClock : ClockSource {
+  TestClock() {
+    ClockModel m;
+    m.base_local = mono_ns();
+    m.base_ptp = 1000000000000LL;
+    cell.store(m);
+  }
+  ClockModel model() const override {
+    // Only the engine's tick thread calls model() once running.
+    if (const int64_t ns = stall_ns.exchange(0)) sleep_until_ns(mono_ns() + ns);
+    return cell.load();
+  }
+  DaemonState state() const override { return kStateFreeRun; }
+  ClockModelCell cell;
+  mutable std::atomic<int64_t> stall_ns{0};
+};
+
+Config engine_test_config(const char* tag) {
+  Config c;
+  c.device_name = "Unit";
+  c.interface = "127.0.0.1";
+#if defined(_WIN32)
+  c.shm_name = std::string(kFallbackShmName) + "-unit-" + tag + std::to_string(process_id());
+#else
+  c.shm_name = std::string(kDefaultShmName) + "-unit-" + tag + std::to_string(process_id());
+#endif
+  c.clock = "free";
+  c.lock_memory = false;
+  c.tx_channels = 2;
+  c.rx_channels = 2;
+  return c;
+}
+
+uint64_t wait_next_tick(ShmHeader* h) {
+  const uint64_t n0 = h->now_frames.load();
+  for (int64_t until = mono_ns() + 1000000000LL; mono_ns() < until;) {
+    const uint64_t n = h->now_frames.load();
+    if (n != n0) return n;
+  }
+  return 0;
+}
+}  // namespace
+
+TEST(engine_stall_skips_ahead_and_clock_step_realigns) {
+  Config cfg = engine_test_config("stall");
+  Engine e(cfg);
+  e.set_dante_enabled(false);
+  auto clk = std::make_unique<TestClock>();
+  TestClock* tc = clk.get();
+  CHECK(e.start(std::move(clk)));
+  if (!e.running()) return;
+  sleep_until_ns(mono_ns() + 100000000LL);
+  ShmHeader* h = e.header();
+  const uint64_t steps0 = h->clock_steps.load();
+  const EngineCounters c0 = e.counters();
+  CHECK(steps0 == 1 && c0.resyncs == 0);
+  // 120 ms stall on an unchanged clock: skipped, not a clock step.
+  tc->stall_ns = 120000000;
+  sleep_until_ns(mono_ns() + 300000000LL);
+  const EngineCounters c1 = e.counters();
+  CHECK(c1.stalls == c0.stalls + 1);
+  CHECK(c1.resyncs == c0.resyncs);
+  CHECK(h->clock_steps.load() == steps0);
+  CHECK(c1.overdue_episodes >= c0.overdue_episodes + 1);
+  CHECK(c1.max_late_ns >= 100000000);
+  // A real clock step (+1 s) realigns the drivers.
+  ClockModel m = tc->cell.load();
+  m.base_ptp += 1000000000LL;
+  tc->cell.store(m);
+  sleep_until_ns(mono_ns() + 100000000LL);
+  const EngineCounters c2 = e.counters();
+  CHECK(c2.resyncs == c1.resyncs + 1);
+  CHECK(c2.stalls == c1.stalls);
+  CHECK(h->clock_steps.load() == steps0 + 1);
+  e.stop();
+}
+
+TEST(engine_rx_second_copy_and_lost_late_audio) {
+  Config cfg = engine_test_config("rx");
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Engine e(cfg);
+  e.set_dante_enabled(false);
+  CHECK(e.start());
+  if (!e.running()) return;
+  sleep_until_ns(mono_ns() + 50000000LL);
+  ShmHeader* h = e.header();
+  const uint32_t P = cfg.period_frames(), ch = cfg.rx_channels;
+  const uint64_t mask = cfg.ring_frames - 1;
+  auto& drx = e.dante_rx_ring();
+  const float* cap = rx_ring_at(h, cfg.ring_frames, cfg.tx_channels);
+  const int32_t v = 0x10000000;
+  // Written after the tick that first copied it: the next tick copies it
+  // again, so the apps still get it.
+  bool saved = false;
+  for (int attempt = 0; attempt < 20 && !saved; ++attempt) {
+    const uint64_t n = wait_next_tick(h);
+    if (!n) break;
+    for (uint64_t f = n - 2 * P; f < n - P; ++f)
+      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & mask) * ch + c] = v;
+    if (h->now_frames.load() != n) continue;  // too slow: tick n+P may be done
+    sleep_until_ns(mono_ns() + 5000000LL);
+    saved = true;
+    for (uint64_t f = n - 2 * P; f < n - P; ++f)
+      for (uint32_t c = 0; c < ch; ++c) saved &= cap[size_t(f & mask) * ch + c] == s32_to_float(v);
+  }
+  CHECK(saved);
+  // Written into a slot after its last copy: lost, counted, and cleared.
+  const uint64_t lost0 = e.counters().rx_lost_late_samples;
+  uint64_t lost = lost0;
+  for (int attempt = 0; attempt < 20 && lost == lost0; ++attempt) {
+    const uint64_t n = wait_next_tick(h);
+    if (!n) break;
+    sleep_until_ns(mono_ns() + 100000LL);  // tick n has finished its copies
+    for (uint64_t f = n - 3 * P; f < n - 2 * P; ++f)
+      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & mask) * ch + c] = v;
+    sleep_until_ns(mono_ns() + 5000000LL);
+    lost = e.counters().rx_lost_late_samples;
+    if (lost != lost0) {
+      CHECK(lost - lost0 == P);
+      for (uint64_t f = n - 3 * P; f < n - 2 * P; ++f) CHECK(drx[size_t(f & mask) * ch] == 0);
+    }
+  }
+  CHECK(lost == lost0 + P);
+  e.stop();
 }
 
 TEST_MAIN()

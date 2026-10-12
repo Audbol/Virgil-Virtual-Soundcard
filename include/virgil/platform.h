@@ -20,7 +20,13 @@ void sleep_until_ns(int64_t deadline_ns, int64_t spin_ns = 0);
 // Put the calling thread in the OS's real-time / pro-audio class.
 // `period_ns` is the expected wake-up period (used by macOS time-constraint
 // policy). Returns false if the OS refused (e.g. missing RLIMIT_RTPRIO).
+// On Windows also: MMCSS "Pro Audio", time-critical priority, and the thread
+// opted out of power throttling (EcoQoS).
 bool set_realtime_priority(int priority, int64_t period_ns);
+// Windows: what set_realtime_priority could not do on some thread, each
+// problem reported once ("" if nothing new). Empty elsewhere. For the
+// caller to log from a thread that may (not the audio thread).
+std::string take_scheduling_warnings();
 
 // Lock all current and future pages so the audio path never page-faults.
 bool lock_memory();

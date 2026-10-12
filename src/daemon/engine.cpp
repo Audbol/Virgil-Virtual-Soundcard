@@ -354,10 +354,33 @@ void Engine::clear_rings() {
 // The real-time tick, once per tick_us on media-clock boundaries T:
 //   1. publish the clock anchor drivers use to time their callbacks
 //   2. mix [T-P, T) from every client slot into the Dante transmit ring
-//      (Inferno sends frame f at media time f + tx_latency)
-//   3. move received frames [T-2P, T-P) from the Dante ring to the capture
-//      ring (Inferno has finished them: it writes at arrival + rx_latency and
-//      fills gaps with silence up to "now")
+//      (Inferno sends frame f at media time f + tx_send_delay)
+//   3. copy received frames [T-3P, T-P) from the Dante ring to the capture
+//      ring. Inferno writes a packet at its timestamp + rx_latency (filling
+//      gaps with silence up to "now"), drivers read frame f at f + 3P or
+//      later: [T-2P, T-P) is copied now and again at T+P, so audio that
+//      arrives up to a tick late still reaches the apps. Only [T-3P, T-2P),
+//      copied for the last time, is cleared in the Dante ring.
+//   4. frames written into the Dante ring after their last copy arrived too
+//      late: found (and cleared again) at the next tick, and counted.
+namespace {
+// Zero n frames ending at frame `end` (exclusive), at most the whole ring.
+template <class T>
+inline void zero_before(T* ring, uint64_t mask, uint32_t ch, uint64_t end, uint64_t n) {
+  const uint64_t size = mask + 1;
+  if (n >= size) {
+    std::memset(ring, 0, size_t(size) * ch * sizeof(T));
+    return;
+  }
+  zero_frames(ring, mask, ch, end - n, uint32_t(n));
+}
+inline void atomic_max(std::atomic<int64_t>& a, int64_t v) {
+  int64_t cur = a.load(std::memory_order_relaxed);
+  while (v > cur && !a.compare_exchange_weak(cur, v, std::memory_order_relaxed)) {
+  }
+}
+}  // namespace
+
 void Engine::tick_loop() {
   // Geometry from our own configuration, never from the shared header.
   const uint32_t P = cfg_.period_frames();
@@ -374,15 +397,24 @@ void Engine::tick_loop() {
   float* rx = rx_ring_at(hdr_, ring, txch);
   const int64_t spin = int64_t(cfg_.spin_us) * 1000;
   const int64_t resync_ns = std::max<int64_t>(50000000, 4 * period_ns);
-  const int64_t overdue_ns = std::max<int64_t>(period_ns, int64_t(cfg_.tx_lead_frames()) * 1000000000LL / rate);
+  // Inferno reads frame f of the transmit ring at f + tx_send_delay; the
+  // tick that writes [T-P, T) is due at T: later than send_delay - P and the
+  // network got silence instead.
+  const int64_t overdue_ns =
+      std::max<int64_t>(period_ns / 2, int64_t(cfg_.tx_send_delay_us()) * 1000 - period_ns);
 
   // A new engine (reload) may run on a different timeline than the one
   // connected drivers were following: tell them to realign. Counted once the
   // new timeline's anchor is published, so a driver that sees the new count
   // also sees the new anchor.
   bool step_pending = true;
+  bool was_overdue = false;
+  // The late-audio scan looks at the slot cleared by the previous tick; not
+  // meaningful on the first tick of a timeline or after a stall.
+  bool scan_late = false;
 
   ClockModel m = clock_->model();
+  ClockModel prev_m = m;  // model of the last tick that ran
   uint64_t next = (ptp_ns_to_frames(m.ptp_at(mono_ns()), rate) / P + 1) * P;
 
   while (running_) {
@@ -390,14 +422,51 @@ void Engine::tick_loop() {
     const int64_t deadline = m.local_at(frames_to_ptp_ns(next, rate));
     const int64_t now = mono_ns();
     if (deadline - now > resync_ns || now - deadline > resync_ns) {
-      // Clock stepped (PTP lock, master change) or we were descheduled for a
-      // long time: realign instead of bursting or stalling.
-      step_pending = true;
-      resyncs_.fetch_add(1, std::memory_order_relaxed);
-      next = (ptp_ns_to_frames(m.ptp_at(now), rate) / P + 1) * P;
-      clear_rings();
-      std::fill(drx_.begin(), drx_.end(), 0);
-      std::fill(dtx_.begin(), dtx_.end(), 0);  // nothing of the old timeline may go out
+      // Did the clock itself move, or was this thread just not running (a
+      // stalled computer)? A servo update keeps PTP time continuous; a step
+      // (PTP lock, master change) does not.
+      const int64_t shift = m.ptp_at(now) - prev_m.ptp_at(now);
+      const bool stepped = deadline - now > resync_ns || shift > resync_ns / 2 || shift < -resync_ns / 2;
+      const uint64_t to = (ptp_ns_to_frames(m.ptp_at(now), rate) / P + 1) * P;
+      if (stepped || to <= next) {
+        // Realign instead of bursting or stalling: audio of the old timeline
+        // must not go out, drivers resync.
+        step_pending = true;
+        resyncs_.fetch_add(1, std::memory_order_relaxed);
+        next = to;
+        clear_rings();
+        std::fill(drx_.begin(), drx_.end(), 0);
+        std::fill(dtx_.begin(), dtx_.end(), 0);
+      } else {
+        // Same timeline: skip the ticks that could not run. Drivers keep
+        // their position (no clock step, so no xrun storm or ASIO reset);
+        // only the slots those ticks would have mixed, copied or silenced
+        // are cleared. o = the first tick skipped, to = the next one to run.
+        const uint64_t o = next, skipped = to - o;
+        stalls_.fetch_add(1, std::memory_order_relaxed);
+        if (!was_overdue) overdue_episodes_.fetch_add(1, std::memory_order_relaxed);
+        overdue_ticks_.fetch_add(1, std::memory_order_relaxed);
+        hdr_->late_ticks.fetch_add(1, std::memory_order_relaxed);
+        atomic_max(max_late_ns_, now - deadline);
+        was_overdue = true;
+        // Client rings: unconsumed [o-P, to-P) and the quarter-ring-behind
+        // slots of the skipped ticks; never the half ring drivers write ahead.
+        const uint64_t cn = std::min<uint64_t>(skipped + ring / 4, ring / 2);
+        for (uint32_t i = 0; i < kMaxTxClients && txch; ++i)
+          zero_before(tx_ring_at(hdr_, ring, txch, i), mask, txch, to - P, cn);
+        // Capture ring: frames [o-3P, to-3P) never copied, and the slots up
+        // to half a ring ahead that the skipped ticks did not silence.
+        if (rxch) zero_before(rx, mask, rxch, to + ring / 2 - P, skipped + ring / 2 + 2 * P);
+        // Transmit ring: [o-P, to-P) never written, half a ring ahead not
+        // silenced. Inferno is reading it: silence goes out.
+        if (txch) zero_before(dtx_.data(), dmask, txch, to + dring_ / 2 - P, skipped + dring_ / 2);
+        // Receive ring: [o-4P, to-3P) would have been cleared; frames from
+        // to-3P on are still to be copied.
+        if (rxch) zero_before(drx_.data(), dmask, rxch, to - 3 * P, std::min<uint64_t>(skipped + P, dring_ / 2));
+        next = to;
+      }
+      scan_late = false;
+      prev_m = m;
       continue;
     }
     sleep_until_ns(deadline, spin);
@@ -405,8 +474,17 @@ void Engine::tick_loop() {
       // Late by more than the drivers' margin: their audio missed the tick.
       const int64_t late = mono_ns() - deadline;
       if (late > period_ns / 2) hdr_->late_ticks.fetch_add(1, std::memory_order_relaxed);
-      if (late > overdue_ns) overdue_ticks_.fetch_add(1, std::memory_order_relaxed);
+      atomic_max(max_late_ns_, late);
+      if (late > overdue_ns) {
+        overdue_ticks_.fetch_add(1, std::memory_order_relaxed);
+        // The catch-up ticks after a stall are the same episode.
+        if (!was_overdue) overdue_episodes_.fetch_add(1, std::memory_order_relaxed);
+        was_overdue = true;
+      } else {
+        was_overdue = false;
+      }
     }
+    prev_m = m;
 
     ClockAnchor a;
     a.host_ns = deadline;
@@ -422,12 +500,7 @@ void Engine::tick_loop() {
     hdr_->state.store(clock_->state(), std::memory_order_relaxed);
     const int64_t off = clock_->last_offset_ns();
     hdr_->ptp_offset_ns.store(off, std::memory_order_relaxed);
-    {
-      const int64_t a = off < 0 ? -off : off;
-      int64_t cur = max_offset_ns_.load(std::memory_order_relaxed);
-      while (a > cur && !max_offset_ns_.compare_exchange_weak(cur, a, std::memory_order_relaxed)) {
-      }
-    }
+    atomic_max(max_offset_ns_, off < 0 ? -off : off);
 
     // --- transmit: mix clients into the Dante ring ---
     if (txch) {
@@ -475,19 +548,36 @@ void Engine::tick_loop() {
         if (peaks[c] > 0) peak_max(tx_peak_[c], peaks[c]);
     }
 
-    // --- receive: finished frames from the Dante ring to the capture ring ---
+    // --- receive: from the Dante ring to the capture ring ---
     if (rxch) {
-      const uint64_t start = next - 2 * P;
-      float peaks[kMaxChannels] = {};
-      for (uint32_t f = 0; f < P; ++f) {
-        int32_t* src = drx_.data() + size_t((start + f) & dmask) * rxch;
-        float* dst = rx + size_t((start + f) & mask) * rxch;
-        for (uint32_t c = 0; c < rxch; ++c) {
-          dst[c] = s32_to_float(src[c]);
-          peaks[c] = std::max(peaks[c], std::fabs(dst[c]));
-          src[c] = 0;  // consumed: a stopped stream must not replay a ring later
+      // Written after its last copy (one tick ago): lost. Cleared again so
+      // it cannot play a ring later.
+      if (scan_late) {
+        uint64_t lost = 0;
+        const uint64_t old = next - 4 * P;
+        for (uint32_t f = 0; f < P; ++f) {
+          int32_t* src = drx_.data() + size_t((old + f) & dmask) * rxch;
+          int32_t any = 0;
+          for (uint32_t c = 0; c < rxch; ++c) any |= src[c];
+          if (any) {
+            ++lost;
+            std::memset(src, 0, size_t(rxch) * sizeof(int32_t));
+          }
         }
+        if (lost) rx_lost_late_.fetch_add(lost, std::memory_order_relaxed);
       }
+      scan_late = true;
+      const uint64_t start = next - 3 * P;
+      float peaks[kMaxChannels] = {};
+      for (uint32_t f = 0; f < 2 * P; ++f) {
+        const int32_t* src = drx_.data() + size_t((start + f) & dmask) * rxch;
+        float* dst = rx + size_t((start + f) & mask) * rxch;
+        for (uint32_t c = 0; c < rxch; ++c) dst[c] = s32_to_float(src[c]);
+        if (f < P)  // final copy: meter it once
+          for (uint32_t c = 0; c < rxch; ++c) peaks[c] = std::max(peaks[c], std::fabs(dst[c]));
+      }
+      // Consumed: a stopped stream must not replay a ring later.
+      zero_frames(drx_.data(), dmask, rxch, start, P);
       for (uint32_t c = 0; c < rxch; ++c)
         if (peaks[c] > 0) peak_max(rx_peak_[c], peaks[c]);
       // Silence the capture slot half a ring ahead (== half a ring behind).
@@ -626,6 +716,8 @@ void Engine::housekeeping() {
   if (!running_ || !hdr_) return;
   reclaim_clients(mono_ns());
   report_clock_master();
+  const std::string sched = take_scheduling_warnings();
+  if (!sched.empty()) VIRGIL_LOG_WARN("scheduling: %s; expect late wake-ups under load", sched.c_str());
 }
 
 EngineCounters Engine::counters() {
@@ -635,6 +727,10 @@ EngineCounters Engine::counters() {
   c.grandmaster = clock_ ? clock_->grandmaster() : std::string();
   c.late_ticks = hdr_->late_ticks.load(std::memory_order_relaxed);
   c.overdue_ticks = overdue_ticks_.load(std::memory_order_relaxed);
+  c.overdue_episodes = overdue_episodes_.load(std::memory_order_relaxed);
+  c.stalls = stalls_.load(std::memory_order_relaxed);
+  c.max_late_ns = max_late_ns_.exchange(0, std::memory_order_relaxed);
+  c.rx_lost_late_samples = rx_lost_late_.load(std::memory_order_relaxed);
   c.resyncs = resyncs_.load(std::memory_order_relaxed);
   c.max_offset_ns = max_offset_ns_.exchange(0, std::memory_order_relaxed);
   if (dante_) {
@@ -651,6 +747,11 @@ EngineCounters Engine::counters() {
     c.tx_dropped_samples = ts.dropped_samples;
     c.tx_max_lag_samples = ts.max_lag_samples;
     c.tx_clock_jumps = ts.clock_jumps;
+    c.tx_max_wakeup_lag_samples = ts.max_wakeup_lag_samples;
+    c.tx_lag_over[0] = ts.lag_over_0_5ms;
+    c.tx_lag_over[1] = ts.lag_over_1ms;
+    c.tx_lag_over[2] = ts.lag_over_2ms;
+    c.tx_lag_over[3] = ts.lag_over_4ms;
   }
   for (uint32_t i = 0; i < kMaxTxClients; ++i) {
     const ClientSlot& s = hdr_->clients[i];

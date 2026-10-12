@@ -19,11 +19,11 @@ namespace virgil {
 class Diagnostics {
  public:
   enum class Kind {
-    NetLate,     // packets arrived after their receive latency
+    NetLate,     // received audio arrived after it was handed to the apps (lost)
     NetLost,     // gaps in received streams
     AppLate,     // an app's audio came after its deadline (dropped)
     AppMissed,   // an app had not written its audio in time (silence sent)
-    EngineLate,  // the engine woke up late (computer busy)
+    EngineLate,  // the engine woke up too late (computer stalled): episodes
     NetSendLate, // the Dante sending thread woke up after the transmit latency (audio dropped)
     ClockJump,   // media clock realigned while running
     ClockLost,   // lost the clock leader
@@ -53,7 +53,8 @@ class Diagnostics {
     std::string key;  // merges repeats (e.g. per app)
     std::string text;
     uint64_t count = 0;     // unit depends on the kind
-    double value = 0;       // e.g. largest age / duration in ms
+    double value = 0;       // e.g. ms lost / largest lag in ms
+    double extra = 0;       // NetLate: oldest packet (ms); kept as a maximum
     uint64_t seconds = 0;   // seconds with occurrences
   };
   struct Minute {
@@ -65,7 +66,7 @@ class Diagnostics {
   };
 
   void add_locked(Kind k, const std::string& key, uint64_t count, double value, int64_t now,
-                  const std::string& text);
+                  const std::string& text, double extra = 0);
   void bump_minute_locked(Kind k, int64_t now);
   std::vector<std::string> hints_locked(int64_t now) const;
   static const char* kind_name(Kind k);
@@ -81,6 +82,11 @@ class Diagnostics {
   std::string prev_gm_;
   double period_ms_ = 1, rx_latency_ms_ = 4, tx_latency_ms_ = 4;
   double worst_age_ms_ = 0;  // since reset
+  uint64_t near_late_packets_ = 0;  // older than the receive latency, still played (since reset)
+  double worst_stall_ms_ = 0;  // since reset
+  double worst_wakeup_lag_ms_ = 0;  // sending thread, late or not (since reset)
+  uint64_t send_lag_over_[4] = {};  // wakeups later than 0.5 / 1 / 2 / 4 ms (since reset)
+  int64_t last_stall_ms_ = 0;  // an engine stall was seen in this sample (wall ms)
   double worst_send_lag_ms_ = 0;  // since reset
   std::deque<Event> events_;
   std::deque<Minute> minutes_;

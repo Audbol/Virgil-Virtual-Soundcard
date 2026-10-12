@@ -97,6 +97,13 @@ int status(const std::string& shm_name) {
 int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   if (on_started) on_started();
   virgil::tune_process_timers();
+#if defined(_WIN32)
+  // The audio threads' priorities are relative to the process class: in the
+  // HIGH class ordinary busy programs (normal class) cannot delay them.
+  if (!SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS))
+    VIRGIL_LOG_WARN("could not raise virgild to high priority (error %lu); expect late wake-ups under load",
+                    GetLastError());
+#endif
   {
     unsigned major = 0, minor = 0, patch = 0;
     if (std::sscanf(VIRGIL_VERSION, "%u.%u.%u", &major, &minor, &patch) >= 2)

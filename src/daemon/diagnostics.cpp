@@ -69,9 +69,12 @@ const char* Diagnostics::kind_name(Kind k) {
 std::string Diagnostics::event_text(const Event& e, double, double rx_latency_ms, double tx_latency_ms) {
   switch (e.kind) {
     case Kind::NetLate:
-      return fmt("%" PRIu64 " %s from the network arrived too late to play (up to %.1f ms old; receive "
-                 "latency is %.1f ms)",
-                 e.count, plural(e.count, "packet", "packets"), e.value, rx_latency_ms);
+      if (e.extra > 0)
+        return fmt("%.1f ms of audio from the network arrived too late and was lost (packets up to %.1f ms old; "
+                   "receive latency is %.1f ms)",
+                   e.value, e.extra, rx_latency_ms);
+      return fmt("%.1f ms of audio from the network arrived too late and was lost (receive latency is %.1f ms)",
+                 e.value, rx_latency_ms);
     case Kind::NetLost:
       return fmt("%.1f ms of audio from the network never arrived (%" PRIu64 " %s)", e.value, e.count,
                  plural(e.count, "gap", "gaps"));
@@ -80,10 +83,15 @@ std::string Diagnostics::event_text(const Event& e, double, double rx_latency_ms
                  e.value);
     case Kind::AppMissed:
       return fmt("%s did not deliver its audio in time (%.1f ms of silence sent)", e.text.c_str(), e.value);
-    case Kind::EngineLate:
-      return fmt("Virgil's audio engine was woken up too late %" PRIu64 " %s (the computer was busy); "
-                 "audio from apps missed the network",
-                 e.count, plural(e.count, "time", "times"));
+    case Kind::EngineLate: {
+      const std::string ms = e.value >= 10 ? fmt("%.0f ms", e.value) : fmt("%.1f ms", e.value);
+      if (e.count <= 1)
+        return "The computer stalled ~" + ms +
+               ": Virgil's audio engine and apps waited, so audio to the network had a gap";
+      return fmt("The computer stalled %" PRIu64 " times, up to ~%s: Virgil's audio engine and apps waited, so "
+                 "audio to the network had gaps",
+                 e.count, ms.c_str());
+    }
     case Kind::NetSendLate:
       return fmt("Audio to the network was dropped: Virgil's sending thread woke up to %.1f ms late %" PRIu64
                  " %s (transmit latency is %.1f ms)",
@@ -119,14 +127,16 @@ void Diagnostics::bump_minute_locked(Kind k, int64_t now) {
 }
 
 void Diagnostics::add_locked(Kind k, const std::string& key, uint64_t count, double value, int64_t now,
-                             const std::string& text) {
+                             const std::string& text, double extra) {
   if (is_dropout(k)) bump_minute_locked(k, now);
   // Repeats of the same trouble in consecutive seconds are one event.
   for (auto it = events_.rbegin(); it != events_.rend() && now - it->end_ms <= kMergeMs; ++it) {
     if (it->kind != k || it->key != key || !is_dropout(k)) continue;
     it->end_ms = now;
     it->count += count;
-    it->value = k == Kind::NetLate || k == Kind::NetSendLate ? std::max(it->value, value) : it->value + value;
+    // Largest lag for late wake-ups; amounts (ms lost, silence) add up.
+    it->value = k == Kind::NetSendLate || k == Kind::EngineLate ? std::max(it->value, value) : it->value + value;
+    it->extra = std::max(it->extra, extra);
     ++it->seconds;
     return;
   }
@@ -137,6 +147,7 @@ void Diagnostics::add_locked(Kind k, const std::string& key, uint64_t count, dou
   e.text = text;
   e.count = count;
   e.value = value;
+  e.extra = extra;
   e.seconds = 1;
   events_.push_back(e);
   while (events_.size() > kMaxEvents) events_.pop_front();
@@ -156,6 +167,10 @@ void Diagnostics::reset(int64_t now) {
   totals_.clear();
   worst_age_ms_ = 0;
   worst_send_lag_ms_ = 0;
+  near_late_packets_ = 0;
+  worst_stall_ms_ = 0;
+  worst_wakeup_lag_ms_ = 0;
+  for (auto& n : send_lag_over_) n = 0;
   since_ms_ = now;
 }
 
@@ -166,6 +181,7 @@ void Diagnostics::engine_started(const Config& cfg, int64_t now) {
   prev_apps_.clear();
   prev_state_ = 0;
   prev_gm_.clear();
+  last_stall_ms_ = 0;
   grace_until_ = now + kGraceMs;
   period_ms_ = double(cfg.period_frames()) * 1000.0 / cfg.sample_rate;
   rx_latency_ms_ = cfg.latency_us / 1000.0;
@@ -214,19 +230,33 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
   }
 
   if (!grace) {
+    // Packets older than the receive latency: usually still in time for the
+    // engine's second copy, so only a statistic (close to the limit). What
+    // arrived after its last copy was lost: that is the dropout.
+    const double age = c.rx_max_age_samples * 1000.0 / rate;
     const uint64_t late = delta(c.rx_late_packets, prev_.rx_late_packets);
     if (late) {
-      const double age = c.rx_max_age_samples * 1000.0 / rate;
+      near_late_packets_ += late;
       worst_age_ms_ = std::max(worst_age_ms_, age);
-      add_locked(Kind::NetLate, std::string(), late, age, now, std::string());
     }
+    const uint64_t lost_late = delta(c.rx_lost_late_samples, prev_.rx_lost_late_samples);
+    if (lost_late)
+      add_locked(Kind::NetLate, std::string(), lost_late, lost_late * 1000.0 / rate, now, std::string(),
+                 late ? age : 0);
     const uint64_t gaps = delta(c.rx_gaps, prev_.rx_gaps);
     if (gaps)
       add_locked(Kind::NetLost, std::string(), gaps, delta(c.rx_missing_samples, prev_.rx_missing_samples) * 1000.0 / rate,
                  now, std::string());
     // Only audible with an app attached (otherwise nothing waited for it).
-    const uint64_t lt = delta(c.overdue_ticks, prev_.overdue_ticks);
-    if (lt && !c.apps.empty()) add_locked(Kind::EngineLate, std::string(), lt, 0, now, std::string());
+    // One stall and the catch-up ticks after it are one episode.
+    uint64_t stalls = delta(c.overdue_episodes, prev_.overdue_episodes);
+    if (!stalls && delta(c.overdue_ticks, prev_.overdue_ticks)) stalls = 1;
+    if (stalls && !c.apps.empty()) {
+      const double ms = c.max_late_ns / 1e6;
+      worst_stall_ms_ = std::max(worst_stall_ms_, ms);
+      last_stall_ms_ = now;
+      add_locked(Kind::EngineLate, std::string(), stalls, ms, now, std::string());
+    }
     // The Dante sending thread woke up after the transmit latency: Inferno
     // skipped that audio. Like EngineLate, only audible with an app attached.
     const uint64_t sl = delta(c.tx_late_wakeups, prev_.tx_late_wakeups);
@@ -235,6 +265,9 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
       worst_send_lag_ms_ = std::max(worst_send_lag_ms_, lag);
       add_locked(Kind::NetSendLate, std::string(), sl, lag, now, std::string());
     }
+    // Sending thread near misses: a statistic for the report, not dropouts.
+    worst_wakeup_lag_ms_ = std::max(worst_wakeup_lag_ms_, c.tx_max_wakeup_lag_samples * 1000.0 / rate);
+    for (int i = 0; i < 4; ++i) send_lag_over_[i] += delta(c.tx_lag_over[i], prev_.tx_lag_over[i]);
     const uint64_t rs = delta(c.resyncs, prev_.resyncs);
     if (rs) add_locked(Kind::ClockJump, std::string(), rs, 0, now, std::string());
   }
@@ -244,6 +277,9 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
     apps[a.pid] = {a.underrun_ticks, a.late_frames};
     auto it = prev_apps_.find(a.pid);
     if (it == prev_apps_.end() || grace) continue;  // new app: its baseline
+    // The engine stalled this second (or just before the sample): apps
+    // waited with it, it is not their fault (reported as the stall).
+    if (last_stall_ms_ && now - last_stall_ms_ <= 1500) continue;
     const std::string who = a.name.empty() ? fmt("An app (process %u)", a.pid) : a.name;
     const uint64_t miss = delta(a.underrun_ticks, it->second.underrun_ticks);
     if (miss) add_locked(Kind::AppMissed, who, miss, miss * period_ms_, now, who);
@@ -265,12 +301,15 @@ uint64_t Diagnostics::recent_dropouts(int64_t now, int64_t seconds) const {
 std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
   std::vector<std::string> h;
   double age = 0, send_lag = 0;
-  bool lost = false, engine = false, clock = false;
+  bool net_late = false, lost = false, engine = false, clock = false;
   std::vector<std::string> apps;
   for (const auto& e : events_) {
     if (now - e.end_ms > 3600 * 1000) continue;
     switch (e.kind) {
-      case Kind::NetLate: age = std::max(age, e.value); break;
+      case Kind::NetLate:
+        net_late = true;
+        age = std::max(age, e.extra);
+        break;
       case Kind::NetLost: lost = true; break;
       case Kind::EngineLate: engine = true; break;
       case Kind::NetSendLate: send_lag = std::max(send_lag, e.value); break;
@@ -283,7 +322,14 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
       default: break;
     }
   }
-  if (age > 0) {
+  // Only when audio was actually lost: packets merely close to the limit
+  // still played.
+  if (net_late && age <= 0) age = worst_age_ms_;
+  if (net_late && age <= 0)
+    h.push_back(fmt("Audio from the network arrived too late to play for the receive latency of %.1f ms. Raise "
+                    "Receive latency in Settings.",
+                    rx_latency_ms_));
+  if (net_late && age > 0) {
     static const double steps[] = {1, 2, 4, 5, 10, 20};
     double want = 0;
     for (double s : steps)
@@ -292,11 +338,11 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
         break;
       }
     if (want > 0)
-      h.push_back(fmt("Audio from the network arrived up to %.1f ms late for the receive latency of %.1f ms. "
-                      "Raise Receive latency to %g ms in Settings.",
+      h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old; receive "
+                      "latency %.1f ms). Raise Receive latency to %g ms in Settings.",
                       age, rx_latency_ms_, want));
     else
-      h.push_back(fmt("Audio from the network arrived up to %.1f ms late. That is more than any latency setting "
+      h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old). That is more than any latency setting "
                       "covers: look for a slow or overloaded network path (Wi-Fi, a busy or misconfigured "
                       "switch).",
                       age));
@@ -332,7 +378,9 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
   if (engine)
 #if defined(_WIN32)
     h.push_back("The computer kept Virgil's audio engine waiting. Close heavy programs, choose the High "
-                "performance power plan and keep a laptop plugged in.");
+                "performance (or Ultimate performance) power plan and keep a laptop plugged in. If it keeps "
+                "happening, LatencyMon (free) shows which driver holds up the computer; Wi-Fi, Bluetooth and "
+                "GPU drivers are common culprits.");
 #elif defined(__APPLE__)
     h.push_back("The computer kept Virgil's audio engine waiting. Close heavy programs and keep a laptop "
                 "plugged in (Low Power Mode slows audio threads).");
@@ -367,6 +415,13 @@ std::string Diagnostics::json(int64_t now) const {
   j.kv("rx_latency_ms", rx_latency_ms_);
   j.kv("tx_latency_ms", tx_latency_ms_);
   j.kv("worst_network_age_ms", worst_age_ms_);
+  j.kv("network_late_packets", (unsigned long long)near_late_packets_);  // close to the limit, still played
+  j.kv("worst_stall_ms", worst_stall_ms_);
+  j.kv("worst_send_wakeup_lag_ms", worst_wakeup_lag_ms_);
+  j.key("send_wakeups_late").begin_obj();
+  j.kv("over_0_5ms", (unsigned long long)send_lag_over_[0]).kv("over_1ms", (unsigned long long)send_lag_over_[1]);
+  j.kv("over_2ms", (unsigned long long)send_lag_over_[2]).kv("over_4ms", (unsigned long long)send_lag_over_[3]);
+  j.end_obj();
   j.kv("worst_send_lag_ms", worst_send_lag_ms_);
   j.key("hints").begin_arr();
   for (const auto& s : hints_locked(now)) j.v(s);
@@ -404,6 +459,16 @@ std::string Diagnostics::report(int64_t now) const {
   }
   if (!total) r += "  no dropouts\n";
   r += fmt("  worst network packet age %.1f ms (receive latency %.1f ms)\n", worst_age_ms_, rx_latency_ms_);
+  if (near_late_packets_)
+    r += fmt("  %" PRIu64 " network %s older than the receive latency, still played (close to the limit)\n",
+             near_late_packets_, plural(near_late_packets_, "packet", "packets"));
+  if (worst_stall_ms_ > 0) r += fmt("  longest computer stall %.1f ms\n", worst_stall_ms_);
+  if (worst_wakeup_lag_ms_ > 0 || send_lag_over_[0])
+    r += fmt("  sending thread woke up late (not dropouts while under the transmit latency of %.1f ms): worst "
+             "%.1f ms; over 0.5 ms %" PRIu64 ", over 1 ms %" PRIu64 ", over 2 ms %" PRIu64 ", over 4 ms %" PRIu64
+             "\n",
+             tx_latency_ms_, worst_wakeup_lag_ms_, send_lag_over_[0], send_lag_over_[1], send_lag_over_[2],
+             send_lag_over_[3]);
   if (worst_send_lag_ms_ > 0)
     r += fmt("  worst late send %.1f ms (transmit latency %.1f ms)\n", worst_send_lag_ms_, tx_latency_ms_);
   const auto hints = hints_locked(now);

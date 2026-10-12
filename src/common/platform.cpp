@@ -4,6 +4,11 @@
 #include <thread>
 
 #if defined(_WIN32)
+#include <mutex>
+#include <string>
+#endif
+
+#if defined(_WIN32)
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <avrt.h>
@@ -78,13 +83,59 @@ void sleep_until_ns(int64_t deadline, int64_t spin_ns) {
   while (mono_ns() < deadline) YieldProcessor();
 }
 
+namespace {
+// What set_realtime_priority could not do, reported once by
+// take_scheduling_warnings() (this library has no logger).
+std::mutex g_sched_warn_mutex;
+std::string g_sched_warn;
+bool g_sched_warned_throttle = false, g_sched_warned_mmcss = false, g_sched_warned_prio = false;
+
+void sched_warn(bool* once, const std::string& msg) {
+  std::lock_guard<std::mutex> l(g_sched_warn_mutex);
+  if (*once) return;
+  *once = true;
+  if (!g_sched_warn.empty()) g_sched_warn += "; ";
+  g_sched_warn += msg;
+}
+
+// THREAD_POWER_THROTTLING_STATE via SetThreadInformation (Windows 10 1709+;
+// looked up dynamically for older systems and SDK headers): EcoQoS / power
+// throttling otherwise runs a background thread on efficiency cores at low
+// clock speeds, which wakes the audio threads late.
+bool opt_out_of_thread_throttling() {
+  struct Throttling {
+    ULONG Version, ControlMask, StateMask;
+  } st{1 /* THREAD_POWER_THROTTLING_CURRENT_VERSION */, 0x1 /* EXECUTION_SPEED */, 0 /* never throttle */};
+  using Fn = BOOL(WINAPI*)(HANDLE, int, LPVOID, DWORD);
+  static const Fn fn = reinterpret_cast<Fn>(
+      reinterpret_cast<void*>(GetProcAddress(GetModuleHandleA("kernel32.dll"), "SetThreadInformation")));
+  if (!fn) return true;  // older Windows: no throttling to opt out of
+  return fn(GetCurrentThread(), 3 /* ThreadPowerThrottling */, &st, sizeof st) != 0;
+}
+}  // namespace
+
 bool set_realtime_priority(int, int64_t) {
   timeBeginPeriod(1);
   DWORD task_index = 0;
   HANDLE h = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
   if (h) AvSetMmThreadPriority(h, AVRT_PRIORITY_CRITICAL);
-  SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL);
+  else
+    sched_warn(&g_sched_warned_mmcss, "MMCSS \"Pro Audio\" scheduling refused (error " +
+                                          std::to_string(GetLastError()) + ")");
+  if (!SetThreadPriority(GetCurrentThread(), THREAD_PRIORITY_TIME_CRITICAL))
+    sched_warn(&g_sched_warned_prio,
+               "time-critical thread priority refused (error " + std::to_string(GetLastError()) + ")");
+  if (!opt_out_of_thread_throttling())
+    sched_warn(&g_sched_warned_throttle, "could not opt an audio thread out of power throttling (error " +
+                                             std::to_string(GetLastError()) + ")");
   return h != nullptr;
+}
+
+std::string take_scheduling_warnings() {
+  std::lock_guard<std::mutex> l(g_sched_warn_mutex);
+  std::string r;
+  r.swap(g_sched_warn);
+  return r;
 }
 
 void tune_process_timers() {
@@ -213,6 +264,8 @@ bool set_realtime_priority(int priority, int64_t period_ns) {
 bool lock_memory() { return mlockall(MCL_CURRENT | MCL_FUTURE) == 0; }
 
 void tune_process_timers() {}
+
+std::string take_scheduling_warnings() { return std::string(); }
 
 uint32_t process_id() { return uint32_t(getpid()); }
 std::string host_name() {
