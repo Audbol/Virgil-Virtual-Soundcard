@@ -125,11 +125,16 @@ class VirgilAsio : public IASIO {
     disposeBuffers();
     Lock l(mu_);
     if (!client_.open()) {
-      set_error("Cannot open the Virgil soundcard: is the Virgil service running?");
+      set_error(client_.open_error().empty() ? "Cannot open the Virgil soundcard" : client_.open_error().c_str());
       return ASIOFalse;
     }
     if (!client_.daemon_alive()) {
-      set_error("The Virgil service is not running its audio engine. Restart it and reopen the driver.");
+      const virgil::ShmHeader* h = client_.header();
+      if (h->state.load(std::memory_order_acquire) == virgil::kStateStopped)
+        set_error("Virgil is stopped: press Start in Virgil Control");
+      else
+        set_error("the Virgil service is not responding (its audio engine stopped ticking): restart the Virgil "
+                  "service, see Virgil Control");
       client_.close();
       return ASIOFalse;
     }
@@ -147,13 +152,27 @@ class VirgilAsio : public IASIO {
     }
     in_ch_ = long(client_.rx_channels());
     out_ch_ = long(client_.tx_channels());
+    error_[0] = 0;
     return ASIOTrue;
   }
   void getDriverName(char* name) override { std::strcpy(name, "Virgil ASIO"); }
   long getDriverVersion() override { return 1; }
+  // The ASIO spec gives the host a 124-byte buffer: never write more.
   void getErrorMessage(char* s) override {
     Lock l(mu_);
-    std::strcpy(s, error_);
+    constexpr size_t kAsioErrorBytes = 124;
+    size_t n = std::strlen(error_);
+    if (n < kAsioErrorBytes) {
+      std::memcpy(s, error_, n + 1);
+      return;
+    }
+    // Cut on a word boundary and mark it; the full text went to the debugger.
+    n = kAsioErrorBytes - 4;
+    while (n > 0 && error_[n] != ' ') --n;
+    while (n > 0 && (error_[n - 1] == ' ' || error_[n - 1] == ',' || error_[n - 1] == ':')) --n;
+    if (n == 0) n = kAsioErrorBytes - 4;
+    std::memcpy(s, error_, n);
+    std::memcpy(s + n, "...", 4);
   }
 
   ASIOError start() override {
@@ -397,9 +416,15 @@ class VirgilAsio : public IASIO {
   static constexpr long kPreferred = 128;
   static constexpr long kGranularity = 16;
 
+  // Shown by the host via getErrorMessage (shortened to the ASIO limit) and
+  // written in full to the debugger output (DebugView). No message box: hosts
+  // init() every driver while scanning.
   void set_error(const char* s) {
-    std::strncpy(error_, s, sizeof error_ - 1);
-    error_[sizeof error_ - 1] = 0;
+    std::snprintf(error_, sizeof error_, "%s", s);
+    if (error_[0] >= 'a' && error_[0] <= 'z') error_[0] = char(error_[0] - 'a' + 'A');
+    char line[sizeof error_ + 32];
+    std::snprintf(line, sizeof line, "Virgil ASIO: init failed: %s\n", error_);
+    OutputDebugStringA(line);
   }
 
   // Ends the current generation (if any) and retires its thread. Never joins:
@@ -576,7 +601,7 @@ class VirgilAsio : public IASIO {
   // from a callback made under it cannot deadlock.
   std::recursive_mutex mu_;
   virgil::Client client_;
-  char error_[128] = "";
+  char error_[512] = "";
   long in_ch_ = 0, out_ch_ = 0;
   std::shared_ptr<Session> session_;  // set by createBuffers()
   std::shared_ptr<Run> run_;          // current generation, null when stopped

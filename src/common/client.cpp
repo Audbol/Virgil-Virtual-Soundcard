@@ -17,28 +17,42 @@ std::string default_shm_name() {
 // shm_generation_name): prefer one whose daemon is ticking.
 bool Client::open(const std::string& name) {
   close();
+  open_error_.clear();
   const std::string base = name.empty() ? default_shm_name() : name;
-  int best = -1;
+  int best = -1, best_score = -1;
+  bool found_any = false;  // some generation exists, even if unusable
   for (int gen = 0; gen < kShmGenerations; ++gen) {
     SharedMemory probe;
-    if (!probe.open(shm_generation_name(base, gen)) || probe.size() < kShmHeaderBytes) continue;
+    if (!probe.open(shm_generation_name(base, gen))) continue;
+    found_any = true;
+    if (probe.size() < kShmHeaderBytes) continue;
     const auto* h = static_cast<const ShmHeader*>(probe.data());
     if (h->magic != kShmMagic) continue;
+    // Prefer a generation of this driver's layout version, then a live one.
+    const bool match = h->version == kShmVersion;
     const bool live = h->state.load() != kStateStopped && mono_ns() - h->heartbeat_ns.load() < 2000000000LL;
-    if (best < 0) best = gen;
-    if (live) {
+    const int score = (match ? 2 : 0) + (live ? 1 : 0);
+    if (score > best_score) {
       best = gen;
-      break;
+      best_score = score;
     }
+    if (score == 3) break;
   }
   bool ok = best >= 0 && shm_.open(shm_generation_name(base, best));
 #if defined(_WIN32)
   if (!ok && name.empty()) ok = shm_.open(kFallbackShmName);
 #endif
-  if (!ok) return false;
+  if (!ok) {
+    open_error_ = found_any ? "the Virgil soundcard is not initialised (no valid header): restart the Virgil service"
+                            : "Virgil is not running: start the Virgil service, or press Start in Virgil Control "
+                              "if Virgil is stopped (its audio engine may also have failed to start - see Virgil "
+                              "Control)";
+    return false;
+  }
   auto* h = static_cast<ShmHeader*>(shm_.data());
   if (shm_.size() < kShmHeaderBytes) {
     shm_.close();
+    open_error_ = "the Virgil soundcard is too small (truncated shared memory): restart the Virgil service";
     return false;
   }
   // Any local user can write the header: take one copy of the layout and
@@ -62,11 +76,24 @@ bool Client::open(const std::string& name) {
     v.rx_lat = vh->rx_latency_frames;
     v.tx_lead = vh->tx_lead_frames;
   }
-  if (v.magic != kShmMagic || v.version != kShmVersion || v.total_bytes > shm_.size() || v.ring == 0 ||
+  if (v.magic != kShmMagic) {
+    shm_.close();
+    open_error_ = "the Virgil soundcard has no valid header: restart the Virgil service";
+    return false;
+  }
+  if (v.version != kShmVersion) {
+    shm_.close();
+    // Kept under ASIO's 123-character error message limit.
+    open_error_ = "Virgil service and driver versions differ (soundcard layout " + std::to_string(v.version) +
+                  ", driver needs " + std::to_string(kShmVersion) + "): reinstall Virgil, or restart the computer";
+    return false;
+  }
+  if (v.total_bytes > shm_.size() || v.ring == 0 ||
       (v.ring & (v.ring - 1)) != 0 || v.tx > kMaxChannels || v.rx > kMaxChannels ||
       shm_total_bytes(v.ring, v.tx, v.rx) > shm_.size() || v.rate == 0 || v.rate > 384000 || v.period == 0 ||
       v.period >= v.ring / 4 || v.rx_lat >= v.ring / 4 || v.tx_lead >= v.ring / 4) {
     shm_.close();
+    open_error_ = "the Virgil soundcard reports an invalid layout: restart the Virgil service";
     return false;
   }
   hdr_ = h;

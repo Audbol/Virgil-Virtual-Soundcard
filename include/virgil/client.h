@@ -20,6 +20,8 @@ class Client {
 
   // Name defaults to $VIRGIL_SHM_NAME, then kDefaultShmName.
   bool open(const std::string& shm_name = std::string());
+  // Why the last open() failed, in words for the user ("" after a success).
+  const std::string& open_error() const { return open_error_; }
   void close();
   bool is_open() const { return hdr_ != nullptr; }
 
@@ -97,6 +99,7 @@ class Client {
   const float* rx_ = nullptr;
   uint64_t mask_ = 0;
   int slot_ = -1;
+  std::string open_error_;
   uint32_t rate_ = 0, txch_ = 0, rxch_ = 0, ring_ = 0, period_ = 0, rx_lat_ = 0, tx_lead_ = 0;
 };
 

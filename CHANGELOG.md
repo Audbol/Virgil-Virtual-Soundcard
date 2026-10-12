@@ -1,10 +1,15 @@
 # Changelog
 
 ## 0.6.1 (not released yet)
+- Windows: the default transmit latency is 6 ms (was 4 ms): Windows wakes Virgil's sending thread a few milliseconds late now and then, which dropped audio at 4 ms. Existing configurations keep their setting.
+- ASIO: when a host cannot open Virgil ("Error initializing ASIO driver"), the driver's error message says why: Virgil is stopped, the service is not running or not responding, or the service and driver are different versions.
+- ALSA: a playback or capture buffer under 10 ms prints a hint once (raise the app's buffer if you hear dropouts); failures to open say why.
+- macOS: no "mlockall failed" warning in the log (macOS does not support it).
 - Clock: computers with noisy network timestamps (Raspberry Pi, busy PCs) report *locked* to the Dante clock leader within a minute or two instead of staying "free-running" while following it. The clock itself was already in sync; only the lock test was too strict.
 - Dropout diagnostics: audio received while Virgil and the sender were not yet on the same clock (for example in the moments before the leader appears) is no longer counted as hours-late network audio.
 - macOS: Virgil Control's notifications (service stopped, Dante clock lost) use the current notification system, so the banners also appear on recent macOS versions. Virgil Control asks once for permission; clicking a banner opens the window.
 - macOS: with the macOS firewall on, the installer allows incoming connections for virgild (Dante clock and control traffic, which the firewall could block); with it off nothing changes. The uninstaller removes the entry.
+- Dropout diagnostics: audio *to* the network that was dropped because Virgil's sending thread woke up later than the transmit latency (a busy computer) is now counted and explained, with a suggestion for the transmit latency that would have covered it. Starting a new flow no longer logs a misleading "media clock jumped" error, and the first start no longer warns that no saved state could be loaded.
 
 ## 0.6.0
 - **Stop and start Virgil** from Virgil Control (Windows, macOS, Linux), the tray / menu bar menu and the browser panel. Stopped, Virgil leaves the network completely (no Dante device, no network ports in use) and stays stopped across restarts until you start it again; the service keeps running so the controls keep working.

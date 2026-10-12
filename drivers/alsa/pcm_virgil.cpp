@@ -44,6 +44,7 @@ struct VirgilPcm {
   std::vector<float> prefill;  // playback data written before start()
   uint32_t prefill_ch = 0;     // device channel count `prefill` is laid out for
   std::vector<float> scratch;  // one frame, device channel count
+  bool small_buffer_hinted = false;  // hint at most once per open
 };
 
 // (Re)attach to virgild. `wait_ms` rides out an engine restart (settings applied
@@ -316,9 +317,29 @@ uint32_t max_buffer_frames(const virgil::Client& c) {
   return m > 64 ? uint32_t(std::min<int64_t>(m, 1 << 20)) : 64;
 }
 
+// A buffer under ~10 ms, or a period under two Virgil ticks, leaves little
+// slack for the application's scheduling (on a Raspberry Pi it regularly
+// misses its deadline by 8-38 ms). Only a hint: such buffers do work on a
+// quiet machine.
+void hint_small_buffer(VirgilPcm* p) {
+  const snd_pcm_ioplug_t* io = &p->io;
+  if (p->small_buffer_hinted || io->rate == 0) return;
+  const uint64_t min_buffer = uint64_t(io->rate) / 100;  // 10 ms
+  const uint64_t tick = p->client.period_frames();
+  if (io->buffer_size >= min_buffer && io->period_size >= 2 * tick) return;
+  p->small_buffer_hinted = true;
+  SNDERR("virgil: %s buffer of %.1f ms (period %.1f ms, Virgil tick %.1f ms) is small; if you hear "
+         "dropouts raise the app's buffer (>= 10 ms on a Raspberry Pi)",
+         io->stream == SND_PCM_STREAM_PLAYBACK ? "playback" : "capture",
+         1000.0 * double(io->buffer_size) / io->rate, 1000.0 * double(io->period_size) / io->rate,
+         1000.0 * double(tick) / io->rate);
+}
+
 int virgil_hw_params(snd_pcm_ioplug_t* io, snd_pcm_hw_params_t*) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
-  return io->buffer_size <= max_buffer_frames(p->client) ? 0 : -EINVAL;
+  if (io->buffer_size > max_buffer_frames(p->client)) return -EINVAL;
+  hint_small_buffer(p);
+  return 0;
 }
 
 int virgil_poll_descriptors_count(snd_pcm_ioplug_t*) { return 1; }
@@ -462,7 +483,15 @@ SND_PCM_PLUGIN_DEFINE_FUNC(virgil) {
   // stream must be known before ensure_client decides on a tx slot.
   p->io.stream = stream;
   if (!ensure_client(p)) {
-    SNDERR("virgil: daemon not running (start virgild) or no free playback slot");
+    if (!p->client.is_open())
+      SNDERR("virgil: %s", p->client.open_error().empty() ? "daemon not running (start virgild)"
+                                                          : p->client.open_error().c_str());
+    else if (!p->client.daemon_alive())
+      SNDERR("virgil: %s", p->client.header()->state.load() == virgil::kStateStopped
+                               ? "Virgil is stopped: press Start in Virgil Control"
+                               : "the Virgil daemon is not responding: restart virgild");
+    else
+      SNDERR("virgil: no free playback slot (all Virgil playback slots are in use)");
     close(p->timer_fd);
     delete p;
     return -ENODEV;

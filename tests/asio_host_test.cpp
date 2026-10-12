@@ -7,6 +7,7 @@
 #include <cstdint>
 #include <cstdlib>
 #include <cstdio>
+#include <cstring>
 #include <vector>
 
 #include "asiosys.h"
@@ -56,8 +57,13 @@ int main(int argc, char** argv) {
   if (f->CreateInstance(nullptr, kClsid, reinterpret_cast<void**>(&a)) != S_OK)
     return std::printf("CreateInstance failed\n"), 1;
   if (!a->init(nullptr)) {
-    char msg[128];
+    // The ASIO spec's buffer is 124 bytes; the guard bytes catch an overrun.
+    char msg[124 + 8];
+    std::memset(msg, 0x5A, sizeof msg);
     a->getErrorMessage(msg);
+    for (size_t i = 124; i < sizeof msg; ++i)
+      if (msg[i] != 0x5A) return std::printf("getErrorMessage wrote past 124 bytes\n"), 1;
+    if (!std::memchr(msg, 0, 124)) return std::printf("getErrorMessage not terminated\n"), 1;
     return std::printf("init failed: %s\n", msg), 1;
   }
   long ni, no, mn, mx, pref, gran, li, lo;
