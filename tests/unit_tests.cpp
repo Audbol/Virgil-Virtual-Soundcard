@@ -41,6 +41,24 @@ TEST(l16_roundtrip) {
   }
 }
 
+TEST(s32_conversions) {
+  // Clamping, truncation and NaN of the driver / Dante ring format.
+  CHECK(float_to_s32(0.f) == 0);
+  CHECK(float_to_s32(0.5f) == (1 << 30));
+  CHECK(float_to_s32(-1.f) == int32_t(-2147483647 - 1));
+  CHECK(float_to_s32(1.f) == 2147483647);
+  CHECK(float_to_s32(3.f) == 2147483647 && float_to_s32(-3.f) == int32_t(-2147483647 - 1));
+  CHECK(float_to_s32(INFINITY) == 2147483647 && float_to_s32(-INFINITY) == int32_t(-2147483647 - 1));
+  CHECK(float_to_s32(NAN) == 0);
+  CHECK(float_to_s32(std::nextafter(1.f, 0.f)) == 2147483520);  // 2^31 - 128: largest below full scale
+  CHECK(float_to_s32(-1e-9f) == -2);                             // truncates toward zero
+  CHECK(s32_to_float(int32_t(-2147483647 - 1)) == -1.f);
+  CHECK(s32_to_float(1 << 30) == 0.5f);
+  CHECK(s32_to_float(2147483647) == 1.f);  // rounds to the nearest float
+  for (int32_t v : {1, -1, 12345678, -87654321, 1 << 24})
+    CHECK(s32_to_float(v) == float(double(v) / 2147483648.0));
+}
+
 TEST(media_clock_conversion) {
   const uint32_t rate = 48000;
   CHECK(ptp_ns_to_frames(1000000000LL, rate) == 48000);

@@ -28,6 +28,24 @@ inline void peak_max(std::atomic<uint32_t>& a, float v) {
   }
 }
 
+// Silence n frames (ch samples each) of a power-of-two ring from frame
+// `first`: one or two contiguous spans instead of a memset per frame.
+template <class T>
+inline void zero_frames(T* ring, uint64_t mask, uint32_t ch, uint64_t first, uint32_t n) {
+  const uint64_t a = first & mask;
+  const uint64_t n1 = std::min<uint64_t>(n, mask + 1 - a);
+  std::memset(ring + a * ch, 0, size_t(n1) * ch * sizeof(T));
+  if (n1 < n) std::memset(ring, 0, size_t(n - n1) * ch * sizeof(T));
+}
+
+// Mix a contiguous span of a client ring and consume it, in one pass.
+inline void mix_and_clear(float* dst, float* src, size_t n) {
+  for (size_t i = 0; i < n; ++i) {
+    dst[i] += src[i];
+    src[i] = 0.f;
+  }
+}
+
 extern "C" int64_t bridge_mono_ns() { return mono_ns(); }
 
 // The running engine, for the rename callback (one engine at a time).
@@ -427,22 +445,19 @@ void Engine::tick_loop() {
         if (active) {
           const uint64_t w = s.written_until.load(std::memory_order_acquire);
           if (w != 0 && w < start + P) underrun_ticks_[i].fetch_add(1, std::memory_order_relaxed);
-        }
-        for (uint32_t f = 0; f < P; ++f) {
-          float* src = cring + size_t((start + f) & mask) * txch;
-          if (active) {
-            float* dst = mix_.data() + size_t(f) * txch;
-            for (uint32_t c = 0; c < txch; ++c) dst[c] += src[c];
-          }
-          std::memset(src, 0, sizeof(float) * txch);  // consumed
+          // [start, start + P) is contiguous in the ring but for one wrap.
+          const uint64_t a = start & mask;
+          const uint32_t n1 = uint32_t(std::min<uint64_t>(P, ring - a));
+          mix_and_clear(mix_.data(), cring + a * txch, size_t(n1) * txch);
+          if (n1 < P) mix_and_clear(mix_.data() + size_t(n1) * txch, cring, size_t(P - n1) * txch);
+        } else {
+          zero_frames(cring, mask, txch, start, P);  // consumed
         }
         // A driver that was preempted past a tick may still write frames
         // that tick already mixed; they would play one ring later. Silence
         // the slots a quarter ring behind (well past any late write, well
         // before the next lap and beyond how far ahead drivers write).
-        const uint64_t z = start + ring - ring / 4;
-        for (uint32_t f = 0; f < P; ++f)
-          std::memset(cring + size_t((z + f) & mask) * txch, 0, sizeof(float) * txch);
+        zero_frames(cring, mask, txch, start + ring - ring / 4, P);
       }
       float peaks[kMaxChannels] = {};
       for (uint32_t f = 0; f < P; ++f) {
@@ -473,17 +488,13 @@ void Engine::tick_loop() {
       for (uint32_t c = 0; c < rxch; ++c)
         if (peaks[c] > 0) peak_max(rx_peak_[c], peaks[c]);
       // Silence the capture slot half a ring ahead (== half a ring behind).
-      const uint64_t z = next + ring / 2 - P;
-      for (uint32_t f = 0; f < P; ++f)
-        std::memset(rx + size_t((z + f) & mask) * rxch, 0, sizeof(float) * rxch);
+      zero_frames(rx, mask, rxch, next + ring / 2 - P, P);
     }
     if (txch) {
       // Inferno reads the transmit ring by media time and never clears it:
       // silence the slots half a ring ahead, so a stalled tick sends
       // silence, not audio from a ring ago.
-      const uint64_t z = next + dring_ / 2 - P;
-      for (uint32_t f = 0; f < P; ++f)
-        std::memset(dtx_.data() + size_t((z + f) & dmask) * txch, 0, sizeof(int32_t) * txch);
+      zero_frames(dtx_.data(), dmask, txch, next + dring_ / 2 - P, P);
     }
 
     next += P;

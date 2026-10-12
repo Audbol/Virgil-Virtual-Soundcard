@@ -38,14 +38,17 @@ inline float l16_to_float(const uint8_t* in) {
 }
 
 // Driver-side helpers (host-endian integers).
+// In float, not double: scaling by 2^31 is exact either way and the largest
+// float below 2^31 is 2^31 - 128, so results are bit-identical to the double
+// version for every input, at 2-4x the speed (twice the samples per vector).
 inline int32_t float_to_s32(float x) {
-  double s = double(x) * 2147483648.0;
+  const float s = x * 2147483648.0f;
   if (!(s == s)) return 0;  // NaN: silence (int32_t(NaN) is undefined, -2^31 on x86)
-  if (s >= 2147483647.0) return 2147483647;
-  if (s <= -2147483648.0) return int32_t(-2147483647 - 1);
+  if (s >= 2147483648.0f) return 2147483647;
+  if (s <= -2147483648.0f) return int32_t(-2147483647 - 1);
   return int32_t(s);
 }
-inline float s32_to_float(int32_t v) { return float(double(v) * (1.0 / 2147483648.0)); }
+inline float s32_to_float(int32_t v) { return float(v) * (1.0f / 2147483648.0f); }
 inline int16_t float_to_s16(float x) { return int16_t(float_to_int(x, 1 << 15)); }
 inline float s16_to_float(int16_t v) { return float(v) * (1.0f / 32768.0f); }
 
