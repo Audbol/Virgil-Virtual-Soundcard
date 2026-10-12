@@ -25,6 +25,8 @@
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <sstream>
 #include <string>
@@ -42,21 +44,29 @@
 namespace {
 
 // ---- state -------------------------------------------------------------------------------
+// Everything here is touched on the GTK main thread only, except g_latest
+// (g_mutex), the atomics and g_port (set before the poll thread starts).
 
 unsigned g_port = 8480;
 GtkApplication* g_app;
-GtkWidget* g_window;
-GtkWidget* g_area;
+GtkWidget* g_window;  // null once destroyed
+GtkWidget* g_area;    // null once destroyed
+GtkWidget* g_log_button;  // "Show log" over the offline view
 vc::StatusView g_view;
 std::mutex g_mutex;
 vc::Status g_latest;  // guarded by g_mutex
 std::atomic<bool> g_visible{false};
 std::atomic<bool> g_quit{false};
+bool g_started = false;
 bool g_have_tray = false;
 bool g_start_hidden = false;
 GdkPixbuf* g_logo;
 GtkWidget* g_autostart_item;
+GtkWidget* g_settings_item;
+GtkWidget* g_restart_item;
 GtkWidget* g_run_item;  // Stop Virgil / Start Virgil
+GtkWidget* g_context_menu;
+int g_busy = 0;  // service requests in flight (controls are disabled meanwhile)
 
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -80,38 +90,86 @@ bool exists(const std::string& p) {
 }
 bool portable() { return exe_dir().rfind("/usr/", 0) != 0 && exists(exe_dir() + "/virgild"); }
 
-// Run a command without a shell; returns its exit status (or -1).
-int run(const std::vector<std::string>& argv) {
-  const pid_t pid = fork();
-  if (pid < 0) return -1;
-  if (pid == 0) {
-    std::vector<char*> a;
-    for (const auto& s : argv) a.push_back(const_cast<char*>(s.c_str()));
-    a.push_back(nullptr);
-    execvp(a[0], a.data());
-    _exit(127);
-  }
+// Child processes go through g_spawn (no allocation between fork and exec,
+// which matters with the poll thread running).
+std::vector<char*> c_argv(const std::vector<std::string>& argv) {
+  std::vector<char*> a;
+  for (const auto& s : argv) a.push_back(const_cast<char*>(s.c_str()));
+  a.push_back(nullptr);
+  return a;
+}
+
+// Run a command without a shell; returns its exit status (or -1). `out`, if
+// given, gets its output (stdout, then stderr).
+int run(const std::vector<std::string>& argv, std::string* out = nullptr) {
+  std::vector<char*> a = c_argv(argv);
+  gchar *so = nullptr, *se = nullptr;
   int st = 0;
-  waitpid(pid, &st, 0);
+  GError* err = nullptr;
+  const GSpawnFlags flags = GSpawnFlags(G_SPAWN_SEARCH_PATH | (out ? 0 : G_SPAWN_STDOUT_TO_DEV_NULL));
+  if (!g_spawn_sync(nullptr, a.data(), nullptr, flags, nullptr, nullptr, out ? &so : nullptr, out ? &se : nullptr,
+                    &st, &err)) {
+    if (out) *out = err->message;
+    g_error_free(err);
+    return -1;
+  }
+  if (out) *out = std::string(so ? so : "") + (se ? se : "");
+  g_free(so);
+  g_free(se);
   return WIFEXITED(st) ? WEXITSTATUS(st) : -1;
 }
+// Start a program in its own session and forget about it (GLib reaps it).
 void spawn_detached(const std::vector<std::string>& argv) {
-  const pid_t pid = fork();
-  if (pid == 0) {
-    setsid();
-    if (fork() != 0) _exit(0);
-    std::vector<char*> a;
-    for (const auto& s : argv) a.push_back(const_cast<char*>(s.c_str()));
-    a.push_back(nullptr);
-    execvp(a[0], a.data());
-    _exit(127);
+  std::vector<char*> a = c_argv(argv);
+  GError* err = nullptr;
+  if (!g_spawn_async(nullptr, a.data(), nullptr, G_SPAWN_SEARCH_PATH, +[](gpointer) { setsid(); }, nullptr, nullptr,
+                     &err)) {
+    g_warning("cannot start %s: %s", a[0], err->message);
+    g_error_free(err);
   }
-  if (pid > 0) waitpid(pid, nullptr, 0);
+}
+
+// Run `work` on a worker thread and `done(result)` back on the GTK main thread.
+template <class R>
+void run_async(std::function<R()> work, std::function<void(const R&)> done) {
+  std::thread([work = std::move(work), done = std::move(done)]() {
+    auto* cb = new std::function<void()>([r = work(), done]() { done(r); });
+    g_idle_add(
+        +[](gpointer p) -> gboolean {
+          auto* f = static_cast<std::function<void()>*>(p);
+          (*f)();
+          delete f;
+          return G_SOURCE_REMOVE;
+        },
+        cb);
+  }).detach();
+}
+
+void update_controls();
+// A user action that talks to the service: false (do nothing) while another is pending.
+bool begin_action() {
+  if (g_busy) return false;
+  ++g_busy;
+  update_controls();
+  return true;
+}
+void end_action() {
+  if (g_busy) --g_busy;
+  update_controls();
+}
+
+void quit_app() {
+  g_quit = true;
+  g_application_quit(G_APPLICATION(g_app));
+}
+
+GtkWindow* parent_window() {
+  return g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr;
 }
 
 void message(GtkMessageType type, const std::string& text) {
-  GtkWidget* d = gtk_message_dialog_new(g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr,
-                                        GTK_DIALOG_MODAL, type, GTK_BUTTONS_OK, "%s", text.c_str());
+  GtkWidget* d =
+      gtk_message_dialog_new(parent_window(), GTK_DIALOG_MODAL, type, GTK_BUTTONS_OK, "%s", text.c_str());
   gtk_window_set_title(GTK_WINDOW(d), "Virgil");
   gtk_dialog_run(GTK_DIALOG(d));
   gtk_widget_destroy(d);
@@ -128,7 +186,7 @@ void notify(const std::string& title, const std::string& body) {
 
 class CairoCanvas : public vc::Canvas {
  public:
-  explicit CairoCanvas(cairo_t* cr) : cr_(cr) {}
+  CairoCanvas(cairo_t* cr, int scale) : cr_(cr), scale_(scale < 1 ? 1 : scale) {}
 
   void fill(const vc::Rect& r, unsigned c, float a) override {
     set(c, a);
@@ -186,13 +244,22 @@ class CairoCanvas : public vc::Canvas {
     return float(w);
   }
   void logo(const vc::Rect& r) override {
+    // Scaled once per size and device scale (sharp on HiDPI), not every frame.
+    static cairo_surface_t* cached;
+    static int cw, ch, cs;
     if (!g_logo) return;
     const int w = int(r.r - r.l), h = int(r.b - r.t);
-    GdkPixbuf* s = gdk_pixbuf_scale_simple(g_logo, w, h, GDK_INTERP_BILINEAR);
-    if (!s) return;
-    gdk_cairo_set_source_pixbuf(cr_, s, r.l, r.t);
+    if (w <= 0 || h <= 0) return;
+    if (!cached || cw != w || ch != h || cs != scale_) {
+      GdkPixbuf* s = gdk_pixbuf_scale_simple(g_logo, w * scale_, h * scale_, GDK_INTERP_HYPER);
+      if (!s) return;
+      if (cached) cairo_surface_destroy(cached);
+      cached = gdk_cairo_surface_create_from_pixbuf(s, scale_, nullptr);
+      g_object_unref(s);
+      cw = w, ch = h, cs = scale_;
+    }
+    cairo_set_source_surface(cr_, cached, r.l, r.t);
     cairo_paint(cr_);
-    g_object_unref(s);
   }
 
  private:
@@ -225,29 +292,30 @@ class CairoCanvas : public vc::Canvas {
     return l;
   }
   cairo_t* cr_;
+  int scale_;
 };
 
 // ---- window ------------------------------------------------------------------------------
 
 void resize_to_view() {
-  if (!g_window) return;
+  if (!g_window || !g_area) return;
   const int w = int(g_view.width()), h = int(g_view.height());
   gtk_widget_set_size_request(g_area, w, h);
   gtk_window_resize(GTK_WINDOW(g_window), w, h);
 }
 
 gboolean on_draw(GtkWidget* w, cairo_t* cr, gpointer) {
-  CairoCanvas c(cr);
+  CairoCanvas c(cr, gtk_widget_get_scale_factor(w));
   g_view.paint(c, float(gtk_widget_get_allocated_width(w)), float(gtk_widget_get_allocated_height(w)));
   return TRUE;
 }
 
 void set_cursor() {
+  if (!g_area) return;
   GdkWindow* win = gtk_widget_get_window(g_area);
   if (!win) return;
-  GdkCursor* cur = g_view.over_button()
-                       ? gdk_cursor_new_from_name(gdk_window_get_display(win), "pointer")
-                       : nullptr;
+  const char* name = g_busy ? "progress" : g_view.over_button() ? "pointer" : nullptr;
+  GdkCursor* cur = name ? gdk_cursor_new_from_name(gdk_window_get_display(win), name) : nullptr;
   gdk_window_set_cursor(win, cur);
   if (cur) g_object_unref(cur);
 }
@@ -258,6 +326,7 @@ void start_service();
 void open_diagnostics();
 void stop_virgil();
 void start_virgil();
+void show_log();
 
 gboolean on_motion(GtkWidget*, GdkEventMotion* e, gpointer) {
   if (g_view.hover(float(e->x), float(e->y))) {
@@ -266,7 +335,19 @@ gboolean on_motion(GtkWidget*, GdkEventMotion* e, gpointer) {
   }
   return TRUE;
 }
+gboolean on_leave(GtkWidget*, GdkEventCrossing*, gpointer) {
+  if (g_view.hover(-1e6f, -1e6f)) {
+    set_cursor();
+    gtk_widget_queue_draw(g_area);
+  }
+  return FALSE;
+}
 gboolean on_press(GtkWidget*, GdkEventButton* e, gpointer) {
+  if (e->type != GDK_BUTTON_PRESS) return TRUE;
+  if (e->button == 3 && g_context_menu) {
+    gtk_menu_popup_at_pointer(GTK_MENU(g_context_menu), reinterpret_cast<GdkEvent*>(e));
+    return TRUE;
+  }
   if (e->button == 1 && g_view.press(float(e->x), float(e->y))) gtk_widget_queue_draw(g_area);
   return TRUE;
 }
@@ -284,17 +365,28 @@ gboolean on_release(GtkWidget*, GdkEventButton* e, gpointer) {
 }
 
 gboolean on_delete(GtkWidget* w, GdkEvent*, gpointer) {
-  if (!g_have_tray) return FALSE;  // no tray: closing quits
+  if (!g_have_tray) {  // no tray to bring it back from: closing quits
+    quit_app();
+    return TRUE;
+  }
   gtk_widget_hide(w);
   g_visible = false;
   return TRUE;
 }
 
+void on_destroy(GtkWidget*, gpointer) {
+  g_window = g_area = g_log_button = nullptr;
+  g_visible = false;
+}
+
+void build_window();
 void show_window() {
+  if (!g_window) build_window();
   resize_to_view();
   gtk_widget_show_all(g_window);
   gtk_window_present(GTK_WINDOW(g_window));
   g_visible = true;
+  update_controls();
 }
 
 GdkPixbuf* load_logo() {
@@ -321,11 +413,43 @@ void build_window() {
                                     GDK_LEAVE_NOTIFY_MASK);
   g_signal_connect(g_area, "draw", G_CALLBACK(on_draw), nullptr);
   g_signal_connect(g_area, "motion-notify-event", G_CALLBACK(on_motion), nullptr);
+  g_signal_connect(g_area, "leave-notify-event", G_CALLBACK(on_leave), nullptr);
   g_signal_connect(g_area, "button-press-event", G_CALLBACK(on_press), nullptr);
   g_signal_connect(g_area, "button-release-event", G_CALLBACK(on_release), nullptr);
   g_signal_connect(g_window, "delete-event", G_CALLBACK(on_delete), nullptr);
-  gtk_container_add(GTK_CONTAINER(g_window), g_area);
+  g_signal_connect(g_window, "destroy", G_CALLBACK(on_destroy), nullptr);
+  // The offline view says "check the log": a button for it, below "Start service".
+  GtkWidget* overlay = gtk_overlay_new();
+  gtk_container_add(GTK_CONTAINER(overlay), g_area);
+  // Drawn in the view's own colours: the window is dark whatever the GTK theme.
+  g_log_button = gtk_button_new();
+  GtkWidget* log_label = gtk_label_new(nullptr);
+  gtk_label_set_markup(GTK_LABEL(log_label), "<span foreground='#8C9097' underline='single'>Show log</span>");
+  gtk_container_add(GTK_CONTAINER(g_log_button), log_label);
+  gtk_widget_show(log_label);
+  gtk_button_set_relief(GTK_BUTTON(g_log_button), GTK_RELIEF_NONE);
+  gtk_widget_set_halign(g_log_button, GTK_ALIGN_CENTER);
+  gtk_widget_set_valign(g_log_button, GTK_ALIGN_START);
+  gtk_widget_set_margin_top(g_log_button, 76 + 182);  // view: header + below the Start service button
+  gtk_widget_set_no_show_all(g_log_button, TRUE);
+  g_signal_connect(g_log_button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) { show_log(); }), nullptr);
+  gtk_overlay_add_overlay(GTK_OVERLAY(overlay), g_log_button);
+  gtk_container_add(GTK_CONTAINER(g_window), overlay);
   resize_to_view();
+}
+
+// Menu items, the cursor and the log button follow the status and pending requests.
+void update_controls() {
+  const vc::Status& s = g_view.status();
+  const bool idle = g_busy == 0;
+  if (g_run_item) {
+    gtk_menu_item_set_label(GTK_MENU_ITEM(g_run_item), s.state == "stopped" ? "Start Virgil" : "Stop Virgil");
+    gtk_widget_set_sensitive(g_run_item, s.reachable && idle);
+  }
+  if (g_restart_item) gtk_widget_set_sensitive(g_restart_item, s.reachable && s.state != "stopped" && idle);
+  if (g_settings_item) gtk_widget_set_sensitive(g_settings_item, idle);
+  if (g_log_button) gtk_widget_set_visible(g_log_button, !s.reachable);
+  set_cursor();
 }
 
 // ---- polling -----------------------------------------------------------------------------
@@ -340,25 +464,32 @@ gboolean apply_status(gpointer data) {
   const unsigned old_tx = g_view.status().tx, old_rx = g_view.status().rx;
   g_view.update(s, now_ms());
   if (s.tx != old_tx || s.rx != old_rx) resize_to_view();
-  if (g_visible) gtk_widget_queue_draw(g_area);
-  if (g_run_item) {
-    gtk_menu_item_set_label(GTK_MENU_ITEM(g_run_item), s.state == "stopped" ? "Start Virgil" : "Stop Virgil");
-    gtk_widget_set_sensitive(g_run_item, s.reachable);
-  }
+  if (g_visible && g_area) gtk_widget_queue_draw(g_area);
+  update_controls();
   if (event == 1) notify("Virgil service stopped", "Audio to and from the Dante network has stopped.");
   if (event == 2) notify("Dante clock lost", "Virgil is running on its own clock; check the network connection.");
   return G_SOURCE_REMOVE;
 }
 
 void poll_thread() {
-  bool was_reachable = true;
+  // Starts false: no "stopped" notification when the service is not up yet at login.
+  bool was_reachable = false;
+  int failures = 0;  // consecutive failed polls
   std::string was_clock;
   uint64_t lost_since = 0;
   bool lost_told = false;
   while (!g_quit) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
-    if (r.status != 200 || !vc::parse_status(r.body, &s)) s = vc::Status();
+    const bool ok = r.status == 200 && vc::parse_status(r.body, &s);
+    failures = ok ? 0 : failures + 1;
+    // One missed poll (a busy daemon, a restart of the engine) is not "not running":
+    // keep showing the last status until three in a row fail.
+    if (!ok && was_reachable && failures < 3) {
+      std::this_thread::sleep_for(std::chrono::milliseconds(g_visible ? 80 : 1000));
+      continue;
+    }
+    if (!ok) s = vc::Status();
     {
       std::lock_guard<std::mutex> l(g_mutex);
       g_latest = s;
@@ -382,11 +513,23 @@ void poll_thread() {
 }
 
 // ---- actions -----------------------------------------------------------------------------
+// Requests to the service run on a worker thread so the window keeps drawing.
+
+void post_async(const char* path, const char* failure) {
+  if (!begin_action()) return;
+  const unsigned port = g_port;
+  const std::string p = path, msg = failure;
+  run_async<int>([port, p] { return vc::http(port, "POST", p).status; },
+                 [msg](const int& status) {
+                   end_action();
+                   if (status != 200) message(GTK_MESSAGE_WARNING, msg);
+                 });
+}
 
 void stop_virgil() {
-  GtkWidget* d = gtk_message_dialog_new(
-      g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr, GTK_DIALOG_MODAL,
-      GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE, "Stop Virgil?");
+  if (g_busy) return;
+  GtkWidget* d = gtk_message_dialog_new(parent_window(), GTK_DIALOG_MODAL, GTK_MESSAGE_QUESTION, GTK_BUTTONS_NONE,
+                                        "Stop Virgil?");
   gtk_message_dialog_format_secondary_text(
       GTK_MESSAGE_DIALOG(d),
       "Audio to and from the Dante network stops, Virgil leaves the network and apps cannot use its "
@@ -396,14 +539,10 @@ void stop_virgil() {
   const int r = gtk_dialog_run(GTK_DIALOG(d));
   gtk_widget_destroy(d);
   if (r != GTK_RESPONSE_ACCEPT) return;
-  if (vc::http(g_port, "POST", "/api/stop").status != 200)
-    message(GTK_MESSAGE_WARNING, "The Virgil service is not running.");
+  post_async("/api/stop", "The Virgil service is not running.");
 }
 
-void start_virgil() {
-  if (vc::http(g_port, "POST", "/api/start").status != 200)
-    message(GTK_MESSAGE_WARNING, "The Virgil service is not running.");
-}
+void start_virgil() { post_async("/api/start", "The Virgil service is not running."); }
 
 void toggle_running() {
   if (g_view.status().state == "stopped") start_virgil();
@@ -411,8 +550,7 @@ void toggle_running() {
 }
 
 void restart_engine() {
-  if (vc::http(g_port, "POST", "/api/restart").status != 200)
-    message(GTK_MESSAGE_WARNING, "The Virgil service is not running, so the audio engine cannot be restarted.");
+  post_async("/api/restart", "The Virgil service is not running, so the audio engine cannot be restarted.");
 }
 
 void start_service() {
@@ -424,22 +562,17 @@ void start_service() {
     spawn_detached(argv);
     return;
   }
-  // Installed: the systemd service. pkexec asks for the password graphically.
-  if (run({"pkexec", "systemctl", "start", "virgild"}) != 0)
-    message(GTK_MESSAGE_WARNING,
-            "Could not start the Virgil service.\n\nIn a terminal: sudo systemctl start virgild\n"
-            "and see why with: journalctl -u virgild -n 50");
-}
-
-std::string read_command(const std::string& cmd) {
-  std::string out;
-  if (FILE* p = popen(cmd.c_str(), "r")) {
-    char buf[4096];
-    size_t n;
-    while ((n = fread(buf, 1, sizeof buf, p)) > 0) out.append(buf, n);
-    pclose(p);
-  }
-  return out;
+  // Installed: the systemd service. pkexec asks for the password graphically
+  // (and can take a while), so it runs off the main thread.
+  if (!begin_action()) return;
+  run_async<int>([] { return run({"pkexec", "systemctl", "start", "virgild"}); },
+                 [](const int& rc) {
+                   end_action();
+                   if (rc != 0)
+                     message(GTK_MESSAGE_WARNING,
+                             "Could not start the Virgil service.\n\nIn a terminal: sudo systemctl start virgild\n"
+                             "and see why with: journalctl -u virgild -n 50");
+                 });
 }
 
 void show_log() {
@@ -451,18 +584,22 @@ void show_log() {
     text = ss.str();
     if (text.size() > 200000) text = text.substr(text.size() - 200000);
   } else {
-    text = read_command("journalctl -u virgild -n 400 --no-pager 2>&1");
+    run({"journalctl", "-u", "virgild", "-n", "400", "--no-pager"}, &text);
   }
   if (text.empty()) text = "No log available. In a terminal: journalctl -u virgild -n 100";
-  GtkWidget* d = gtk_dialog_new_with_buttons("Virgil log", g_window && gtk_widget_get_visible(g_window)
-                                                               ? GTK_WINDOW(g_window) : nullptr,
-                                             GTK_DIALOG_DESTROY_WITH_PARENT, "_Close", GTK_RESPONSE_CLOSE, nullptr);
+  GtkWidget* d = gtk_dialog_new_with_buttons("Virgil log", parent_window(), GTK_DIALOG_DESTROY_WITH_PARENT,
+                                             "_Close", GTK_RESPONSE_CLOSE, nullptr);
   gtk_window_set_default_size(GTK_WINDOW(d), 860, 520);
   GtkWidget* sw = gtk_scrolled_window_new(nullptr, nullptr);
   GtkWidget* tv = gtk_text_view_new();
   gtk_text_view_set_editable(GTK_TEXT_VIEW(tv), FALSE);
   gtk_text_view_set_monospace(GTK_TEXT_VIEW(tv), TRUE);
   GtkTextBuffer* buf = gtk_text_view_get_buffer(GTK_TEXT_VIEW(tv));
+  if (!g_utf8_validate(text.c_str(), gssize(text.size()), nullptr)) {
+    gchar* v = g_utf8_make_valid(text.c_str(), gssize(text.size()));
+    text = v;
+    g_free(v);
+  }
   gtk_text_buffer_set_text(buf, text.c_str(), -1);
   gtk_container_add(GTK_CONTAINER(sw), tv);
   gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), sw, TRUE, TRUE, 0);
@@ -521,7 +658,7 @@ bool autostart_enabled() {
 }
 void set_autostart(bool on) {
   const std::string u = user_autostart();
-  run({"mkdir", "-p", u.substr(0, u.find_last_of('/'))});
+  g_mkdir_with_parents(u.substr(0, u.find_last_of('/')).c_str(), 0755);
   std::ofstream f(u, std::ios::trunc);
   f << "[Desktop Entry]\nType=Application\nName=Virgil Control\nIcon=virgil\n"
     << "Exec=\"" << exe_path() << "\" --tray\nX-GNOME-Autostart-enabled=" << (on ? "true" : "false")
@@ -538,19 +675,80 @@ GtkWidget* label(const char* text) {
 
 constexpr int kResponseNames = 1;
 
-void show_settings() {
-  const auto c = vc::http(g_port, "GET", "/api/config");
-  if (c.status != 200) {
-    message(GTK_MESSAGE_INFO, "The Virgil service is not running, so its settings cannot be changed now.");
+// The open settings dialog (one at a time). Shared with an Apply in flight,
+// which may finish after the dialog was closed.
+struct SettingsUi {
+  GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *err;
+  vc::SettingsForm f;
+  std::string conf;
+  bool applying = false;
+};
+std::shared_ptr<SettingsUi> g_settings;
+
+void settings_buttons(SettingsUi& ui, bool on) {
+  for (int r : {kResponseNames, int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
+    gtk_dialog_set_response_sensitive(GTK_DIALOG(ui.d), r, on);
+}
+
+void on_settings_response(GtkDialog*, int response, gpointer) {
+  const std::shared_ptr<SettingsUi> ui = g_settings;
+  if (!ui || !ui->d || ui->applying) return;  // closing waits for Apply to finish
+  if (response != GTK_RESPONSE_APPLY) {
+    gtk_widget_destroy(ui->d);
+    if (response == kResponseNames) open_channel_names();
     return;
   }
-  const auto ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
-  vc::SettingsForm f = vc::load_settings(c.body, ifs);
+  vc::SettingsForm& f = ui->f;
+  // Take a number typed but not yet committed (Enter pressed in the field).
+  gtk_spin_button_update(GTK_SPIN_BUTTON(ui->txch));
+  gtk_spin_button_update(GTK_SPIN_BUTTON(ui->rxch));
+  f.name = gtk_entry_get_text(GTK_ENTRY(ui->name));
+  f.iface_index = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->iface));
+  f.rate_index = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->rate));
+  f.tx_channels = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(ui->txch)));
+  f.rx_channels = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(ui->rxch)));
+  f.rx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui->rxl))));
+  f.tx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui->txl))));
+  f.local_clock = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->clock)) == 1;
+  f.master_capable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->master));
+  gtk_label_set_text(GTK_LABEL(ui->err), "Applying…");
+  ui->applying = true;
+  settings_buttons(*ui, false);
+  ++g_busy;
+  update_controls();
+  const unsigned port = g_port;
+  const std::string conf = vc::apply_settings(ui->conf, f);
+  using Result = std::pair<bool, std::string>;
+  run_async<Result>(
+      [port, conf] {
+        std::string e;
+        const bool ok = vc::save_settings(port, conf, &e);
+        return Result(ok, e);
+      },
+      [ui](const Result& r) {
+        end_action();
+        ui->applying = false;
+        if (!ui->d) return;
+        if (r.first) {
+          gtk_widget_destroy(ui->d);
+          return;
+        }
+        settings_buttons(*ui, true);
+        char* m = g_markup_printf_escaped("<span foreground='#D2553F'>%s</span>", r.second.c_str());
+        gtk_label_set_markup(GTK_LABEL(ui->err), m);
+        g_free(m);
+      });
+}
 
-  GtkWidget* d = gtk_dialog_new_with_buttons(
-      "Virgil Settings", g_window && gtk_widget_get_visible(g_window) ? GTK_WINDOW(g_window) : nullptr,
-      GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT), "Channel _names…", kResponseNames,
-      "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
+void build_settings(const std::string& conf, const std::vector<vc::Interface>& ifs) {
+  auto ui = std::make_shared<SettingsUi>();
+  ui->conf = conf;
+  ui->f = vc::load_settings(conf, ifs);
+  const vc::SettingsForm& f = ui->f;
+
+  GtkWidget* d = ui->d = gtk_dialog_new_with_buttons(
+      "Virgil Settings", parent_window(), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
+      "Channel _names…", kResponseNames, "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
   gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_APPLY);
   GtkWidget* grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
@@ -568,28 +766,29 @@ void show_settings() {
   };
 
   heading("Device");
-  GtkWidget* name = gtk_entry_new();
+  GtkWidget* name = ui->name = gtk_entry_new();
   gtk_entry_set_max_length(GTK_ENTRY(name), 31);
   gtk_entry_set_text(GTK_ENTRY(name), f.name.c_str());
   gtk_entry_set_activates_default(GTK_ENTRY(name), TRUE);
   gtk_grid_attach(GTK_GRID(grid), label("Name in Dante Controller:"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), name, 1, row++, 1, 1);
 
-  GtkWidget* iface = gtk_combo_box_text_new();
+  GtkWidget* iface = ui->iface = gtk_combo_box_text_new();
   for (const auto& l : f.iface_labels()) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(iface), l.c_str());
   gtk_combo_box_set_active(GTK_COMBO_BOX(iface), f.iface_index);
   gtk_grid_attach(GTK_GRID(grid), label("Network interface:"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), iface, 1, row++, 1, 1);
 
-  GtkWidget* rate = gtk_combo_box_text_new();
+  GtkWidget* rate = ui->rate = gtk_combo_box_text_new();
   for (const char* l : vc::kRateLabels) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rate), l);
   gtk_combo_box_set_active(GTK_COMBO_BOX(rate), f.rate_index);
   gtk_grid_attach(GTK_GRID(grid), label("Sample rate:"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), rate, 1, row++, 1, 1);
 
+  // 0 is allowed in one direction (the service insists on at least one channel).
   GtkWidget* chbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-  GtkWidget* txch = gtk_spin_button_new_with_range(1, 64, 1);
-  GtkWidget* rxch = gtk_spin_button_new_with_range(1, 64, 1);
+  GtkWidget* txch = ui->txch = gtk_spin_button_new_with_range(0, 64, 1);
+  GtkWidget* rxch = ui->rxch = gtk_spin_button_new_with_range(0, 64, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(txch), f.tx_channels);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(rxch), f.rx_channels);
   gtk_box_pack_start(GTK_BOX(chbox), txch, FALSE, FALSE, 0);
@@ -599,81 +798,103 @@ void show_settings() {
   gtk_grid_attach(GTK_GRID(grid), chbox, 1, row++, 1, 1);
 
   heading("Latency");
-  GtkWidget* rxl = gtk_combo_box_text_new_with_entry();
+  GtkWidget* rxl = ui->rxl = gtk_combo_box_text_new_with_entry();
   for (const char* v : vc::kRxLatencies) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(rxl), v);
   gtk_entry_set_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(rxl))), f.rx_latency_ms.c_str());
   gtk_grid_attach(GTK_GRID(grid), label("Receive (ms):"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), rxl, 1, row++, 1, 1);
-  GtkWidget* txl = gtk_combo_box_text_new_with_entry();
+  GtkWidget* txl = ui->txl = gtk_combo_box_text_new_with_entry();
   for (const char* v : vc::kTxLatencies) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(txl), v);
   gtk_entry_set_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(txl))), f.tx_latency_ms.c_str());
   gtk_grid_attach(GTK_GRID(grid), label("Transmit (ms, 3.5 minimum):"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), txl, 1, row++, 1, 1);
 
   heading("Clock");
-  GtkWidget* clock = gtk_combo_box_text_new();
+  GtkWidget* clock = ui->clock = gtk_combo_box_text_new();
   gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(clock), "Follow the Dante clock leader (PTP)");
   gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(clock), "Local clock only (testing)");
   gtk_combo_box_set_active(GTK_COMBO_BOX(clock), f.local_clock ? 1 : 0);
   gtk_grid_attach(GTK_GRID(grid), clock, 0, row++, 2, 1);
-  GtkWidget* master = gtk_check_button_new_with_label("Become clock leader when no Dante device provides one");
+  GtkWidget* master = ui->master =
+      gtk_check_button_new_with_label("Become clock leader when no Dante device provides one");
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(master), f.master_capable);
   gtk_grid_attach(GTK_GRID(grid), master, 0, row++, 2, 1);
 
-  GtkWidget* err = gtk_label_new("");
+  GtkWidget* err = ui->err = gtk_label_new("");
   gtk_label_set_line_wrap(GTK_LABEL(err), TRUE);
   gtk_label_set_max_width_chars(GTK_LABEL(err), 60);
   gtk_widget_set_halign(err, GTK_ALIGN_START);
   gtk_grid_attach(GTK_GRID(grid), err, 0, row++, 2, 1);
 
   gtk_box_pack_start(GTK_BOX(gtk_dialog_get_content_area(GTK_DIALOG(d))), grid, TRUE, TRUE, 0);
+  g_signal_connect(d, "response", G_CALLBACK(on_settings_response), nullptr);
+  g_signal_connect(d, "destroy", G_CALLBACK(+[](GtkWidget* w, gpointer) {
+                     if (g_settings && g_settings->d == w) {
+                       g_settings->d = nullptr;
+                       g_settings.reset();
+                     }
+                   }),
+                   nullptr);
+  g_settings = ui;
   gtk_widget_show_all(d);
+}
 
-  int response;
-  while ((response = gtk_dialog_run(GTK_DIALOG(d))) == GTK_RESPONSE_APPLY) {
-    f.name = gtk_entry_get_text(GTK_ENTRY(name));
-    f.iface_index = gtk_combo_box_get_active(GTK_COMBO_BOX(iface));
-    f.rate_index = gtk_combo_box_get_active(GTK_COMBO_BOX(rate));
-    f.tx_channels = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(txch)));
-    f.rx_channels = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(rxch)));
-    f.rx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(rxl))));
-    f.tx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(txl))));
-    f.local_clock = gtk_combo_box_get_active(GTK_COMBO_BOX(clock)) == 1;
-    f.master_capable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(master));
-    gtk_label_set_text(GTK_LABEL(err), "Applying…");
-    while (gtk_events_pending()) gtk_main_iteration();
-    std::string e;
-    if (vc::save_settings(g_port, vc::apply_settings(c.body, f), &e)) break;
-    char* m = g_markup_printf_escaped("<span foreground='#D2553F'>%s</span>", e.c_str());
-    gtk_label_set_markup(GTK_LABEL(err), m);
-    g_free(m);
+void show_settings() {
+  if (g_settings && g_settings->d) {  // already open: bring it up
+    gtk_window_present(GTK_WINDOW(g_settings->d));
+    return;
   }
-  gtk_widget_destroy(d);
-  if (response == kResponseNames) open_channel_names();
+  if (!begin_action()) return;
+  struct Loaded {
+    int status = 0;
+    std::string conf;
+    std::vector<vc::Interface> ifs;
+  };
+  const unsigned port = g_port;
+  run_async<Loaded>(
+      [port] {
+        Loaded l;
+        const auto c = vc::http(port, "GET", "/api/config");
+        l.status = c.status;
+        l.conf = c.body;
+        if (c.status == 200) l.ifs = vc::parse_interfaces(vc::http(port, "GET", "/api/interfaces").body);
+        return l;
+      },
+      [](const Loaded& l) {
+        end_action();
+        if (l.status != 200) {
+          message(GTK_MESSAGE_INFO, "The Virgil service is not running, so its settings cannot be changed now.");
+          return;
+        }
+        if (g_settings && g_settings->d) gtk_window_present(GTK_WINDOW(g_settings->d));
+        else build_settings(l.conf, l.ifs);
+      });
 }
 
 // ---- tray --------------------------------------------------------------------------------
 
 GtkWidget* g_menu;
 
-void menu_item(const char* text, void (*fn)()) {
+GtkWidget* menu_item(GtkWidget* menu, const char* text, void (*fn)()) {
   GtkWidget* i = gtk_menu_item_new_with_label(text);
   g_signal_connect_swapped(i, "activate", G_CALLBACK(+[](gpointer f) { reinterpret_cast<void (*)()>(f)(); }),
                            reinterpret_cast<gpointer>(fn));
-  gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), i);
+  gtk_menu_shell_append(GTK_MENU_SHELL(menu), i);
+  return i;
 }
+GtkWidget* menu_item(const char* text, void (*fn)()) { return menu_item(g_menu, text, fn); }
 void menu_sep() { gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), gtk_separator_menu_item_new()); }
 
 void build_menu() {
   g_menu = gtk_menu_new();
   menu_item("Open Virgil", show_window);
-  menu_item("Settings…", show_settings);
-  menu_item("Restart audio engine", restart_engine);
+  g_settings_item = menu_item("Settings…", show_settings);
+  g_restart_item = menu_item("Restart audio engine", restart_engine);
   g_run_item = gtk_menu_item_new_with_label("Stop Virgil");
   g_signal_connect(g_run_item, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { toggle_running(); }), nullptr);
   gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), g_run_item);
   menu_sep();
-  menu_item("Dropouts and diagnostics", open_diagnostics);
+  menu_item("Dropouts and diagnostics…", open_diagnostics);
   menu_item("Open control panel in browser", open_browser);
   menu_item("Show log", show_log);
   g_autostart_item = gtk_check_menu_item_new_with_label("Start at login");
@@ -685,11 +906,18 @@ void build_menu() {
   gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), g_autostart_item);
   menu_item("About Virgil", show_about);
   menu_sep();
-  menu_item("Quit Virgil Control", [] {
-    g_quit = true;
-    g_application_quit(G_APPLICATION(g_app));
-  });
+  menu_item("Quit Virgil Control", quit_app);
   gtk_widget_show_all(g_menu);
+
+  // Right click in the window (the only menu when there is no tray icon).
+  g_context_menu = gtk_menu_new();
+  menu_item(g_context_menu, "Show log", show_log);
+  menu_item(g_context_menu, "Open control panel in browser", open_browser);
+  menu_item(g_context_menu, "About Virgil", show_about);
+  gtk_menu_shell_append(GTK_MENU_SHELL(g_context_menu), gtk_separator_menu_item_new());
+  menu_item(g_context_menu, "Quit Virgil Control", quit_app);
+  gtk_widget_show_all(g_context_menu);
+  update_controls();
 }
 
 // AppIndicator, resolved at run time (Ayatana first, then the original).
@@ -740,7 +968,7 @@ bool try_status_icon() {
   g_status_icon = g_logo ? gtk_status_icon_new_from_pixbuf(g_logo) : gtk_status_icon_new_from_icon_name("virgil");
   gtk_status_icon_set_title(g_status_icon, "Virgil");
   g_signal_connect(g_status_icon, "activate", G_CALLBACK(+[](GtkStatusIcon*, gpointer) {
-                     if (g_visible) {
+                     if (g_visible && g_window) {
                        gtk_widget_hide(g_window);
                        g_visible = false;
                      } else {
@@ -760,19 +988,27 @@ G_GNUC_END_IGNORE_DEPRECATIONS
 // ---- application -------------------------------------------------------------------------
 
 void on_activate(GtkApplication*, gpointer) {
-  if (g_window) {  // second launch: bring the window up
+  if (g_started) {  // second launch: bring the window up
     show_window();
     return;
   }
+  g_started = true;
   g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, nullptr);
   g_logo = load_logo();
   build_window();
   build_menu();
   g_have_tray = try_appindicator() || try_status_icon();
   g_application_hold(G_APPLICATION(g_app));  // keep running with the window hidden
+  // Not joined: main() leaves with _exit while it may still be in a request.
   std::thread(poll_thread).detach();
   // The portable folder has no service: start virgild from it.
-  if (portable() && vc::http(g_port, "GET", "/api/status").status != 200) start_service();
+  if (portable()) {
+    const unsigned port = g_port;
+    run_async<int>([port] { return vc::http(port, "GET", "/api/status").status; },
+                   [](const int& status) {
+                     if (status != 200) start_service();
+                   });
+  }
   if (!(g_start_hidden && g_have_tray)) show_window();
 }
 
@@ -782,11 +1018,15 @@ int on_command_line(GApplication* app, GApplicationCommandLine* cl, gpointer) {
   bool tray = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--tray")) tray = true;
-    if (!std::strcmp(argv[i], "--port") && i + 1 < argc) g_port = unsigned(std::atoi(argv[++i]));
+    // The poll thread reads the port: only the first launch sets it.
+    if (!std::strcmp(argv[i], "--port") && i + 1 < argc) {
+      const unsigned p = unsigned(std::atoi(argv[++i]));
+      if (!g_started && p > 0 && p < 65536) g_port = p;
+    }
   }
   g_strfreev(argv);
-  if (!g_window) g_start_hidden = tray;
-  if (g_window && tray) return 0;  // already running; --tray from login: nothing to do
+  if (!g_started) g_start_hidden = tray;
+  if (g_started && tray) return 0;  // already running; --tray from login: nothing to do
   g_application_activate(app);
   return 0;
 }
@@ -809,7 +1049,9 @@ int main(int argc, char** argv) {
   g_signal_connect(g_app, "activate", G_CALLBACK(on_activate), nullptr);
   g_signal_connect(g_app, "command-line", G_CALLBACK(on_command_line), nullptr);
   const int rc = g_application_run(G_APPLICATION(g_app), argc, argv);
+  // The poll thread (and any request worker) may still be running: leave
+  // without static destructors, as the macOS app does.
   g_quit = true;
-  g_object_unref(g_app);
-  return rc;
+  std::fflush(nullptr);
+  _exit(rc);
 }
