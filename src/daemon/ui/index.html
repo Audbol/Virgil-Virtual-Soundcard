@@ -84,6 +84,8 @@ textarea { font-family: var(--mono); font-size: 12.5px; min-height: 260px; resiz
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 .msg { font-size: 13px; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
 details summary { cursor: pointer; color: var(--muted); margin-top: 14px; font-size: 13px; }
+label.check { display: flex; align-items: center; gap: 8px; color: var(--text); grid-column: 1 / -1; }
+label.check input { width: auto; margin: 0; }
 .inline-num { width: 70px; display: inline-block; padding: 4px 6px; }
 footer { color: var(--muted); font-size: 12px; text-align: center; }
 .names { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 18px; }
@@ -132,7 +134,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
 </header>
 
 <main>
-  <div class="banner" id="offline">The Virgil service is not reachable. Start it (Windows: Start menu › Virgil › Restart Virgil service; macOS/Linux: see README); this page reconnects automatically.</div>
+  <div class="banner" id="offline">The Virgil service is not reachable. It normally starts with the computer: start it with Virgil Control (Start service), or see the README for your system. This page reconnects automatically.</div>
   <div class="banner" id="errbanner"></div>
   <div class="banner info" id="stoppedbanner">Virgil is stopped: it is off the Dante network, its ports are free and apps cannot use the soundcard.
     <button class="primary" id="startbtn" style="margin-left:10px">Start Virgil</button></div>
@@ -158,7 +160,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
   </div>
 
   <section aria-labelledby="h-diag" id="diagnostics">
-    <div class="head"><h2 id="h-diag">Dropouts</h2><span class="hint" id="d-since"></span></div>
+    <div class="head"><h2 id="h-diag">Dropouts and diagnostics</h2><span class="hint" id="d-since"></span></div>
     <div class="diag-top">
       <span class="pill" id="d-pill"><span class="dot"></span><span id="d-head">—</span></span>
       <span class="spacer"></span>
@@ -191,10 +193,12 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
         <option>44100</option><option>48000</option><option>88200</option><option>96000</option></select></label>
       <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="64"></label>
       <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="64"></label>
-      <label>Receive latency (µs)<input id="f-lat" data-key="latency_us" type="number" min="500" max="40000" step="500"></label>
-      <label>Transmit latency (µs)<input id="f-txlat" data-key="tx_latency_us" type="number" min="500" max="40000" step="500"></label>
+      <label>Receive latency (ms)<input id="f-lat" data-key="latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
+      <label>Transmit latency (ms)<input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
       <label>Clock<select id="f-clock" data-key="clock">
-        <option value="ptp">PTP (follow the Dante clock master)</option><option value="free">Local clock only (testing)</option></select></label>
+        <option value="ptp">PTP (follow the Dante clock leader)</option><option value="free">Local clock only (testing)</option></select></label>
+      <label class="check"><input id="f-master" type="checkbox" data-key="master_capable" data-section="ptp" data-conv="bool">
+        Become clock leader when no Dante device provides one</label>
     </div>
     <details id="channels"><summary>Channel names</summary>
       <p style="color:var(--muted);font-size:12.5px;margin:8px 0 12px">Shown in Dante Controller and, as channel names, in ASIO and Core Audio apps. Leave a field empty for the default (TX 1, RX 1, …). Names changed in Dante Controller appear here too. Up to 31 characters, unique per direction, without = . @ or ".</p>
@@ -239,49 +243,73 @@ async function api(path, opts = {}) {
 }
 
 // ---------- INI editing that preserves comments and layout ----------
-function sections(text) {
-  const lines = text.split("\n"); const out = []; let cur = { name: "", start: 0, lines: [] };
-  lines.forEach((l, i) => {
-    const m = l.match(/^\s*\[([^\]]+)\]\s*$/);
-    if (m) { cur.end = i; out.push(cur); cur = { name: m[1].trim().toLowerCase(), start: i, lines: [] }; }
-  });
-  cur.end = lines.length; out.push(cur);
-  return { lines, list: out };
+// As the daemon reads the file: [device] and [network] are one section, some
+// keys have a second name, and the last occurrence of a key wins.
+const ALIASES = { playback_channels: "tx_channels", capture_channels: "rx_channels", rx_latency_us: "latency_us" };
+const canonSec = s => s === "network" ? "device" : s;
+const canonKey = (sec, k) => sec === "device" ? (ALIASES[k] || k) : k;
+function headerOf(l) { const m = l.match(/^\s*\[([^\]]+)\]\s*$/); return m ? m[1].trim().toLowerCase() : null; }
+function parseVal(v) {
+  let q = false, out = "";
+  for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }
+  return out.trim();
 }
+// Calls fn(lineIndex, section, key, value, match) for every key line.
+function eachKey(lines, fn) {
+  let cur = "";
+  lines.forEach((l, i) => {
+    const h = headerOf(l); if (h !== null) { cur = h; return; }
+    const m = l.match(/^(\s*)([A-Za-z_0-9]+)(\s*=\s*)(.*)$/);
+    if (m) fn(i, cur, m[2].toLowerCase(), parseVal(m[4]), m);
+  });
+}
+const matches = (cur, k, section, key) => canonSec(cur) === section && canonKey(section, k) === canonKey(section, key);
 function getKey(text, section, key) {
-  const { lines, list } = sections(text);
-  const s = list.find(x => x.name === section); if (!s) return null;
-  for (let i = s.start; i < s.end; i++) {
-    const m = lines[i].match(/^\s*([A-Za-z_0-9]+)\s*=\s*(.*)$/);
-    if (m && m[1].toLowerCase() === key) {
-      let v = m[2]; let q = false; let out = "";
-      for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }
-      return out.trim();
-    }
-  }
-  return null;
+  let found = null;
+  eachKey(text.split("\n"), (i, cur, k, v) => { if (matches(cur, k, section, key)) found = v; });
+  return found;
 }
 function quoteVal(v) { v = String(v); return /[;#]|^\s|\s$/.test(v) ? '"' + v + '"' : v; }
 function removeKey(text, section, key) {
-  const { lines, list } = sections(text);
-  const s = list.find(x => x.name === section); if (!s) return text;
-  for (let i = s.start; i < s.end; i++) {
-    const m = lines[i].match(/^\s*([A-Za-z_0-9]+)\s*=/);
-    if (m && m[1].toLowerCase() === key) { lines.splice(i, 1); return lines.join("\n"); }
-  }
-  return text;
+  const lines = text.split("\n"), drop = new Set();
+  eachKey(lines, (i, cur, k) => { if (matches(cur, k, section, key)) drop.add(i); });
+  return drop.size ? lines.filter((_, i) => !drop.has(i)).join("\n") : text;
 }
 function setKey(text, section, key, value) {
-  const { lines, list } = sections(text);
-  let s = list.find(x => x.name === section);
+  const lines = text.split("\n"); let hit = false;
+  // Every occurrence (also under another name), so none overrides the new value.
+  eachKey(lines, (i, cur, k, v, m) => {
+    if (matches(cur, k, section, key)) { lines[i] = m[1] + m[2] + m[3] + quoteVal(value); hit = true; }
+  });
+  if (hit) return lines.join("\n");
   const line = key + " = " + quoteVal(value);
-  if (!s) { return text.replace(/\s*$/, "") + "\n\n[" + section + "]\n" + line + "\n"; }
-  for (let i = s.start; i < s.end; i++) {
-    const m = lines[i].match(/^(\s*)([A-Za-z_0-9]+)(\s*=\s*)(.*)$/);
-    if (m && m[2].toLowerCase() === key) { lines[i] = m[1] + key + m[3] + quoteVal(value); return lines.join("\n"); }
-  }
-  let at = s.end; while (at > s.start + 1 && lines[at - 1].trim() === "") at--;
+  // Into the section of that name, else one read as the same ([network]).
+  const heads = lines.map(headerOf);
+  let start = heads.indexOf(section);
+  if (start < 0) start = heads.findIndex(h => h !== null && canonSec(h) === section);
+  const end = start < 0 ? -1 : heads.findIndex((h, i) => i > start && h !== null);
+  if (start < 0) { const t = text.replace(/\s*$/, ""); return (t ? t + "\n\n" : "") + "[" + section + "]\n" + line + "\n"; }
+  let at = end < 0 ? lines.length : end; while (at > start + 1 && lines[at - 1].trim() === "") at--;
   lines.splice(at, 0, line); return lines.join("\n");
+}
+// Effective values ("section.key" -> value) of a configuration text.
+function confValues(text) {
+  const out = new Map();
+  eachKey(text.split("\n"), (i, cur, k, v) => { const sec = canonSec(cur); out.set(sec + "." + canonKey(sec, k), v); });
+  return out;
+}
+// The changes from `base` to `edited`, applied to `fresh` (the file as it is
+// now: Stop, renames in Dante Controller or Virgil Control may have changed it).
+function mergeConfig(base, edited, fresh) {
+  if (fresh === base) return edited;
+  const a = confValues(base), b = confValues(edited);
+  let out = fresh;
+  for (const k of new Set([...a.keys(), ...b.keys()])) {
+    if (a.get(k) === b.get(k)) continue;
+    const dot = k.indexOf("."), sec = k.slice(0, dot), key = k.slice(dot + 1);
+    out = b.has(k) ? setKey(out, sec, key, b.get(k)) : removeKey(out, sec, key);
+  }
+  return out;
 }
 
 // ---------- rendering ----------
@@ -317,28 +345,35 @@ function render(st) {
   $("stoppedbanner").classList.toggle("show", stopped);
   $("stopbtn").style.display = stopped ? "none" : "";
   $("restart").disabled = stopped;
+  // Reloading (Apply, Restart) or Stop under way: the engine is briefly
+  // down, which is not a fault.
+  const reloading = { restarting: "Restarting…", stopping: "Stopping…" }[st.status];
+  const localOnly = c.source === "free";
   if (stopped) setPill("", "Stopped");
+  else if (reloading) setPill("", reloading);
   else if (st.status === "error") setPill("bad", "Error");
   else if (st.status === "waiting-for-network") setPill("warn", "Waiting for network");
   else if (st.status !== "running") setPill("warn", "Starting…");
   else if (!d.dante) setPill("bad", "Dante stack not running");
   else if (c.state === "ptp-locked") setPill("ok", "Clock locked");
-  else if (c.state === "ptp-master") setPill("info", "Clock master");
-  else if (c.source === "free") setPill("warn", "Local clock only");
+  else if (c.state === "ptp-master") setPill("info", "Clock leader");
+  else if (localOnly) setPill("warn", "Local clock only");
   else setPill("warn", "Free-running clock");
   const eb = $("errbanner"); eb.textContent = st.error ? "Audio engine error: " + st.error : ""; eb.classList.toggle("show", !!st.error);
 
-  const clockNames = { "ptp-locked": "Locked", "ptp-master": "Clock master", "free-run": "Free-running", "stopped": "Stopped" };
-  $("c-clock").textContent = clockNames[c.state] || c.state;
-  $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · master ${c.grandmaster}`
-    : c.state === "ptp-master" ? "no other Dante clock master on the network"
-    : c.state === "free-run" ? (c.grandmaster ? "acquiring " + c.grandmaster : "no Dante clock master found yet") : "";
+  const clockNames = { "ptp-locked": "Locked", "ptp-master": "Clock leader", "free-run": localOnly ? "Local clock only" : "Free-running", "stopped": "Stopped" };
+  $("c-clock").textContent = reloading && c.state === "stopped" ? reloading : clockNames[c.state] || c.state;
+  $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · leader ${c.grandmaster}`
+    : c.state === "ptp-master" ? "no other Dante clock leader on the network"
+    : c.state === "free-run" ? (localOnly ? "not in sync with Dante (Settings › Clock)"
+      : c.grandmaster ? "acquiring " + c.grandmaster : "no Dante clock leader found yet") : "";
   $("c-format").textContent = `${fmtRate(d.sample_rate)} · ${d.tx_channels}×${d.rx_channels} ch`;
   $("c-format2").textContent = `rx latency ${fmtUs(d.latency_us)} · tx latency ${fmtUs(d.tx_latency_us)}`;
   $("c-net").textContent = d.address || (d.interface || "—");
   const dh = st.dropouts_last_hour || 0;
   $("c-net2").textContent = d.dante ? (dh ? `${dh} dropout${dh === 1 ? "" : "s"} in the last hour` : "Dante device online · no dropouts")
-    : "Dante stack not running";
+    : stopped ? "off the Dante network" : reloading ? reloading
+    : st.status === "running" ? "Dante stack not running" : "";
   $("r-name").textContent = d.name; $("r-tx").textContent = d.tx_channels; $("r-rx").textContent = d.rx_channels;
 
   const playing = st.clients.filter(x => x.active);
@@ -356,58 +391,104 @@ function render(st) {
 }
 
 // ---------- settings form <-> config text ----------
-const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock"];
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock", "f-master"];
+const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", master_capable: "false" };
+const truthy = v => ["1", "true", "yes", "on"].includes(String(v).trim().toLowerCase());
+// Latency is edited in ms (as in Virgil Control) and kept in µs.
+function toField(el, v) {
+  if (el.dataset.conv === "bool") el.checked = truthy(v);
+  else if (el.dataset.conv === "ms") el.value = /^\d+$/.test(v) ? String(+v / 1000) : v;
+  else el.value = el.dataset.key === "clock" ? v.toLowerCase() : v;
+}
+function fromField(el) {
+  if (el.dataset.conv === "bool") return el.checked ? "true" : "false";
+  if (el.dataset.conv === "ms") { const ms = Number(el.value); return el.value.trim() !== "" && ms >= 0 ? String(Math.round(ms * 1000)) : el.value; }
+  return el.value;
+}
 function fillForm() {
   const t = S.cfg;
   const ifSel = $("f-interface"); const cur = getKey(t, "device", "interface") || "";
-  const opts = [`<option value="">Automatic (first active interface)</option>`].concat(
+  const opts = [`<option value="">Automatic (prefers wired Ethernet)</option>`].concat(
     S.ifaces.filter(i => !i.loopback).map(i => `<option value="${esc(i.name)}">${esc(i.name)} — ${esc(i.address)}${i.virtual ? " (virtual adapter)" : ""}</option>`));
-  if (cur && !S.ifaces.some(i => i.name === cur || i.address === cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not found)</option>`);
+  if (cur && !S.ifaces.some(i => i.name === cur || i.address === cur)) opts.push(`<option value="${esc(cur)}">${esc(cur)} (not connected)</option>`);
   ifSel.innerHTML = opts.join("");
   for (const id of FIELDS) {
-    const el = $(id); const v = getKey(t, "device", el.dataset.key);
+    const el = $(id);
     if (id === "f-interface") { el.value = S.ifaces.find(i => i.address === cur)?.name ?? cur; continue; }
-    if (v !== null) el.value = v;
-    else if (id === "f-rate") el.value = "48000"; else if (id === "f-clock") el.value = "ptp";
-    else if (id === "f-lat" || id === "f-txlat") el.value = "4000";
+    const v = getKey(t, el.dataset.section || "device", el.dataset.key);
+    if (v !== null) toField(el, v);
+    else if (DEFAULTS[el.dataset.key] !== undefined) toField(el, DEFAULTS[el.dataset.key]);
   }
   $("cfgtext").value = t;
   fillNames();
 }
+const isDirty = () => S.cfg !== S.savedCfg;
 function markDirty() {
-  const dirty = S.cfg !== S.savedCfg;
+  const dirty = isDirty();
   $("apply").disabled = !dirty; $("revert").disabled = !dirty;
   if (dirty) { $("msg").className = "msg"; $("msg").textContent = "Unsaved changes."; }
 }
-FIELDS.forEach(id => $(id).addEventListener("input", e => {
-  S.cfg = setKey(S.cfg, "device", e.target.dataset.key, e.target.value);
+FIELDS.forEach(id => $(id).addEventListener($(id).type === "checkbox" ? "change" : "input", e => {
+  S.cfg = setKey(S.cfg, e.target.dataset.section || "device", e.target.dataset.key, fromField(e.target));
   $("cfgtext").value = S.cfg; markDirty();
   if (/_channels$/.test(e.target.dataset.key)) fillNames();
 }));
 $("cfgtext").addEventListener("input", e => { S.cfg = e.target.value; fillFormFromText(); markDirty(); });
 function fillFormFromText() { const keep = $("cfgtext").value; fillForm(); $("cfgtext").value = keep; }
+function say(cls, text) { $("msg").className = "msg" + (cls ? " " + cls : ""); $("msg").textContent = text; }
+// Latency errors from the daemon name the µs keys; show them as the form does.
+function friendly(msg) {
+  if (/latency_us' needs/.test(msg)) return "Latency must be a number of milliseconds, for example 4.";
+  return String(msg).replace(/\b(\d{3,5}) ?(?:µs|us)\b/g, (m, us) => +us / 1000 + " ms");
+}
+
+// The file as the daemon has it now, with its version.
+async function fetchConfig() {
+  const r = await fetch("/api/config", { cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return { text: await r.text(), version: r.headers.get("X-Virgil-Config-Version") || "" };
+}
 
 $("apply").addEventListener("click", async () => {
-  $("apply").disabled = true; $("msg").className = "msg"; $("msg").textContent = "Saving…";
+  $("apply").disabled = true; say("", "Saving…");
   try {
-    const r = await api("/api/config", { method: "POST", headers: { "Content-Type": "text/plain" }, body: S.cfg });
-    S.savedCfg = S.cfg; markDirty();
-    $("msg").className = "msg ok"; $("msg").textContent = "Saved to " + r.path + ". Audio engine restarting…";
-  } catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; $("apply").disabled = false; }
+    // Apply only what was changed here onto the file as it is now (Stop,
+    // channel renames in Dante Controller, Virgil Control may have changed
+    // it); the version makes the daemon refuse a save if it changed again.
+    let r = null, text = "";
+    for (let attempt = 0; attempt < 4 && !r; attempt++) {
+      const fresh = await fetchConfig();
+      text = mergeConfig(S.savedCfg, S.cfg, fresh.text);
+      const resp = await fetch("/api/config", { method: "POST", cache: "no-store",
+        headers: { "Content-Type": "text/plain", "X-Virgil-Request": "1", "X-Virgil-Config-Version": fresh.version }, body: text });
+      const body = await resp.json().catch(() => ({}));
+      if (resp.status === 409) continue;  // changed meanwhile: merge again
+      if (!resp.ok) throw new Error(body.error || "HTTP " + resp.status);
+      r = body;
+    }
+    if (!r) throw new Error("The configuration keeps changing elsewhere; try again.");
+    S.cfg = S.savedCfg = text; fillForm(); markDirty();
+    say("ok", "Saved to " + r.path + (r.enabled === false ? ". Virgil is stopped: the settings take effect when it is started."
+      : ". Audio engine restarting…"));
+  } catch (e) { say("err", friendly(e.message)); $("apply").disabled = false; }
+  setTimeout(loadConfig, 1500);
 });
-$("revert").addEventListener("click", () => { S.cfg = S.savedCfg; fillForm(); markDirty(); $("msg").textContent = ""; });
+$("revert").addEventListener("click", () => { S.cfg = S.savedCfg; fillForm(); markDirty(); $("msg").textContent = ""; loadConfig(); });
 $("stopbtn").addEventListener("click", async () => {
   if (!confirm("Stop Virgil?\n\nAudio to and from the Dante network stops, Virgil leaves the network and apps cannot use its soundcard until you start it again. It stays stopped after a restart of the computer.")) return;
-  try { await api("/api/stop", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Stopping Virgil…"; }
-  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+  try { await api("/api/stop", { method: "POST" }); say("ok", "Stopping Virgil…"); }
+  catch (e) { say("err", e.message); }
+  setTimeout(loadConfig, 500);
 });
 $("startbtn").addEventListener("click", async () => {
-  try { await api("/api/start", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Starting Virgil…"; }
-  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+  try { await api("/api/start", { method: "POST" }); say("ok", "Starting Virgil…"); }
+  catch (e) { say("err", e.message); }
+  setTimeout(loadConfig, 500);
 });
 $("restart").addEventListener("click", async () => {
-  try { await api("/api/restart", { method: "POST" }); $("msg").className = "msg ok"; $("msg").textContent = "Audio engine restarting…"; }
-  catch (e) { $("msg").className = "msg err"; $("msg").textContent = e.message; }
+  if (S.status && S.status.status === "stopped") return;
+  try { await api("/api/restart", { method: "POST" }); say("ok", "Audio engine restarting…"); }
+  catch (e) { say("err", e.message); }
 });
 // ---------- channel names ----------
 function nameOk(v) {
@@ -491,14 +572,25 @@ async function pollStatus() {
   }
   setTimeout(pollStatus, document.hidden ? 1000 : 200);
 }
+// Keeps the form in step with the file while nothing is being edited here
+// (Stop / Start, renames from Dante Controller, Virgil Control).
 async function loadConfig() {
   try {
-    const [cfg, ifs] = await Promise.all([api("/api/config"), api("/api/interfaces")]);
+    const [cfg, ifs] = await Promise.all([fetchConfig(), api("/api/interfaces")]);
+    const ifChanged = JSON.stringify(ifs) !== JSON.stringify(S.ifaces);
     S.ifaces = ifs;
-    if (S.cfg === S.savedCfg) { S.cfg = S.savedCfg = cfg; fillForm(); markDirty(); }
-  } catch (e) { setTimeout(loadConfig, 2000); }
+    const editing = document.activeElement && document.activeElement.closest && document.activeElement.closest("#settings input, #settings textarea, #settings select");
+    if (!isDirty() && !editing && (cfg.text !== S.savedCfg || ifChanged)) {
+      S.cfg = S.savedCfg = cfg.text; fillForm(); markDirty();
+    }
+    return true;
+  } catch (e) { return false; }
 }
-pollStatus(); loadConfig(); pollDiag();
+async function pollConfig() {
+  const ok = await loadConfig();
+  setTimeout(pollConfig, !ok ? 2000 : document.hidden ? 15000 : 3000);
+}
+pollStatus(); pollConfig(); pollDiag();
 // Virgil Control opens #diagnostics or #channels directly.
 if (location.hash === "#channels") $("channels").open = true;
 </script>

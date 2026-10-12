@@ -123,7 +123,15 @@ bool Client::acquire_tx_slot(const char* name) {
     uint32_t expected = 0;
     if (!s.pid.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) continue;
     std::memset(s.name, 0, sizeof s.name);
-    if (name) std::strncpy(s.name, name, sizeof s.name - 1);
+    if (name) {
+      // At most sizeof - 1 bytes, cut on a UTF-8 character boundary.
+      size_t n = strnlen(name, sizeof s.name);
+      if (n > sizeof s.name - 1) {
+        n = sizeof s.name - 1;
+        while (n > 0 && (static_cast<unsigned char>(name[n]) & 0xC0) == 0x80) --n;
+      }
+      std::memcpy(s.name, name, n);
+    }
     s.heartbeat_ns.store(mono_ns(), std::memory_order_relaxed);
     s.written_until.store(0, std::memory_order_relaxed);
     s.late_frames.store(0, std::memory_order_relaxed);

@@ -1,5 +1,7 @@
-// Minimal single-threaded HTTP/1.1 server for the local control panel.
-// One request per connection (Connection: close); bodies up to 256 KiB.
+// Minimal HTTP/1.1 server for the local control panel. One request per
+// connection (Connection: close); bodies up to 256 KiB. Each connection gets
+// a short-lived thread (a few at most), so an idle connection (a browser's
+// preconnect) cannot hold up the others.
 #pragma once
 
 #include <atomic>
@@ -47,6 +49,7 @@ class HttpServer {
   Handler handler_;
   std::thread thread_;
   std::atomic<bool> running_{false};
+  std::atomic<int> workers_{0};  // connection threads still running
 };
 
 }  // namespace virgil

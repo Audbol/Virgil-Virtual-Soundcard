@@ -1,5 +1,9 @@
-add_executable(virgil_unit_tests unit_tests.cpp ${CMAKE_SOURCE_DIR}/src/daemon/diagnostics.cpp)
-target_include_directories(virgil_unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/daemon)
+add_executable(virgil_unit_tests unit_tests.cpp ${CMAKE_SOURCE_DIR}/src/daemon/diagnostics.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/api.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/settings_model.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/view.cpp)
+target_include_directories(virgil_unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/daemon
+                           ${CMAKE_SOURCE_DIR}/tools/control_common)
 target_link_libraries(virgil_unit_tests PRIVATE virgil_net)
 add_test(NAME unit COMMAND virgil_unit_tests)
 

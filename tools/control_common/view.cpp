@@ -48,6 +48,10 @@ ClockView clock_view(const Status& s) {
   if (s.state == "error") return {kBad, "Audio engine error", s.error};
   if (s.state == "stopped") return {kDim, "Stopped", "off the Dante network"};
   if (s.state == "waiting-for-network") return {kWarn, "Waiting for network", s.iface};
+  // Reloading (Apply, Restart) or going off the network (Stop): the engine
+  // is briefly down, which is not a fault.
+  if (s.state == "restarting") return {kDim, "Restarting…", ""};
+  if (s.state == "stopping") return {kDim, "Stopping…", ""};
   if (s.state != "running") return {kWarn, "Starting…", ""};
   if (!s.dante) return {kBad, "Dante stack not running", ""};
   if (s.clock == "ptp-locked") return {kOk, "Locked to " + s.grandmaster, fmt("offset %+.1f µs", s.offset_us)};
@@ -90,6 +94,10 @@ void StatusView::draw_group(Canvas& c, float x, float y, const std::string& capt
                             const std::vector<Meter>& m) {
   const float sw = strip_w(n), gap = sw >= 12 ? 6 : 3, scale_w = 34;
   c.text(caption, Font::Label, Rect{x, y - 26, x + 400, y - 8}, kMuted, Align::Left);
+  if (n == 0) {  // no channels this way: no placeholder meter
+    c.text("None", Font::Sub, Rect{x, y, x + 400, y + 20}, kDim, Align::Left);
+    return;
+  }
   const float top = y, h = kMeterH, x0 = x + scale_w;
   const int marks[] = {0, -6, -12, -18, -24, -36, -48, -60};
   for (int db : marks) {
@@ -175,8 +183,8 @@ void StatusView::paint(Canvas& c, float W, float H) {
     // network (what apps play) below.
     const float my = kHeader + 14 + 34;
     const float bx = std::max(kPad, (W - std::max(group_w(s.tx), group_w(s.rx))) / 2);
-    draw_group(c, bx, my, fmt("From network  —  %u channels", s.rx), s.rx, mrx_);
-    draw_group(c, bx, my + kGroupH, fmt("To network  —  %u channels", s.tx), s.tx, mtx_);
+    draw_group(c, bx, my, fmt("From network  —  %u channel%s", s.rx, s.rx == 1 ? "" : "s"), s.rx, mrx_);
+    draw_group(c, bx, my + kGroupH, fmt("To network  —  %u channel%s", s.tx, s.tx == 1 ? "" : "s"), s.tx, mtx_);
     if (!s.error.empty())
       c.text(s.error, Font::Sub, Rect{kPad, H - kFooter - 22, W - kPad, H - kFooter - 4}, kBad, Align::Left);
   }
@@ -246,16 +254,13 @@ Action StatusView::release(float x, float y) {
 
 std::string tray_tooltip(const Status& s) {
   if (!s.reachable) return "Virgil: service not running";
-  std::string t = "Virgil — " + s.name + "\n";
-  if (s.state == "stopped") t += "Stopped";
-  else if (s.state == "error") t += "Audio engine error";
-  else if (s.clock == "ptp-locked") t += "Locked to " + s.grandmaster;
-  else if (s.clock == "ptp-master") t += "Clock leader";
-  else t += "Free-running";
+  // The same state as the window's header.
+  std::string t = "Virgil — " + s.name + "\n" + clock_view(s).line1;
   unsigned playing = 0;
   for (const auto& c : s.clients) playing += c.active;
-  if (playing) t += fmt("\n%u app(s) playing", playing);
-  if (s.dropouts_last_hour) t += fmt("\n%llu dropout(s) in the last hour", s.dropouts_last_hour);
+  if (playing) t += fmt("\n%u app%s playing", playing, playing == 1 ? "" : "s");
+  if (s.dropouts_last_hour)
+    t += fmt("\n%llu dropout%s in the last hour", s.dropouts_last_hour, s.dropouts_last_hour == 1 ? "" : "s");
   return t;
 }
 

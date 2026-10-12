@@ -34,6 +34,10 @@ HttpResult http(unsigned port, const char* method, const std::string& path,
                 const std::string& body = std::string());
 
 // --- virgil.conf editing that keeps comments and layout -----------------------
+// As the daemon reads it: [device] and [network] are one section, keys known
+// under a second name (playback_channels, capture_channels, rx_latency_us)
+// match too, and the last occurrence wins. conf_set changes every occurrence
+// (or adds the key to the section).
 std::string conf_get(const std::string& text, const std::string& section, const std::string& key);
 std::string conf_set(const std::string& text, const std::string& section, const std::string& key,
                      const std::string& value);
@@ -60,6 +64,8 @@ struct Status {
   std::vector<float> meter_tx, meter_rx;
 };
 bool parse_status(const std::string& body, Status* st);
+// `in` with invalid UTF-8 sequences replaced by U+FFFD.
+std::string valid_utf8(const std::string& in);
 
 struct Interface {
   std::string name, address;

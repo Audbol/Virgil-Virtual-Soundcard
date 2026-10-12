@@ -134,6 +134,10 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
     if (r.path == "/api/stop") return set_running(false);
     if (r.path == "/api/start") return set_running(true);
     if (r.path == "/api/restart") {
+      {
+        std::lock_guard<std::mutex> l(ctx_->mutex);
+        if (ctx_->status != "stopped") ctx_->status = "restarting";
+      }
       ctx_->reload = true;
       Json j;
       j.begin_obj().kvb("ok", true).end_obj();
@@ -319,6 +323,13 @@ HttpResponse ControlServer::set_running(bool on) {
     std::lock_guard<std::mutex> l(ctx_->mutex);
     ctx_->run_override = on ? 1 : 0;
     path = ctx_->config_path;
+    // Shown until the engine has stopped / started (no "Dante stack not
+    // running" while it reloads).
+    if (on) {
+      if (ctx_->status == "stopped" || ctx_->status == "stopping") ctx_->status = "starting";
+    } else {
+      ctx_->status = ctx_->status == "stopped" ? "stopped" : "stopping";
+    }
   }
   bool saved = false;
   std::string err;
@@ -344,7 +355,9 @@ HttpResponse ControlServer::set_running(bool on) {
   return {200, "application/json", j.take(), ""};
 }
 
-HttpResponse ControlServer::get_config() {
+// The configuration as the panel edits it: the file, or (no file yet) the
+// running configuration. Hold config_file_mutex() for a consistent read.
+std::string ControlServer::current_config_text() {
   std::string path, text;
   {
     std::lock_guard<std::mutex> l(ctx_->mutex);
@@ -352,14 +365,37 @@ HttpResponse ControlServer::get_config() {
     text = format_config(ctx_->cfg);
   }
   if (!path.empty()) {
-    std::ifstream f(path);
+    std::ifstream f(path, std::ios::binary);
     if (f) {
       std::stringstream ss;
       ss << f.rdbuf();
       text = ss.str();
     }
   }
-  return {200, "text/plain; charset=utf-8", text, ""};
+  return text;
+}
+
+// Version of a configuration text: GET /api/config returns it (header
+// X-Virgil-Config-Version), a POST may send it back so a save based on an
+// older text (changed meanwhile by Stop, a rename in Dante Controller or
+// another editor) is refused with 409 instead of undoing those changes.
+std::string config_version(const std::string& text) {
+  uint64_t h = 1469598103934665603ull;  // FNV-1a
+  for (unsigned char ch : text) h = (h ^ ch) * 1099511628211ull;
+  char b[20];
+  std::snprintf(b, sizeof b, "%016llx", (unsigned long long)h);
+  return b;
+}
+
+HttpResponse ControlServer::get_config() {
+  std::string text;
+  {
+    std::lock_guard<std::mutex> lock(config_file_mutex());
+    text = current_config_text();
+  }
+  HttpResponse resp{200, "text/plain; charset=utf-8", text, ""};
+  resp.extra_headers = "X-Virgil-Config-Version: " + config_version(text) + "\r\n";
+  return resp;
 }
 
 HttpResponse ControlServer::save_config(const HttpRequest& r) {
@@ -368,27 +404,45 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
   if (!parse_config(r.body, &parsed, &err)) return json_error(400, err);
   Config check = parsed;
   if (!validate_config(&check, &err)) return json_error(400, err);
-  uint32_t addr;
-  if (!check.interface.empty() && !resolve_interface(check.interface, &addr))
-    return json_error(400, "network interface '" + check.interface + "' not found");
 
-  std::string path;
+  std::string path, running_iface;
   {
     std::lock_guard<std::mutex> l(ctx_->mutex);
     if (ctx_->config_path.empty()) ctx_->config_path = default_config_path();
     path = ctx_->config_path;
+    running_iface = ctx_->cfg.interface;
   }
   make_parent_dirs(path);
+  const std::string base = r.header("x-virgil-config-version");
   {
     std::lock_guard<std::mutex> lock(config_file_mutex());
-    std::string err;
-    if (!write_config_file(path, r.body, &err))
-      return json_error(500, err + " (permission denied? the service needs write access to " + path + ")");
+    const std::string current = current_config_text();
+    if (!base.empty() && base != config_version(current))
+      return json_error(409, "the configuration was changed elsewhere meanwhile; reload it and try again");
+    // A missing network adapter is only refused when this save chooses it:
+    // the daemon waits for a configured one that is not there (yet), so
+    // other settings can still be saved meanwhile.
+    Config before;
+    std::string ignored;
+    const std::string old_iface = parse_config(current, &before, &ignored) ? before.interface : running_iface;
+    uint32_t addr;
+    if (!check.interface.empty() && check.interface != old_iface && !resolve_interface(check.interface, &addr))
+      return json_error(400, "network interface '" + check.interface + "' not found");
+    std::string werr;
+    if (!write_config_file(path, r.body, &werr))
+      return json_error(500, werr + " (permission denied? the service needs write access to " + path + ")");
+  }
+  const bool enabled = check.enabled;
+  {
+    std::lock_guard<std::mutex> l(ctx_->mutex);
+    if (enabled) ctx_->status = "restarting";
+    else if (ctx_->status != "stopped") ctx_->status = "stopping";
   }
   VIRGIL_LOG_INFO("control: configuration saved to %s; restarting engine", path.c_str());
   ctx_->reload = true;
   Json j;
-  j.begin_obj().kvb("ok", true).kv("path", path).end_obj();
+  j.begin_obj().kvb("ok", true).kv("path", path).kvb("enabled", enabled);
+  j.kv("version", config_version(r.body)).end_obj();
   return {200, "application/json", j.take(), ""};
 }
 

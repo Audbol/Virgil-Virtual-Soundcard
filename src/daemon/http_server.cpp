@@ -39,6 +39,7 @@ const char* reason(int status) {
     case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
+    case 409: return "Conflict";
     case 413: return "Payload Too Large";
     case 500: return "Internal Server Error";
     case 503: return "Service Unavailable";
@@ -121,6 +122,8 @@ bool HttpServer::start(uint32_t addr, uint16_t port, Handler handler) {
 void HttpServer::stop() {
   running_ = false;
   if (thread_.joinable()) thread_.join();
+  // Connection threads notice running_ within one receive timeout.
+  while (workers_.load() > 0) sleep_until_ns(mono_ns() + 10000000LL);
   if (listen_fd_ != -1) VIRGIL_CLOSE(decltype(socket(0, 0, 0))(listen_fd_));
   listen_fd_ = -1;
 }
@@ -137,20 +140,37 @@ void HttpServer::run() {
     socklen_t len = sizeof peer;
     auto c = accept(lfd, reinterpret_cast<sockaddr*>(&peer), &len);
     if (c == decltype(c)(-1)) continue;
+    // A thread per connection (bounded): one that sends nothing yet does
+    // not delay the next. At the bound, serve here as before.
+    constexpr int kMaxWorkers = 8;
+    if (workers_.fetch_add(1) < kMaxWorkers) {
+      try {
+        std::thread([this, c] {
+          serve(intptr_t(c));
+          VIRGIL_CLOSE(c);
+          workers_.fetch_sub(1);
+        }).detach();
+        continue;
+      } catch (const std::exception&) {  // no thread available: serve inline
+      }
+    }
+    workers_.fetch_sub(1);
     serve(intptr_t(c));
     VIRGIL_CLOSE(c);
   }
 }
 
 void HttpServer::serve(intptr_t fd) {
-  set_timeout(fd, 2000);
+  // Short receive timeout: requests come from this computer and arrive at
+  // once; an idle connection is dropped quickly.
+  set_timeout(fd, 500);
   const auto sfd = decltype(socket(0, 0, 0))(fd);
   std::string buf;
   char chunk[4096];
   size_t header_end = std::string::npos;
   // One overall deadline per connection: a client trickling bytes must not
-  // hold the (single) server thread, or stop() waiting for it, for long.
-  const int64_t deadline = mono_ns() + 5000000000LL;
+  // hold a server thread, or stop() waiting for it, for long.
+  const int64_t deadline = mono_ns() + 3000000000LL;
   auto expired = [&] { return mono_ns() > deadline || !running_; };
   while (header_end == std::string::npos) {
     if (expired()) return;

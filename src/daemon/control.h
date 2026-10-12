@@ -21,7 +21,7 @@ struct DaemonContext {
   Engine* engine = nullptr;   // null while (re)starting or on error
   Config cfg;                 // configuration the engine runs / will run
   std::string config_path;    // where the panel saves configuration
-  std::string status = "starting";  // starting | waiting-for-network | running | stopped | error
+  std::string status = "starting";  // starting | waiting-for-network | running | restarting | stopping | stopped | error
   std::string error;          // last start error, shown in the panel
   std::atomic<bool> reload{false};
   // Command-line options that override the file; re-applied after a reload.
@@ -49,6 +49,7 @@ class ControlServer {
   HttpResponse status_json();
   HttpResponse interfaces_json();
   HttpResponse get_config();
+  std::string current_config_text();
   HttpResponse save_config(const HttpRequest& r);
   HttpResponse diagnostics_report();
   HttpResponse set_running(bool on);
@@ -60,6 +61,9 @@ class ControlServer {
 
 // Wall clock in ms since the Unix epoch (diagnostics timestamps).
 int64_t wall_ms();
+
+// Version tag of a configuration text (X-Virgil-Config-Version).
+std::string config_version(const std::string& text);
 
 // The configuration file location used by installers on this OS.
 std::string default_config_path();

@@ -241,8 +241,13 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
 
     if (engine) {
       {
+        // The panel shows "Restarting…" / "Stopping…" (not "Dante stack
+        // not running") while the engine is down for a reload. Stop from the
+        // panel has already said "stopping".
         std::lock_guard<std::mutex> l(ctx.mutex);
         ctx.engine = nullptr;
+        if (g_quit) ctx.status = "stopping";
+        else if (ctx.status != "stopping") ctx.status = "restarting";
       }
       VIRGIL_LOG_INFO(g_quit ? "shutting down" : "stopping engine for reload");
       engine->stop();
@@ -269,8 +274,9 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       {
         std::lock_guard<std::mutex> l(ctx.mutex);
         if (ctx.run_override >= 0) ctx.cfg.enabled = ctx.run_override != 0;
+        ctx.status = ctx.cfg.enabled ? "starting" : "stopping";
+        ctx.error.clear();
       }
-      set_status("starting");
     }
   }
   control.stop();

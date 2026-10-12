@@ -1,5 +1,6 @@
 #include "settings_model.h"
 
+#include <cctype>
 #include <cstdio>
 #include <cstdlib>
 
@@ -23,11 +24,25 @@ std::string us_text(const std::string& ms) {
   return std::to_string(long(v * 1000 + 0.5));
 }
 
-bool truthy(const std::string& v) { return v == "true" || v == "1" || v == "yes" || v == "on"; }
+std::string lower(std::string s) {
+  for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
+  return s;
+}
 
+// As the daemon reads booleans.
+bool truthy(const std::string& v) {
+  const std::string l = lower(v);
+  return l == "true" || l == "1" || l == "yes" || l == "on";
+}
+
+// 0 is a valid count for one direction (the daemon needs one channel in
+// all); missing or unreadable is the default, 8.
 unsigned channels(const std::string& v) {
-  const long n = std::strtol(v.c_str(), nullptr, 10);
-  return n > 0 ? unsigned(n) : 8;
+  if (v.empty()) return 8;
+  char* end = nullptr;
+  const long n = std::strtol(v.c_str(), &end, 10);
+  if (end == v.c_str() || *end || n < 0) return 8;
+  return unsigned(n);
 }
 
 }  // namespace
@@ -65,7 +80,7 @@ SettingsForm load_settings(const std::string& c, const std::vector<Interface>& a
   const std::string rl = conf_get(c, "device", "latency_us"), tl = conf_get(c, "device", "tx_latency_us");
   if (!rl.empty()) f.rx_latency_ms = ms_text(rl);
   if (!tl.empty()) f.tx_latency_ms = ms_text(tl);
-  f.local_clock = conf_get(c, "device", "clock") == "free";
+  f.local_clock = lower(conf_get(c, "device", "clock")) == "free";
   f.master_capable = truthy(conf_get(c, "ptp", "master_capable"));
   return f;
 }

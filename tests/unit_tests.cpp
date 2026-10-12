@@ -12,7 +12,9 @@
 #include "virgil/sample_convert.h"
 #include "virgil/shm_layout.h"
 #include "diagnostics.h"
+#include "settings_model.h"
 #include "test_main.h"
+#include "view.h"
 
 using namespace virgil;
 
@@ -524,6 +526,73 @@ TEST(config_format_roundtrip) {
   CHECK(b.device_name == a.device_name && b.interface == "10.0.0.2");
   CHECK(b.tx_channels == 16 && b.control_port == 0 && b.latency_us == 1500);
   CHECK(format_config(a) == format_config(b));
+}
+
+TEST(control_conf_aliases_and_last_wins) {
+  // Virgil Control reads the file as the daemon does.
+  const std::string t =
+      "[device]\nname = A\ntx_channels = 2\n[network]\nplayback_channels = 6\ncapture_channels = 0\n"
+      "rx_latency_us = 2000\n[ptp]\nmaster_capable = Yes\n[device]\nclock = FREE\n";
+  Config c;
+  std::string err;
+  CHECK(parse_config(t, &c, &err));
+  CHECK(vc::conf_get(t, "device", "tx_channels") == "6" && c.tx_channels == 6);
+  CHECK(vc::conf_get(t, "device", "rx_channels") == "0" && c.rx_channels == 0);
+  CHECK(vc::conf_get(t, "device", "latency_us") == "2000" && c.latency_us == 2000);
+  const vc::SettingsForm f = vc::load_settings(t, {});
+  CHECK(f.tx_channels == 6 && f.rx_channels == 0 && f.rx_latency_ms == "2");
+  CHECK(f.master_capable && f.local_clock);
+  CHECK(vc::load_settings("[device]\n", {}).tx_channels == 8);
+  CHECK(!vc::load_settings("[ptp]\nmaster_capable = off\n", {}).master_capable);
+
+  // Saving changes every occurrence, so the daemon reads the new value.
+  vc::SettingsForm g = f;
+  g.tx_channels = 3;
+  g.rx_latency_ms = "5";
+  const std::string out = vc::apply_settings(t, g);
+  Config d;
+  CHECK(parse_config(out, &d, &err));
+  CHECK(d.tx_channels == 3 && d.latency_us == 5000 && d.rx_channels == 0);
+  CHECK(out.find("playback_channels = 3") != std::string::npos);
+  // A key that is not there yet goes into [device], or [network] without one.
+  CHECK(vc::conf_set("[network]\nname = B\n", "device", "interface", "eth0") ==
+        "[network]\nname = B\ninterface = eth0\n");
+}
+
+TEST(control_tooltip_and_utf8) {
+  vc::Status s;
+  s.reachable = true;
+  s.name = "V";
+  s.state = "waiting-for-network";
+  CHECK(vc::tray_tooltip(s).find("Waiting for network") != std::string::npos);
+  s.state = "restarting";
+  CHECK(vc::tray_tooltip(s).find("Restarting") != std::string::npos);
+  s.state = "running";
+  s.dante = true;
+  s.clock = "free-run";
+  s.clock_source = "free";
+  s.clients = {{"a", true}};
+  s.dropouts_last_hour = 2;
+  const std::string t = vc::tray_tooltip(s);
+  CHECK(t.find("Local clock only") != std::string::npos);
+  CHECK(t.find("1 app playing") != std::string::npos && t.find("2 dropouts") != std::string::npos);
+
+  CHECK(vc::valid_utf8("ok \xC3\xA9") == "ok \xC3\xA9");
+  CHECK(vc::valid_utf8("cut \xE2\x82") == "cut \xEF\xBF\xBD\xEF\xBF\xBD");
+  CHECK(vc::valid_utf8("\xC0\xAF") == "\xEF\xBF\xBD\xEF\xBF\xBD");  // overlong
+  vc::Status p;
+  CHECK(vc::parse_status("{\"device\":{\"name\":\"X\\ud83c\\udfb5\"},\"clients\":[{\"name\":\"ab\xE2\"}]}", &p));
+  CHECK(p.name == "X\xF0\x9F\x8E\xB5" && p.clients.size() == 1 && p.clients[0].name == "ab\xEF\xBF\xBD");
+}
+
+TEST(config_latency_errors_in_ms) {
+  Config c;
+  std::string err;
+  parse_config("[device]\nlatency_us = 100\n", &c, &err);
+  CHECK(!validate_config(&c, &err) && err.find("0.5 ms") != std::string::npos);
+  Config t;
+  parse_config("[device]\ntx_latency_us = 1000\n", &t, &err);
+  CHECK(!validate_config(&t, &err) && err.find("3.5 ms") != std::string::npos);
 }
 
 TEST_MAIN()

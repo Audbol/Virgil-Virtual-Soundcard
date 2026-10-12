@@ -58,15 +58,28 @@ struct Parser {
           case 'f': out->push_back('\f'); break;
           case 'u': {
             if (end - p < 4) return false;
-            const unsigned cp = unsigned(std::strtoul(std::string(p, 4).c_str(), nullptr, 16));
+            unsigned cp = unsigned(std::strtoul(std::string(p, 4).c_str(), nullptr, 16));
             p += 4;
+            if (cp >= 0xD800 && cp < 0xDC00 && end - p >= 6 && p[0] == '\\' && p[1] == 'u') {
+              const unsigned lo = unsigned(std::strtoul(std::string(p + 2, 4).c_str(), nullptr, 16));
+              if (lo >= 0xDC00 && lo < 0xE000) {
+                cp = 0x10000 + ((cp - 0xD800) << 10) + (lo - 0xDC00);
+                p += 6;
+              }
+            }
+            if (cp >= 0xD800 && cp < 0xE000) cp = 0xFFFD;  // lone surrogate
             if (cp < 0x80) {
               out->push_back(char(cp));
             } else if (cp < 0x800) {
               out->push_back(char(0xC0 | (cp >> 6)));
               out->push_back(char(0x80 | (cp & 0x3F)));
-            } else {
+            } else if (cp < 0x10000) {
               out->push_back(char(0xE0 | (cp >> 12)));
+              out->push_back(char(0x80 | ((cp >> 6) & 0x3F)));
+              out->push_back(char(0x80 | (cp & 0x3F)));
+            } else {
+              out->push_back(char(0xF0 | (cp >> 18)));
+              out->push_back(char(0x80 | ((cp >> 12) & 0x3F)));
               out->push_back(char(0x80 | ((cp >> 6) & 0x3F)));
               out->push_back(char(0x80 | (cp & 0x3F)));
             }
@@ -261,13 +274,31 @@ std::string quote(const std::string& v) {
 }
 }  // namespace
 
+namespace {
+// The daemon reads [device] and [network] alike, and some keys under a
+// second name; the last occurrence of a key wins.
+bool section_matches(const std::string& want, const std::string& cur) {
+  if (want == "device") return cur == "device" || cur == "network";
+  return cur == want;
+}
+bool key_matches(const std::string& want, const std::string& key, const std::string& section) {
+  if (key == want) return true;
+  if (section != "device") return false;
+  static const char* const kAliases[][2] = {
+      {"tx_channels", "playback_channels"}, {"rx_channels", "capture_channels"}, {"latency_us", "rx_latency_us"}};
+  for (const auto& a : kAliases)
+    if ((want == a[0] && key == a[1]) || (want == a[1] && key == a[0])) return true;
+  return false;
+}
+}  // namespace
+
 std::string conf_get(const std::string& text, const std::string& section, const std::string& key) {
-  std::string cur;
+  std::string cur, found;
   for (const auto& line : split_lines(text)) {
     const std::string h = header_of(line);
     if (!h.empty()) { cur = h; continue; }
     size_t eq = 0;
-    if (cur == section && key_of(line, &eq) == key) {
+    if (section_matches(section, cur) && key_matches(key, key_of(line, &eq), section)) {
       std::string v, raw = line.substr(eq + 1);
       bool q = false;
       for (char c : raw) {
@@ -275,32 +306,38 @@ std::string conf_get(const std::string& text, const std::string& section, const 
         if (!q && (c == ';' || c == '#')) break;
         v += c;
       }
-      return trim(v);
+      found = trim(v);
     }
   }
-  return {};
+  return found;
 }
 
 std::string conf_set(const std::string& text, const std::string& section, const std::string& key,
                      const std::string& value) {
   auto lines = split_lines(text);
   std::string cur;
-  int sec_start = -1, sec_end = -1;
+  int sec_start = -1, sec_end = -1, alt_start = -1, alt_end = -1;
+  bool replaced = false;
   for (size_t i = 0; i < lines.size(); ++i) {
     const std::string h = header_of(lines[i]);
     if (!h.empty()) {
-      if (cur == section && sec_end < 0) sec_end = int(i);
+      if (cur == section && sec_end < 0 && sec_start >= 0) sec_end = int(i);
+      if (cur != section && section_matches(section, cur) && alt_end < 0 && alt_start >= 0) alt_end = int(i);
       cur = h;
       if (h == section && sec_start < 0) sec_start = int(i);
+      else if (h != section && section_matches(section, h) && alt_start < 0) alt_start = int(i);
       continue;
     }
     size_t eq = 0;
-    if (cur == section && key_of(lines[i], &eq) == key) {
+    // Every occurrence (also under the other name), so none overrides it.
+    if (section_matches(section, cur) && key_matches(key, key_of(lines[i], &eq), section)) {
       lines[i] = trim(lines[i].substr(0, eq)) + " = " + quote(value);
-      return join_lines(lines);
+      replaced = true;
     }
   }
+  if (replaced) return join_lines(lines);
   const std::string line = key + " = " + quote(value);
+  if (sec_start < 0 && alt_start >= 0) sec_start = alt_start, sec_end = alt_end;
   if (sec_start < 0) {
     std::string t = text;
     while (!t.empty() && std::isspace(static_cast<unsigned char>(t.back()))) t.pop_back();
@@ -313,6 +350,33 @@ std::string conf_set(const std::string& text, const std::string& section, const 
 }
 
 // ---- status -----------------------------------------------------------------------
+
+std::string valid_utf8(const std::string& in) {
+  std::string out;
+  out.reserve(in.size());
+  const auto* p = reinterpret_cast<const unsigned char*>(in.data());
+  const size_t n = in.size();
+  for (size_t i = 0; i < n;) {
+    const unsigned c = p[i];
+    size_t len = c < 0x80 ? 1 : (c >> 5) == 0x6 ? 2 : (c >> 4) == 0xE ? 3 : (c >> 3) == 0x1E ? 4 : 0;
+    bool ok = len > 0 && i + len <= n;
+    for (size_t k = 1; ok && k < len; ++k) ok = (p[i + k] & 0xC0) == 0x80;
+    if (ok && len > 1) {
+      unsigned cp = c & (0x7F >> len);
+      for (size_t k = 1; k < len; ++k) cp = (cp << 6) | (p[i + k] & 0x3F);
+      static const unsigned kMin[5] = {0, 0, 0x80, 0x800, 0x10000};
+      ok = cp >= kMin[len] && cp <= 0x10FFFF && !(cp >= 0xD800 && cp <= 0xDFFF);  // no overlong / surrogates
+    }
+    if (ok) {
+      out.append(in, i, len);
+      i += len;
+    } else {
+      out += "\xEF\xBF\xBD";  // U+FFFD
+      ++i;
+    }
+  }
+  return out;
+}
 
 bool parse_status(const std::string& body, Status* st) {
   Json j;
@@ -348,6 +412,14 @@ bool parse_status(const std::string& body, Status* st) {
   const Json& m = j["meters"];
   for (size_t i = 0; i < m["tx"].size(); ++i) s.meter_tx.push_back(float(m["tx"][i].num()));
   for (size_t i = 0; i < m["rx"].size(); ++i) s.meter_rx.push_back(float(m["rx"][i].num()));
+  // Shown by the UI toolkits, which may reject (or crash on) invalid UTF-8:
+  // app names come from the apps, names and errors from the network.
+  for (std::string* t : {&s.version, &s.state, &s.error, &s.config_path, &s.name, &s.address, &s.iface,
+                         &s.clock, &s.clock_source, &s.grandmaster})
+    *t = valid_utf8(*t);
+  for (auto* v : {&s.tx_names, &s.rx_names})
+    for (auto& t : *v) t = valid_utf8(t);
+  for (auto& cl : s.clients) cl.name = valid_utf8(cl.name);
   *st = std::move(s);
   return true;
 }

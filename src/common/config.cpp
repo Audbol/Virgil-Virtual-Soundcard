@@ -193,13 +193,19 @@ bool validate_config(Config* c, std::string* error) {
     if (!(std::isalnum(uint8_t(ch)) || ch == '-' || ch == ' ' || ch == '_'))
       return fail("name may only contain letters, digits, spaces, '-' and '_'");
   if (c->tick_us < 125 || c->tick_us > 4000) return fail("tick_us must be between 125 and 4000");
+  // Latency messages in ms, as Virgil Control and the panel show latency.
+  auto ms = [](uint32_t us) {
+    char b[32];
+    std::snprintf(b, sizeof b, "%g ms", us / 1000.0);
+    return std::string(b);
+  };
   if (c->latency_us < 500 || c->latency_us > 40000)
-    return fail("latency_us must be between 500 and 40000");
+    return fail("receive latency (latency_us) must be between 0.5 ms and 40 ms");
   if (c->tx_latency_us < 500 || c->tx_latency_us > 40000)
-    return fail("tx_latency_us must be between 500 and 40000");
+    return fail("transmit latency (tx_latency_us) must be between 0.5 ms and 40 ms");
   if (c->tx_latency_us < c->tx_send_delay_us() + 1000)
-    return fail("tx_latency_us must be at least two ticks + 1500 (" +
-                std::to_string(c->tx_send_delay_us() + 1000) + ")");
+    return fail("transmit latency (tx_latency_us) must be at least " + ms(c->tx_send_delay_us() + 1000) +
+                " (two ticks + 1.5 ms)");
   if (c->clock != "ptp" && c->clock != "free") return fail("clock must be 'ptp' or 'free'");
   if (c->ports != "auto" && c->ports != "standard") {
     uint32_t p = 0;
