@@ -132,7 +132,7 @@ IWICImagingFactory* g_wic;
 ID2D1HwndRenderTarget* g_rt;
 ID2D1SolidColorBrush* g_brush;
 ID2D1Bitmap* g_logo;
-IDWriteTextFormat *g_f_title, *g_f_sub, *g_f_sub_c, *g_f_label, *g_f_small, *g_f_mono, *g_f_button, *g_f_big;
+IDWriteTextFormat *g_f_title, *g_f_sub, *g_f_sub_c, *g_f_label, *g_f_small, *g_f_small_l, *g_f_mono, *g_f_button, *g_f_big;
 float g_dpi = 96.f;
 
 // First installed family of a preference list (Segoe UI/Consolas ship with
@@ -182,6 +182,7 @@ void create_device_independent() {
   g_f_label = make_format(L"ui", 12.f, DWRITE_FONT_WEIGHT_NORMAL);
   g_f_sub_c = make_format(L"ui", 12.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
   g_f_small = make_format(L"ui", 10.5f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
+  g_f_small_l = make_format(L"ui", 10.5f, DWRITE_FONT_WEIGHT_NORMAL);
   g_f_mono = make_format(L"mono", 11.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_TRAILING);
   g_f_button = make_format(L"ui", 12.f, DWRITE_FONT_WEIGHT_NORMAL, DWRITE_TEXT_ALIGNMENT_CENTER);
   g_f_big = make_format(L"ui", 15.f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
@@ -301,6 +302,9 @@ float window_w(const vc::Status& s) {
 }
 // Two meter groups stacked: from the network on top, to the network below.
 const float kGroupH = 34 + kMeterH + 30;
+// With the "no clock leader" notice each meter group gives up this much
+// height for it, so the window keeps its size (as tools/control_common/view.cpp).
+const float kNoticeShrink = 44;
 float window_h() { return kHeader + 14 + 2 * kGroupH + 10 + kFooter; }
 
 // ---- painting -----------------------------------------------------------------------------
@@ -327,13 +331,14 @@ void update_meters(std::vector<MeterState>& m, const std::vector<float>& vals, u
 }
 
 void draw_meter_group(float x, float y, const wchar_t* caption, unsigned n, const std::vector<MeterState>& m,
-                      DWORD now) {
+                      DWORD now, float meter_h) {
   const float sw = strip_w(n), gap = sw >= 12 ? 6 : 3, scale_w = 34;
   text(caption, g_f_label, D2D1::RectF(x, y - 26, x + 400, y - 8), kMuted);
-  const float top = y, h = kMeterH, x0 = x + scale_w;
+  const float top = y, h = meter_h, x0 = x + scale_w;
   // dB scale.
   const int marks[] = {0, -6, -12, -18, -24, -36, -48, -60};
   for (int db : marks) {
+    if (h < 130 && (db == -6 || db == -18)) continue;  // shortened for the clock notice
     const float yy = top + h * (1.f - (db + 60.f) / 60.f);
     text(db == 0 ? L"0" : std::to_wstring(-db), g_f_mono, D2D1::RectF(x, yy - 7, x + scale_w - 8, yy + 7),
          kDim);
@@ -390,6 +395,8 @@ ClockView clock_view(const vc::Status& s) {
   if (s.clock == "ptp-master") return {kEmber, L"Clock leader", L"no other Dante clock present"};
   if (s.clock_source == "free")
     return {kWarn, L"Local clock only", L"not in sync with Dante (Settings \u203a Clock)"};
+  const vc::ClockNotice n = vc::clock_notice(s);
+  if (n.show) return {kWarn, widen(n.headline), L"running on the local clock"};
   return {kWarn, L"Free-running", s.grandmaster.empty() ? L"no Dante clock leader found" : L"acquiring " + widen(s.grandmaster)};
 }
 
@@ -457,11 +464,28 @@ void paint(HWND hwnd) {
   } else {
     // Meter bridge: what arrives from the network (the apps' inputs) on top,
     // what the apps send to the network below. Scales line up on the left.
+    const vc::ClockNotice notice = vc::clock_notice(s);
+    const float shrink = notice.show ? kNoticeShrink : 0;
+    const float mh = kMeterH - shrink, gh = kGroupH - shrink;
     const float my = kHeader + 14 + 34;
     const float bx = std::max(kPad, (W - std::max(group_w(s.tx), group_w(s.rx))) / 2);
-    draw_meter_group(bx, my, fmt(L"From network  \u2014  %u channels", s.rx).c_str(), s.rx, g_mrx, now);
-    draw_meter_group(bx, my + kGroupH, fmt(L"To network  \u2014  %u channels", s.tx).c_str(), s.tx, g_mtx,
-                     now);
+    draw_meter_group(bx, my, fmt(L"From network  \u2014  %u channels", s.rx).c_str(), s.rx, g_mrx, now, mh);
+    draw_meter_group(bx, my + gh, fmt(L"To network  \u2014  %u channels", s.tx).c_str(), s.tx, g_mtx, now, mh);
+    if (notice.show) {
+      // "No Dante clock leader found on <adapter> (<ip>)" and the likely fixes.
+      const float top = my + gh + mh + 24, bottom = H - kFooter - 24;
+      const D2D1_RECT_F box = D2D1::RectF(kPad, top, W - kPad, bottom);
+      fill_round(box, 4, kPanel);
+      stroke_round(box, 4, kLine);
+      g_brush->SetColor(rgb(kWarn));
+      g_rt->FillEllipse(D2D1::Ellipse(D2D1::Point2F(kPad + 14, top + 15), 4, 4), g_brush);
+      text(widen(notice.title), g_f_label, D2D1::RectF(kPad + 26, top + 5, W - kPad - 10, top + 25), kText);
+      float y = top + 26;
+      for (const std::string& h : notice.hints) {
+        text(widen(h), g_f_small_l, D2D1::RectF(kPad + 26, y, W - kPad - 10, y + 15), kMuted);
+        y += 15;
+      }
+    }
     if (!s.error.empty())
       text(widen(s.error), g_f_sub, D2D1::RectF(kPad, H - kFooter - 22, W - kPad, H - kFooter - 4), kBad);
   }
@@ -817,7 +841,8 @@ void command(int id) {
 
 std::wstring tray_text(const vc::Status& s) {
   const ClockView cv = clock_view(s);
-  std::wstring t = L"Virgil \u2014 " + cv.line1;
+  const vc::ClockNotice notice = vc::clock_notice(s);
+  std::wstring t = L"Virgil \u2014 " + (notice.show ? widen(notice.title) : cv.line1);
   if (s.reachable) {
     unsigned playing = 0;
     for (const auto& c : s.clients) playing += c.active;
@@ -838,6 +863,7 @@ void poll_thread() {
   std::string was_clock;
   DWORD lost_since = 0;
   bool lost_told = false;
+  bool no_leader_told = false;  // once per run of the engine
   while (!g_quit) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
@@ -866,6 +892,12 @@ void poll_thread() {
     if (lost_since && !lost_told && GetTickCount() - lost_since > 5000) {
       lost_told = true;
       PostMessageW(g_hwnd, WM_APP_STATUS, 2, 0);
+    }
+    // No Dante clock leader heard at all (not a lost lock: that is above).
+    if ((s.reachable && s.state != "running") || s.clock == "ptp-locked") no_leader_told = false;
+    if (!no_leader_told && !lost_since && vc::clock_notice(s).show) {
+      no_leader_told = true;
+      PostMessageW(g_hwnd, WM_APP_STATUS, 3, 0);
     }
     was_reachable = s.reachable;
     was_clock = s.clock;
@@ -1137,6 +1169,16 @@ LRESULT CALLBACK wnd_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
       tray_tip(tray_text(s));
       if (wp == 1) tray_balloon(L"Virgil service stopped", L"Dante audio from this computer has stopped.", true);
       if (wp == 2) tray_balloon(L"Dante clock lost", L"Virgil is no longer locked to the Dante clock leader.", true);
+      if (wp == 3) {
+        const vc::ClockNotice n = vc::clock_notice(s);
+        if (n.show) {
+          // As many whole hints as the balloon holds (255 characters).
+          std::wstring msg = widen(n.title) + L".";
+          for (const std::string& h : n.hints)
+            if (msg.size() + 1 + widen(h).size() <= 255) msg += L" " + widen(h);
+          tray_balloon(widen(n.headline), msg, true);
+        }
+      }
       if (g_visible) resize_to_content(h);
       return 0;
     }

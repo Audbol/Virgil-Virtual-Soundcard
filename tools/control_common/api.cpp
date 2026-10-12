@@ -1,5 +1,6 @@
 #include "api.h"
 
+#include <algorithm>
 #include <cctype>
 #include <cstdlib>
 #include <cstring>
@@ -402,6 +403,14 @@ bool parse_status(const std::string& body, Status* st) {
   s.clock_source = c["source"].str("ptp");
   s.offset_us = c["offset_us"].num();
   s.grandmaster = c["grandmaster"].str();
+  const Json& pt = c["ptp"];
+  if (pt.type == Json::Object) {
+    s.ptp_info = true;
+    s.ptp_senders = unsigned(std::max(0.0, pt["senders"].num()));
+    s.ptp_master_heard = pt["master_heard"].boolean();
+    s.no_leader_s = std::max(0.0, pt["no_leader_s"].num());
+    s.ptp_adapter = pt["adapter"].str();
+  }
   s.late_ticks = (unsigned long long)j["counters"]["late_ticks"].num();
   s.clock_steps = (unsigned long long)j["counters"]["clock_steps"].num();
   s.dropouts_last_hour = (unsigned long long)j["dropouts_last_hour"].num();
@@ -415,13 +424,42 @@ bool parse_status(const std::string& body, Status* st) {
   // Shown by the UI toolkits, which may reject (or crash on) invalid UTF-8:
   // app names come from the apps, names and errors from the network.
   for (std::string* t : {&s.version, &s.state, &s.error, &s.config_path, &s.name, &s.address, &s.iface,
-                         &s.clock, &s.clock_source, &s.grandmaster})
+                         &s.clock, &s.clock_source, &s.grandmaster, &s.ptp_adapter})
     *t = valid_utf8(*t);
   for (auto* v : {&s.tx_names, &s.rx_names})
     for (auto& t : *v) t = valid_utf8(t);
   for (auto& cl : s.clients) cl.name = valid_utf8(cl.name);
   *st = std::move(s);
   return true;
+}
+
+ClockNotice clock_notice(const Status& s) {
+  ClockNotice n;
+  if (!s.reachable || s.state != "running" || !s.dante || s.clock_source != "ptp" || !s.ptp_info) return n;
+  if (s.clock == "ptp-locked" || s.clock == "ptp-master" || s.clock == "stopped") return n;
+  if (!(s.no_leader_s > kNoLeaderNoticeS)) return n;
+  std::string where = !s.ptp_adapter.empty() ? s.ptp_adapter : !s.iface.empty() ? s.iface : "this adapter";
+  if (!s.address.empty() && s.address != where) where += " (" + s.address + ")";
+  const std::string become = "\xE2\x80\x9C" "Become clock leader when no Dante device provides one" "\xE2\x80\x9D";
+  n.show = true;
+  if (s.ptp_master_heard) {
+    n.headline = "Dante clock leader lost";
+    n.title = "Dante clock leader lost on " + where;
+    n.hints = {"Check that the clock leader device is still on and connected.",
+               "If it is gone, let another device lead or turn on " + become + "."};
+  } else if (s.ptp_senders > 0) {
+    n.headline = "No Dante clock leader yet";
+    n.title = "Dante devices found on " + where + ", but none is the clock leader yet";
+    n.hints = {"If none of them can lead, turn on " + become + ".",
+               "Otherwise check that no firewall blocks UDP ports 319 and 320."};
+  } else {
+    n.headline = "No Dante clock leader";
+    n.title = "No Dante clock leader found on " + where;
+    n.hints = {"The Dante network may be on another adapter: Settings \xE2\x80\xBA Network interface.",
+               "A firewall may block the Dante clock: allow UDP ports 319 and 320.",
+               "No device here can lead the clock? Turn on " + become + "."};
+  }
+  return n;
 }
 
 std::vector<Interface> parse_interfaces(const std::string& body) {

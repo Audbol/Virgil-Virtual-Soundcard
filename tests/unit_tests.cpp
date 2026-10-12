@@ -518,6 +518,52 @@ TEST(diagnostics_events_and_hints) {
   CHECK(d.recent_dropouts(t) == 0);
 }
 
+TEST(diagnostics_late_network_send) {
+  Config cfg;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  EngineCounters::App app;
+  app.pid = 7;
+  app.name = "REAPER";
+  c.apps.push_back(app);
+  c.tx_late_wakeups = 4;  // before this engine (process-wide totals): baseline
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 0);
+  // Two consecutive seconds of late sends: one event, the worst lag kept.
+  c.tx_late_wakeups += 2;
+  c.tx_dropped_samples += 600;
+  c.tx_max_lag_samples = 48 * 6;  // 6 ms at 48 kHz
+  d.sample(c, cfg, t += 1000);
+  c.tx_late_wakeups += 1;
+  c.tx_max_lag_samples = 48 * 5;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.recent_dropouts(t) == 1);
+  const std::string j = d.json(t);
+  char want[160];
+  std::snprintf(want, sizeof want,
+                "Audio to the network was dropped: Virgil's sending thread woke up to 6.0 ms late 3 times "
+                "(transmit latency is %.1f ms)",
+                cfg.tx_latency_us / 1000.0);
+  CHECK(j.find(want) != std::string::npos);
+  CHECK(j.find("\"kind\":\"network-send-late\"") != std::string::npos);
+  CHECK(j.find("\"network-send-late\":1") != std::string::npos);  // totals
+  CHECK(j.find("Raise Transmit latency to 10 ms") != std::string::npos);
+  CHECK(j.find("\"engine\":2") != std::string::npos);  // per-minute: computer busy
+  CHECK(d.report(t).find("[network-send-late]") != std::string::npos);
+  CHECK(d.report(t).find("worst late send 6.0 ms") != std::string::npos);
+  // With no app attached nothing audible was dropped.
+  c.apps.clear();
+  c.tx_late_wakeups += 5;
+  d.sample(c, cfg, t += 10000);
+  CHECK(d.recent_dropouts(t) == 1);
+}
+
 TEST(config_legacy_aes67_is_ignored) {
   // A config from the AES67 version still loads; flows are reported, not fatal.
   const char* old =
@@ -611,6 +657,91 @@ TEST(config_latency_errors_in_ms) {
   Config t;
   parse_config("[device]\ntx_latency_us = 1000\n", &t, &err);
   CHECK(!validate_config(&t, &err) && err.find("3.5 ms") != std::string::npos);
+}
+
+TEST(control_no_clock_leader_notice) {
+  // Older daemons send no "clock.ptp": no notice, parse still fine.
+  const std::string base =
+      "{\"status\":\"running\",\"device\":{\"name\":\"V\",\"interface\":\"\",\"address\":\"192.168.1.5\","
+      "\"dante\":true},\"clock\":{\"state\":\"free-run\",\"source\":\"ptp\",\"grandmaster\":\"\"";
+  vc::Status old;
+  CHECK(vc::parse_status(base + "}}", &old));
+  CHECK(!old.ptp_info && !vc::clock_notice(old).show);
+
+  vc::Status s;
+  CHECK(vc::parse_status(base + ",\"ptp\":{\"senders\":0,\"master_heard\":false,\"no_leader_s\":16.2,"
+                                "\"adapter\":\"eth0\"}}}",
+                         &s));
+  CHECK(s.ptp_info && s.ptp_senders == 0 && !s.ptp_master_heard && s.ptp_adapter == "eth0");
+  CHECK_NEAR(s.no_leader_s, 16.2, 1e-9);
+  vc::ClockNotice n = vc::clock_notice(s);
+  CHECK(n.show && n.title == "No Dante clock leader found on eth0 (192.168.1.5)");
+  CHECK(n.hints.size() == 3 && n.hints[1].find("UDP ports 319 and 320") != std::string::npos);
+  CHECK(n.hints[2].find("Become clock leader when no Dante device provides one") != std::string::npos);
+  CHECK(vc::tray_tooltip(s).find("No Dante clock leader found on eth0") != std::string::npos);
+
+  // The window shows the title and the hints (and still fits them).
+  struct Rec : vc::Canvas {
+    std::vector<std::string> texts;
+    void fill(const vc::Rect&, unsigned, float) override {}
+    void fill_round(const vc::Rect&, float, unsigned, float) override {}
+    void stroke_round(const vc::Rect&, float, unsigned) override {}
+    void hline(float, float, float, unsigned) override {}
+    void dot(float, float, float, unsigned) override {}
+    void text(const std::string& t, vc::Font, const vc::Rect& r, unsigned, vc::Align) override {
+      if (r.b <= r.t || r.r <= r.l) texts.push_back("<empty rect>" + t);
+      texts.push_back(t);
+    }
+    float text_width(const std::string& t, vc::Font) override { return float(t.size()) * 6; }
+    void logo(const vc::Rect&) override {}
+  };
+  auto painted = [](const vc::Status& st) {
+    vc::StatusView v;
+    v.update(st, 1000);
+    Rec r;
+    v.paint(r, v.width(), v.height());
+    std::string all;
+    for (const auto& t : r.texts) all += t + "\n";
+    return all;
+  };
+  std::string all = painted(s);
+  CHECK(all.find("No Dante clock leader found on eth0 (192.168.1.5)") != std::string::npos);
+  CHECK(all.find("Settings \xE2\x80\xBA Network interface") != std::string::npos);
+  CHECK(all.find("<empty rect>") == std::string::npos);
+
+  // Not yet 15 s, locked, leading, stopped or clock = free: no notice.
+  vc::Status q = s;
+  q.no_leader_s = 10;
+  CHECK(!vc::clock_notice(q).show && painted(q).find("No Dante clock leader found") == std::string::npos);
+  q = s, q.clock = "ptp-locked";
+  CHECK(!vc::clock_notice(q).show);
+  q = s, q.clock = "ptp-master";
+  CHECK(!vc::clock_notice(q).show);
+  q = s, q.state = "stopped";
+  CHECK(!vc::clock_notice(q).show);
+  q = s, q.clock_source = "free";
+  CHECK(!vc::clock_notice(q).show && vc::tray_tooltip(q).find("Local clock only") != std::string::npos);
+
+  // Devices heard, none leading; a leader that went away.
+  q = s, q.ptp_senders = 2;
+  n = vc::clock_notice(q);
+  CHECK(n.show && n.title == "Dante devices found on eth0 (192.168.1.5), but none is the clock leader yet");
+  q.ptp_master_heard = true;
+  CHECK(vc::clock_notice(q).title == "Dante clock leader lost on eth0 (192.168.1.5)");
+  // No adapter name from the daemon: the configured interface, else generic.
+  q = s, q.ptp_adapter.clear();
+  CHECK(vc::clock_notice(q).title == "No Dante clock leader found on this adapter (192.168.1.5)");
+
+  // PtpClock's read-only counters, alone on loopback: nothing heard yet.
+  PtpClock alone;
+  PtpClock::Options o;
+  o.interface_addr = 0x7F000001;
+  if (alone.start(o)) {
+    sleep_until_ns(mono_ns() + 50000000LL);
+    CHECK(!alone.master_ever_heard());
+    CHECK(alone.seconds_without_master() > 0.0);
+    alone.stop();
+  }
 }
 
 TEST_MAIN()

@@ -468,6 +468,14 @@ gboolean apply_status(gpointer data) {
   update_controls();
   if (event == 1) notify("Virgil service stopped", "Audio to and from the Dante network has stopped.");
   if (event == 2) notify("Dante clock lost", "Virgil is running on its own clock; check the network connection.");
+  if (event == 3) {
+    const vc::ClockNotice n = vc::clock_notice(s);
+    if (n.show) {
+      std::string body = n.title + ".";
+      for (const std::string& h : n.hints) body += "\n" + h;
+      notify(n.headline, body);
+    }
+  }
   return G_SOURCE_REMOVE;
 }
 
@@ -478,6 +486,7 @@ void poll_thread() {
   std::string was_clock;
   uint64_t lost_since = 0;
   bool lost_told = false;
+  bool no_leader_told = false;  // once per run of the engine
   while (!g_quit) {
     const auto r = vc::http(g_port, "GET", "/api/status");
     vc::Status s;
@@ -504,6 +513,12 @@ void poll_thread() {
     if (lost_since && !lost_told && now_ms() - lost_since > 5000) {
       lost_told = true;
       event = 2;
+    }
+    // No Dante clock leader heard at all (a lost lock is the case above).
+    if ((s.reachable && s.state != "running") || s.clock == "ptp-locked") no_leader_told = false;
+    if (!event && !no_leader_told && !lost_since && vc::clock_notice(s).show) {
+      no_leader_told = true;
+      event = 3;
     }
     was_reachable = s.reachable;
     was_clock = s.clock;

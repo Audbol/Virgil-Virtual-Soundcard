@@ -10,6 +10,7 @@
 #include "virgil/log.h"
 #include "virgil/net.h"
 #include "virgil/platform.h"
+#include "virgil/ptp.h"
 #include "json.h"
 #include "ui_html.h"  // generated from src/daemon/ui/index.html
 
@@ -195,6 +196,35 @@ HttpResponse ControlServer::status_json() {
   j.kv("offset_us", h ? double(h->ptp_offset_ns.load()) / 1000.0 : 0.0);
   j.kv("grandmaster", e ? e->grandmaster() : std::string());
   j.kv("source", c.clock);
+  // What the PTP follower has heard (clock = ptp only, engine running): the
+  // apps warn when no Dante clock leader is found. Leaves out the leader
+  // case, where nobody else has to be heard.
+  const PtpClock* ptp = e ? dynamic_cast<const PtpClock*>(e->clock_source()) : nullptr;
+  if (ptp && h && h->state.load() != kStatePtpMaster) {
+    j.key("ptp").begin_obj();
+    j.kv("senders", uint32_t(ptp->senders_seen()));
+    j.kvb("master_heard", ptp->master_ever_heard());
+    const double quiet = ptp->seconds_without_master();
+    j.kv("no_leader_s", std::floor(quiet * 10.0) / 10.0);
+    // Adapter name for "No Dante clock leader found on <adapter> (<ip>)";
+    // only looked up while there is something to say.
+    std::string adapter;
+    if (quiet > 0) {
+      const uint32_t addr = e->interface_address();
+      if (adapter_addr_ != addr || adapter_name_.empty()) {
+        adapter_addr_ = addr;
+        adapter_name_.clear();
+        for (const auto& i : list_interfaces())
+          if (i.addr == addr) {
+            adapter_name_ = i.name;
+            break;
+          }
+      }
+      adapter = adapter_name_;
+    }
+    j.kv("adapter", adapter);
+    j.end_obj();
+  }
   j.end_obj();
 
   j.key("counters").begin_obj();

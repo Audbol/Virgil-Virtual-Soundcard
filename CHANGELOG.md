@@ -1,6 +1,7 @@
 # Changelog
 
 ## 0.6.1 (not released yet)
+- When Virgil hears no Dante clock leader for 15 s, Virgil Control (all platforms) and the control panel say so — "No Dante clock leader found on <adapter>", or that Dante devices were found but none leads, or that the leader was lost — with the likely fixes (another network adapter, a firewall blocking UDP 319/320, *Become clock leader*), and notify once. It used to show only "Free-running", and the reason was only in the log.
 - Windows: the default transmit latency is 6 ms (was 4 ms): Windows wakes Virgil's sending thread a few milliseconds late now and then, which dropped audio at 4 ms. Existing configurations keep their setting.
 - ASIO: when a host cannot open Virgil ("Error initializing ASIO driver"), the driver's error message says why: Virgil is stopped, the service is not running or not responding, or the service and driver are different versions.
 - ALSA: a playback or capture buffer under 10 ms prints a hint once (raise the app's buffer if you hear dropouts); failures to open say why.

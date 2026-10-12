@@ -57,6 +57,10 @@ class ControlServer {
   DaemonContext* ctx_;
   HttpServer http_;
   uint16_t port_ = 0;
+  // Name of the adapter Virgil runs on, for the "no clock leader" notice
+  // (looked up once per address; guarded by ctx_->mutex).
+  uint32_t adapter_addr_ = 0;
+  std::string adapter_name_;
 };
 
 // Wall clock in ms since the Unix epoch (diagnostics timestamps).

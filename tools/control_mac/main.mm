@@ -470,6 +470,7 @@ void set_autostart(bool on) {
   std::string was_clock;
   uint64_t lost_since = 0;
   bool lost_told = false;
+  bool no_leader_told = false;
   int failures = 0;
   while (!g_quitting) {
     const auto r = vc::http(g_port, "GET", "/api/status");
@@ -484,7 +485,7 @@ void set_autostart(bool on) {
         std::lock_guard<std::mutex> l(g_mutex);
         g_latest = s;
       }
-      int event = 0;  // 1 = service lost, 2 = Dante clock lost
+      int event = 0;  // 1 = service lost, 2 = Dante clock lost, 3 = no clock leader
       if (was_reachable && !s.reachable) event = 1;
       // Not when Virgil was stopped on purpose (or is restarting).
       if (s.reachable && s.state == "running" && was_clock == "ptp-locked" && s.clock != "ptp-locked" &&
@@ -495,6 +496,12 @@ void set_autostart(bool on) {
       if (lost_since && !lost_told && now_ms() - lost_since > 5000) {
         lost_told = true;
         event = 2;
+      }
+      // Once per stretch without a leader (as on Windows and Linux).
+      if ((s.reachable && s.state != "running") || s.clock == "ptp-locked") no_leader_told = false;
+      if (!event && !no_leader_told && !lost_since && vc::clock_notice(s).show) {
+        no_leader_told = true;
+        event = 3;
       }
       was_reachable = s.reachable;
       was_clock = s.clock;
@@ -530,6 +537,12 @@ void set_autostart(bool on) {
   if (event == 2)
     notify(@"org.virgil.control.clock", @"Dante clock lost",
            @"Virgil is running on its own clock; check the network connection.");
+  if (event == 3) {
+    const vc::ClockNotice n = vc::clock_notice(s);
+    std::string body = n.title + ".";
+    for (const auto& h : n.hints) body += "\n" + h;
+    notify(@"org.virgil.control.clock", ns(n.headline), ns(body));
+  }
 }
 
 // Show the banners even while the window is in front; clicking one opens it.

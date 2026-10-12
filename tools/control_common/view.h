@@ -71,7 +71,8 @@ class StatusView {
     bool primary = false;
   };
   void update_meters(std::vector<Meter>& m, const std::vector<float>& vals, unsigned n, float dt);
-  void draw_group(Canvas& c, float x, float y, const std::string& caption, unsigned n, const std::vector<Meter>& m);
+  void draw_group(Canvas& c, float x, float y, const std::string& caption, unsigned n, const std::vector<Meter>& m,
+                  float meter_h);
   void draw_button(Canvas& c, const Button& b, int index);
 
   Status status_;

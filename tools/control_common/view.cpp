@@ -13,6 +13,7 @@ using namespace color;
 
 const float kW = 640, kHeader = 76, kFooter = 56, kMeterH = 150, kPad = 22;
 const float kGroupH = 34 + kMeterH + 30;
+const float kNoticeShrink = 44;  // per meter group, for the clock notice
 
 std::string fmt(const char* f, ...) {
   char buf[512];
@@ -57,6 +58,8 @@ ClockView clock_view(const Status& s) {
   if (s.clock == "ptp-locked") return {kOk, "Locked to " + s.grandmaster, fmt("offset %+.1f µs", s.offset_us)};
   if (s.clock == "ptp-master") return {kEmber, "Clock leader", "no other Dante clock present"};
   if (s.clock_source == "free") return {kWarn, "Local clock only", "not in sync with Dante (Settings › Clock)"};
+  const ClockNotice n = clock_notice(s);
+  if (n.show) return {kWarn, n.headline, "running on the local clock"};
   return {kWarn, "Free-running", s.grandmaster.empty() ? "no Dante clock leader found" : "acquiring " + s.grandmaster};
 }
 
@@ -91,16 +94,17 @@ void StatusView::update_meters(std::vector<Meter>& m, const std::vector<float>& 
 }
 
 void StatusView::draw_group(Canvas& c, float x, float y, const std::string& caption, unsigned n,
-                            const std::vector<Meter>& m) {
+                            const std::vector<Meter>& m, float meter_h) {
   const float sw = strip_w(n), gap = sw >= 12 ? 6 : 3, scale_w = 34;
   c.text(caption, Font::Label, Rect{x, y - 26, x + 400, y - 8}, kMuted, Align::Left);
   if (n == 0) {  // no channels this way: no placeholder meter
     c.text("None", Font::Sub, Rect{x, y, x + 400, y + 20}, kDim, Align::Left);
     return;
   }
-  const float top = y, h = kMeterH, x0 = x + scale_w;
+  const float top = y, h = meter_h, x0 = x + scale_w;
   const int marks[] = {0, -6, -12, -18, -24, -36, -48, -60};
   for (int db : marks) {
+    if (h < 130 && (db == -6 || db == -18)) continue;  // shortened for the clock notice
     const float yy = top + h * (1.f - (db + 60.f) / 60.f);
     c.text(db == 0 ? "0" : std::to_string(-db), Font::Mono, Rect{x, yy - 7, x + scale_w - 8, yy + 7}, kDim,
            Align::Right);
@@ -181,10 +185,28 @@ void StatusView::paint(Canvas& c, float W, float H) {
   } else {
     // Meter bridge: from the network (what apps record) on top, to the
     // network (what apps play) below.
+    // With the "no clock leader" notice the meters give up some height for
+    // it, so the window keeps its size.
+    const ClockNotice notice = clock_notice(s);
+    const float shrink = notice.show ? kNoticeShrink : 0;
+    const float mh = kMeterH - shrink, gh = kGroupH - shrink;
     const float my = kHeader + 14 + 34;
     const float bx = std::max(kPad, (W - std::max(group_w(s.tx), group_w(s.rx))) / 2);
-    draw_group(c, bx, my, fmt("From network  —  %u channel%s", s.rx, s.rx == 1 ? "" : "s"), s.rx, mrx_);
-    draw_group(c, bx, my + kGroupH, fmt("To network  —  %u channel%s", s.tx, s.tx == 1 ? "" : "s"), s.tx, mtx_);
+    draw_group(c, bx, my, fmt("From network  —  %u channel%s", s.rx, s.rx == 1 ? "" : "s"), s.rx, mrx_, mh);
+    draw_group(c, bx, my + gh, fmt("To network  —  %u channel%s", s.tx, s.tx == 1 ? "" : "s"), s.tx, mtx_, mh);
+    if (notice.show) {
+      const float top = my + gh + mh + 24, bottom = H - kFooter - 24;
+      const Rect box{kPad, top, W - kPad, bottom};
+      c.fill_round(box, 4, kPanel);
+      c.stroke_round(box, 4, kLine);
+      c.dot(kPad + 14, top + 15, 4, kWarn);
+      c.text(notice.title, Font::Label, Rect{kPad + 26, top + 5, W - kPad - 10, top + 25}, kText, Align::Left);
+      float y = top + 26;
+      for (const std::string& h : notice.hints) {
+        c.text(h, Font::Small, Rect{kPad + 26, y, W - kPad - 10, y + 15}, kMuted, Align::Left);
+        y += 15;
+      }
+    }
     if (!s.error.empty())
       c.text(s.error, Font::Sub, Rect{kPad, H - kFooter - 22, W - kPad, H - kFooter - 4}, kBad, Align::Left);
   }
@@ -255,7 +277,8 @@ Action StatusView::release(float x, float y) {
 std::string tray_tooltip(const Status& s) {
   if (!s.reachable) return "Virgil: service not running";
   // The same state as the window's header.
-  std::string t = "Virgil — " + s.name + "\n" + clock_view(s).line1;
+  const ClockNotice notice = clock_notice(s);
+  std::string t = "Virgil — " + s.name + "\n" + (notice.show ? notice.title : clock_view(s).line1);
   unsigned playing = 0;
   for (const auto& c : s.clients) playing += c.active;
   if (playing) t += fmt("\n%u app%s playing", playing, playing == 1 ? "" : "s");

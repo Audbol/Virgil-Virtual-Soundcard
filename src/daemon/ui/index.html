@@ -42,6 +42,9 @@ main { max-width: 1180px; margin: 0 auto; padding: 20px 24px 48px; display: grid
   background: color-mix(in srgb, var(--bad) 8%, var(--panel)); display: none; }
 .banner.show { display: block; }
 .banner.info { border-color: var(--line); color: var(--text); background: var(--panel); }
+.banner.warn { border-color: var(--warn); color: var(--text); background: color-mix(in srgb, var(--warn) 8%, var(--panel)); }
+.banner.warn strong { color: var(--warn); } .banner.warn ul { margin: 6px 0 0; padding-left: 20px; color: var(--muted); }
+.banner.warn li { margin: 2px 0; }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 14px; }
 .card, section { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: var(--shadow); }
 .card { padding: 14px 16px; min-width: 0; }
@@ -136,6 +139,7 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
 <main>
   <div class="banner" id="offline">The Virgil service is not reachable. It normally starts with the computer: start it with Virgil Control (Start service), or see the README for your system. This page reconnects automatically.</div>
   <div class="banner" id="errbanner"></div>
+  <div class="banner warn" id="clockbanner" role="status"><strong id="clocktitle"></strong><ul id="clockhints"></ul></div>
   <div class="banner info" id="stoppedbanner">Virgil is stopped: it is off the Dante network, its ports are free and apps cannot use the soundcard.
     <button class="primary" id="startbtn" style="margin-left:10px">Start Virgil</button></div>
 
@@ -337,6 +341,30 @@ function renderMeters(el, vals, holds, n, prefix, names) {
   });
 }
 
+// "No Dante clock leader" notice: the same words as the desktop apps
+// (tools/control_common/api.cpp, clock_notice).
+const NO_LEADER_NOTICE_S = 15;
+function clockNotice(st) {
+  const d = st.device || {}, c = st.clock || {}, p = c.ptp;
+  if (st.status !== "running" || !d.dante || c.source !== "ptp" || !p) return null;
+  if (c.state === "ptp-locked" || c.state === "ptp-master" || c.state === "stopped") return null;
+  if (!((p.no_leader_s || 0) > NO_LEADER_NOTICE_S)) return null;
+  let where = p.adapter || d.interface || "this adapter";
+  if (d.address && d.address !== where) where += ` (${d.address})`;
+  const become = "“Become clock leader when no Dante device provides one”";
+  if (p.master_heard) return { headline: "Dante clock leader lost", title: "Dante clock leader lost on " + where,
+    hints: ["Check that the clock leader device is still on and connected.",
+            `If it is gone, let another device lead or turn on ${become}.`] };
+  if (p.senders > 0) return { headline: "No Dante clock leader yet",
+    title: `Dante devices found on ${where}, but none is the clock leader yet`,
+    hints: [`If none of them can lead, turn on ${become}.`,
+            "Otherwise check that no firewall blocks UDP ports 319 and 320."] };
+  return { headline: "No Dante clock leader", title: "No Dante clock leader found on " + where,
+    hints: ["The Dante network may be on another adapter: Settings › Network interface.",
+            "A firewall may block the Dante clock: allow UDP ports 319 and 320.",
+            `No device here can lead the clock? Turn on ${become}.`] };
+}
+
 function render(st) {
   const d = st.device, c = st.clock, k = st.counters || {};
   $("devname").textContent = d.name || "Virgil";
@@ -349,6 +377,7 @@ function render(st) {
   // down, which is not a fault.
   const reloading = { restarting: "Restarting…", stopping: "Stopping…" }[st.status];
   const localOnly = c.source === "free";
+  const notice = clockNotice(st);
   if (stopped) setPill("", "Stopped");
   else if (reloading) setPill("", reloading);
   else if (st.status === "error") setPill("bad", "Error");
@@ -358,13 +387,22 @@ function render(st) {
   else if (c.state === "ptp-locked") setPill("ok", "Clock locked");
   else if (c.state === "ptp-master") setPill("info", "Clock leader");
   else if (localOnly) setPill("warn", "Local clock only");
+  else if (notice) setPill("warn", notice.headline);
   else setPill("warn", "Free-running clock");
+  const cb = $("clockbanner");
+  cb.classList.toggle("show", !!notice);
+  if (notice) {
+    if ($("clocktitle").textContent !== notice.title) $("clocktitle").textContent = notice.title;
+    const html = notice.hints.map(h => `<li>${esc(h)}</li>`).join("");
+    if ($("clockhints").innerHTML !== html) $("clockhints").innerHTML = html;
+  }
   const eb = $("errbanner"); eb.textContent = st.error ? "Audio engine error: " + st.error : ""; eb.classList.toggle("show", !!st.error);
 
   const clockNames = { "ptp-locked": "Locked", "ptp-master": "Clock leader", "free-run": localOnly ? "Local clock only" : "Free-running", "stopped": "Stopped" };
-  $("c-clock").textContent = reloading && c.state === "stopped" ? reloading : clockNames[c.state] || c.state;
+  $("c-clock").textContent = reloading && c.state === "stopped" ? reloading : notice ? notice.headline : clockNames[c.state] || c.state;
   $("c-clock2").textContent = c.state === "ptp-locked" ? `offset ${c.offset_us.toFixed(1)} µs · leader ${c.grandmaster}`
     : c.state === "ptp-master" ? "no other Dante clock leader on the network"
+    : notice ? "running on the local clock"
     : c.state === "free-run" ? (localOnly ? "not in sync with Dante (Settings › Clock)"
       : c.grandmaster ? "acquiring " + c.grandmaster : "no Dante clock leader found yet") : "";
   $("c-format").textContent = `${fmtRate(d.sample_rate)} · ${d.tx_channels}×${d.rx_channels} ch`;

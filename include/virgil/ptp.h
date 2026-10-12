@@ -17,6 +17,7 @@
 
 #include "virgil/media_clock.h"
 #include "virgil/net.h"
+#include "virgil/platform.h"
 
 namespace virgil {
 
@@ -177,6 +178,20 @@ class PtpClock : public ClockSource {
   std::string grandmaster() const override;
   int64_t last_offset_ns() const override { return offset_ns_.load(); }
 
+  // Read-only listening state for the control panel (safe from any thread).
+  // Distinct hosts heard sending PTP traffic (any version / subdomain).
+  int senders_seen() const { return senders_seen_.load(); }
+  // A master was followed at some point since start().
+  bool master_ever_heard() const { return master_ever_.load(); }
+  // Seconds since start() or since the master was lost, while neither
+  // following a master nor acting as one; 0 otherwise.
+  double seconds_without_master() const {
+    const int64_t since = no_master_since_ns_.load();
+    if (!since) return 0.0;
+    const int64_t d = mono_ns() - since;
+    return d > 0 ? double(d) / 1e9 : 0.0;
+  }
+
   // Called whenever the clock model changes (Virgil feeds Inferno from it).
   void set_listener(void (*fn)(const ClockModel&, void*), void* ctx) {
     listener_ = fn;
@@ -191,6 +206,9 @@ class PtpClock : public ClockSource {
   uint32_t senders_[32] = {};
   int sender_count_ = 0;
   bool warned_no_master_ = false;
+  std::atomic<int> senders_seen_{0};
+  std::atomic<bool> master_ever_{false};
+  std::atomic<int64_t> no_master_since_ns_{0};  // mono ns; 0 = following or leading
   void handle_general(const uint8_t* p, size_t n);
   void consider_master(const ptp1::PortId& src, const ptp1::ClockProps& props, int64_t now);
   void process_sync_pair(int64_t t1, int64_t t2);

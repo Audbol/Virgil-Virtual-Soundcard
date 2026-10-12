@@ -352,6 +352,10 @@ bool PtpClock::start(const Options& o) {
   state_ = kStateFreeRun;
   start_ns_ = mono_ns();
   master_seen_ns_ = start_ns_;
+  sender_count_ = 0;
+  senders_seen_ = 0;
+  master_ever_ = false;
+  no_master_since_ns_ = start_ns_;
   running_ = true;
   thread_ = std::thread([this] { run(); });
   VIRGIL_LOG_INFO("ptp: PTPv1 on %s subdomain %s, clock id %s%s",
@@ -404,6 +408,7 @@ void PtpClock::run() {
       have_master_ = false;
       state_ = kStateFreeRun;
       master_seen_ns_ = now;
+      no_master_since_ns_ = now;
       std::lock_guard<std::mutex> l(gm_mutex_);
       gm_string_.clear();
     }
@@ -420,6 +425,7 @@ void PtpClock::run() {
       VIRGIL_LOG_INFO("ptp: no master found, acting as PTPv1 master (stratum %u)", opt_.stratum);
       is_master_ = true;
       state_ = kStatePtpMaster;
+      no_master_since_ns_ = 0;
       next_sync_ns_ = now;
       std::lock_guard<std::mutex> l(gm_mutex_);
       gm_string_ = ptp1::format_uuid(self_.uuid);
@@ -444,6 +450,7 @@ void PtpClock::note_sender(const Endpoint& from, const uint8_t* p, size_t n, boo
     if (senders_[i] == from.addr) return;
   if (sender_count_ >= int(sizeof senders_ / sizeof senders_[0])) return;
   senders_[sender_count_++] = from.addr;
+  senders_seen_ = sender_count_;
   const std::string ip = ipv4_to_string(from.addr);
   if (n >= 2 && (p[1] & 0x0f) == 2) {  // PTPv2: versionPTP is the low nibble of byte 1
     VIRGIL_LOG_WARN("ptp: %s sends PTPv2 (ignored; Dante clocking uses PTPv1)", ip.c_str());
@@ -475,6 +482,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     VIRGIL_LOG_INFO("ptp: better master %s appeared, leaving master role",
                  ptp1::format_uuid(src.uuid).c_str());
     is_master_ = false;
+    no_master_since_ns_ = 0;  // following the better master from here on
     state_ = kStateFreeRun;  // until locked to the new master
     servo_.reset_to(cell_.load());
   }
@@ -500,6 +508,8 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     servo_.allow_step();  // a new timeline steps at once
   }
   have_master_ = true;
+  master_ever_ = true;
+  no_master_since_ns_ = 0;
   master_props_ = props;
   master_seen_ns_ = now;
   std::lock_guard<std::mutex> l(gm_mutex_);

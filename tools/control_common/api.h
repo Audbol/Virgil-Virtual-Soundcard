@@ -57,6 +57,13 @@ struct Status {
   std::string clock_source;  // ptp | free (settings: local clock only)
   double offset_us = 0;
   std::string grandmaster;
+  // What the PTP follower has heard ("clock.ptp"; absent from older daemons,
+  // with clock = free, while stopped or while Virgil leads the clock).
+  bool ptp_info = false;
+  unsigned ptp_senders = 0;       // hosts heard sending PTP
+  bool ptp_master_heard = false;  // a clock leader was followed since start
+  double no_leader_s = 0;         // seconds without a clock leader
+  std::string ptp_adapter;        // OS name of the adapter Virgil runs on
   unsigned long long late_ticks = 0, clock_steps = 0;
   unsigned long long dropouts_last_hour = 0;
   std::vector<std::string> tx_names, rx_names;  // channel names (Dante Controller)
@@ -64,6 +71,18 @@ struct Status {
   std::vector<float> meter_tx, meter_rx;
 };
 bool parse_status(const std::string& body, Status* st);
+
+// "No Dante clock leader" notice: running with clock = ptp, neither locked
+// nor leading, and no leader heard for more than 15 s. The same words in
+// every app (the web panel has a copy in index.html).
+struct ClockNotice {
+  bool show = false;
+  std::string headline;  // short, for the header's clock line ("No Dante clock leader")
+  std::string title;     // "No Dante clock leader found on eth0 (192.168.1.5)"
+  std::vector<std::string> hints;  // likely fixes, one short sentence each
+};
+constexpr double kNoLeaderNoticeS = 15;
+ClockNotice clock_notice(const Status& s);
 // `in` with invalid UTF-8 sequences replaced by U+FFFD.
 std::string valid_utf8(const std::string& in);
 
