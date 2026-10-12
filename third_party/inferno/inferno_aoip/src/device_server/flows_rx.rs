@@ -563,6 +563,18 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   ) {
     // TODO: it would be more logical to move socket creation here from channels_subscriber.rs which is already convoluted
     debug!("adding flow receiver local index={local_index}");
+    // Virgil patch: the receive thread indexes and divides by these.
+    if local_index >= self.flows_info.read().unwrap().len()
+      || !(2..=4).contains(&bytes_per_sample)
+      || channels_count == 0
+      || channels_count > 64
+      || u32::try_from(latency_samples).is_err()
+    {
+      error!(
+        "refusing receive flow index {local_index}: {channels_count} channels, {bytes_per_sample} bytes/sample, latency {latency_samples}"
+      );
+      return;
+    }
     let empty_sinks_vecs = (0..channels_count)
       .map(|_| {
         let mut v = vec![];

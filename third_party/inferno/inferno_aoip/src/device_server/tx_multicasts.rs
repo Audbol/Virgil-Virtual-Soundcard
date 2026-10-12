@@ -128,7 +128,12 @@ impl TransmitMulticasts {
     let fpp = FPP_MAX_ADVERTISED.try_into().unwrap() /* TODO */;
     let dst = {
       let mut bundles = self.bundles.lock().await;
-      assert!(bundles[flow_index].is_none());
+      // Virgil patch: refuse instead of panicking (a remote create request or
+      // a saved state can name a busy or out-of-range flow).
+      if flow_index >= bundles.len() || bundles[flow_index].is_some() {
+        error!("refusing multicast flow index {flow_index}: out of range or busy");
+        return;
+      }
       let mut flows_tx = self.flows_tx.lock().await;
       let (dst_addr, dst_port) = if let Some(tx) = flows_tx.as_mut() {
         let (dst_addr, dst_port) = if preferred_address.is_unspecified() {
@@ -143,15 +148,20 @@ impl TransmitMulticasts {
           dst_port,
           local_channel_indices: channel_indices.clone(),
         };
-        tx.add_flow(
-          flow_info,
-          fpp,
-          (self.self_info.bits_per_sample / 8).try_into().unwrap(),
-          Some(flow_index.try_into().unwrap()),
-          true,
-        )
-        .await
-        .log_and_forget();
+        if let Err(e) = tx
+          .add_flow(
+            flow_info,
+            fpp,
+            (self.self_info.bits_per_sample / 8).try_into().unwrap(),
+            Some(flow_index.try_into().unwrap()),
+            true,
+          )
+          .await
+        {
+          // Not kept or saved: a saved bad flow would fail on every start.
+          error!("not adding multicast flow index {flow_index}: {e:?}");
+          return;
+        }
         info!("added multicast flow, waiting grace period...");
         (dst_addr, dst_port)
       } else {
@@ -268,7 +278,7 @@ impl TransmitMulticasts {
     ignore_nonexisting: bool,
   ) -> Result<(), std::io::Error> {
     let mut bundles = self.bundles.lock().await;
-    if let Some(bundle) = bundles[flow_index].take() {
+    if let Some(bundle) = bundles.get_mut(flow_index).and_then(|b| b.take()) {
       let mut flows_tx_opt = self.flows_tx.lock().await;
       if let Some(flows_tx) = flows_tx_opt.as_mut() {
         if !self.should_work.load(std::sync::atomic::Ordering::SeqCst) {

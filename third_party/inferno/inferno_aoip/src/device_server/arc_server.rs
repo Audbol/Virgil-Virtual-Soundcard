@@ -555,9 +555,8 @@ pub async fn run_server(
                       unknown3_800: 0x800,
                       unknown4_0: 0,
                       latency_ns: (flow_info.latency_samples as u64 * 1_000_000_000u64
-                        / self_info.sample_rate as u64)
-                        .try_into()
-                        .unwrap(),
+                        / self_info.sample_rate.max(1) as u64)
+                        .min(u32::MAX as u64) as u32,
                       unknown5_0: 0,
                     }
                     .binary_serialize_to_array(binary_serde::Endianness::Big)
@@ -687,6 +686,12 @@ pub async fn run_server(
                 let str_or_none = |offset: u16| match offset {
                   _ if offset < (HEADER_LENGTH as _) => None,
                   v => match read_0term_str_from_buffer(&c_whole, v as usize - HEADER_LENGTH) {
+                    // Virgil patch: Dante names are short (an mDNS label is at
+                    // most 63 bytes); longer ones would overflow responses.
+                    Ok(s) if s.len() > 63 => {
+                      error!("refusing {}-byte name in subscription request", s.len());
+                      None
+                    }
                     Ok(s) => Some(s),
                     Err(e) => {
                       error!("failed to decode string: {e:?}");

@@ -108,6 +108,15 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
+  // Virgil patch: a closed command channel (the transmitter is gone) ends
+  // the thread instead of reading as "no command" forever.
+  fn try_command(&mut self) -> Command {
+    match self.commands_receiver.try_recv() {
+      Ok(c) => c,
+      Err(mpsc::error::TryRecvError::Empty) => Command::NoOp,
+      Err(mpsc::error::TryRecvError::Disconnected) => Command::Shutdown,
+    }
+  }
   #[inline(always)]
   fn should_dither(&self, output_bit_depth: u8) -> bool {
     self.tx_source_bit_depth > output_bit_depth
@@ -340,13 +349,13 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           self.transmit(&mut dither_rng, now, process_events);
           if process_events {
             next_process_events = (now as Clock).wrapping_add(process_events_interval);
-            self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
+            self.try_command()
           } else {
             Command::NoOp
           }
         } else {
           error!("clock unavailable, can't transmit. is the PTP daemon running? (@non-select)");
-          self.commands_receiver.try_recv().unwrap_or(Command::NoOp)
+          self.try_command()
         }
       } else {
         // on_transfer callback must be called to notify about transmission in previous iteration,
@@ -702,7 +711,11 @@ impl FlowsTransmitter {
   }
   pub fn activate_multicast_flow(&mut self, flow_index: u32) {
     // this is called for multicast flows after grace period
-    self.flows.get(&flow_index).as_ref().unwrap().expired.store(false, Ordering::Release);
+    // Virgil patch: the flow may be gone (its re-add after a conflict failed)
+    match self.flows.get(&flow_index) {
+      Some(f) => f.expired.store(false, Ordering::Release),
+      None => error!("multicast flow index {flow_index} vanished before activation"),
+    }
   }
   pub fn random_multicast_destination(&self) -> (Ipv4Addr, u16) {
     loop {

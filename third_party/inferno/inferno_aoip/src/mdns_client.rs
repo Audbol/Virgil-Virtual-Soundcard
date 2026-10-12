@@ -277,7 +277,7 @@ impl MdnsClient {
       .ok_or(Box::new(io::Error::from(io::ErrorKind::NotFound)))?
       .split_once(",")
       .ok_or(Box::new(io::Error::from(io::ErrorKind::InvalidData)))?;
-    return Ok(AdvertisedChannel {
+    let ch = AdvertisedChannel {
       addr: result.addr,
       tx_channels_per_flow: parse_int("nchan")?,
       tx_channel_id: parse_int("id")? as u16,
@@ -287,7 +287,13 @@ impl MdnsClient {
       fpp_max: fpp1.parse()?,
       min_rx_latency_ns: parse_int("latency_ns")?,
       multicast,
-    });
+    };
+    if ch.fpp_max == 0 {
+      error!("ignoring advertised channel {full_name}: fpp {fpp1},{fpp2}");
+      return Err(Box::new(io::Error::from(io::ErrorKind::InvalidData)));
+    }
+    Self::check_advertised(&full_name, ch.tx_channels_per_flow, ch.bits_per_sample, ch.min_rx_latency_ns)?;
+    return Ok(ch);
   }
 
   pub async fn query_bund(&self, full_name: &str) -> Result<AdvertisedBundle, Box<dyn Error>> {
@@ -300,13 +306,29 @@ impl MdnsClient {
     let port =
       result.properties.get("p.0").ok_or(Box::new(io::Error::from(io::ErrorKind::NotFound)))?.parse()?;
     let media_addr = SocketAddr::V4(SocketAddrV4::new(ip, port));
-    return Ok(AdvertisedBundle {
+    let b = AdvertisedBundle {
       tx_channels_per_flow: parse_int("nchan")?,
       tx_bundle_id: parse_int("id")? as u16,
       bits_per_sample: parse_int("enc").or_else(|_| parse_int("en"))? as u32,
       fpp: parse_int("fpp")? as u16,
       min_rx_latency_ns: parse_int("latency_ns")?,
       media_addr,
-    });
+    };
+    if b.fpp == 0 {
+      error!("ignoring advertised bundle {full_name}: fpp 0");
+      return Err(Box::new(io::Error::from(io::ErrorKind::InvalidData)));
+    }
+    Self::check_advertised(full_name, b.tx_channels_per_flow, b.bits_per_sample, b.min_rx_latency_ns)?;
+    return Ok(b);
+  }
+
+  // Virgil patch: values from any host on the network that the receiver
+  // divides by, allocates with or converts to smaller integers.
+  fn check_advertised(name: &str, nchan: usize, bits: u32, latency_ns: usize) -> Result<(), Box<dyn Error>> {
+    if !(1..=64).contains(&nchan) || ![16, 24, 32].contains(&bits) || latency_ns > 1_000_000_000 {
+      error!("ignoring {name}: unsupported nchan {nchan}, encoding {bits} or latency {latency_ns} ns");
+      return Err(Box::new(io::Error::from(io::ErrorKind::InvalidData)));
+    }
+    Ok(())
   }
 }

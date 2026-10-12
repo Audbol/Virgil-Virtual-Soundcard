@@ -71,7 +71,8 @@ pub async fn run_server(
             read_0term_str_from_buffer(req_bytes, hostname_offset),
             read_0term_str_from_buffer(req_bytes, rx_flow_name_offset),
           ) {
-            (Ok(h), Ok(n)) => (h.to_owned(), n.to_owned()),
+            // Dante names are short; long ones would overflow responses.
+            (Ok(h), Ok(n)) if h.len() <= 63 && n.len() <= 63 => (h.to_owned(), n.to_owned()),
             _ => {
               error!("invalid flow request, bad name offsets: {}", hex::encode(req_bytes));
               continue;

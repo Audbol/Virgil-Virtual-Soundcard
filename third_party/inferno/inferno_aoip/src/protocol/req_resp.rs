@@ -97,6 +97,14 @@ impl Connection {
     opcode2: u16,
     content: &[u8],
   ) {
+    // Virgil patch: a response built from long names a remote supplied can
+    // exceed the send buffer; answer with an error instead of panicking.
+    let (opcode2, content) = if content.len() + HEADER_LENGTH > self.send_buff.len() {
+      error!("response of {} bytes does not fit a packet, sending an error instead", content.len());
+      (0xFFFFu16, &[][..])
+    } else {
+      (opcode2, content)
+    };
     let pkt = make_packet(&mut self.send_buff, start_code, seqnum, opcode1, opcode2, content);
     self.server.send(&dst, pkt).await;
   }

@@ -746,7 +746,10 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                 let flow = flows_locked[flow_index].as_ref().unwrap();
                 if let FlowSource::Unicast(uf) = &flow.source {
                   let dbcp1 = uf.dbcp1;
-                  let handle = uf.handle.unwrap();
+                  let handle = match uf.handle {
+                    Some(h) => h,
+                    None => return async { None }.boxed(), // flow request failed earlier
+                  };
                   async move {
                     match control_client.update_flow(&server_addr, dbcp1, handle, &new_tx_channels).await
                     {
@@ -791,6 +794,10 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
         };
         let flow_index = match flows_locked.iter().position(|o| o.is_none()) {
           Some(i) => i,
+          None if flows_locked.len() >= super::flows_rx::MAX_FLOWS => {
+            error!("no free receive flow (max {}), not receiving {bundle_full_name}", super::flows_rx::MAX_FLOWS);
+            continue;
+          }
           None => {
             flows_locked.push(None);
             flows_locked.len() - 1
@@ -857,11 +864,17 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
         let num_channels_in_flow = first
           .tx_channels_per_flow
           .min(self.self_info.rx_channels.len())
-          .min(8 /*TODO make it configurable*/);
+          .min(8 /*TODO make it configurable*/)
+          .max(1);
         for chunk in &channels.iter().chunks(num_channels_in_flow) {
           let chunk = chunk.collect_vec();
           let flow_index = match flows_locked.iter().position(|o| o.is_none()) {
             Some(i) => i,
+            // Virgil patch: the receiver has MAX_FLOWS sockets
+            None if flows_locked.len() >= super::flows_rx::MAX_FLOWS => {
+              error!("no free receive flow (max {}), leaving channels unsubscribed", super::flows_rx::MAX_FLOWS);
+              continue;
+            }
             None => {
               flows_locked.push(None);
               flows_locked.len() - 1
@@ -1160,12 +1173,14 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                     let flows_recv = self.flows_recv.clone();
                     let rem_addr = uf.control_remote_addr;
                     let dbcp1 = uf.dbcp1;
-                    let handle = uf.handle.unwrap();
+                    let handle = uf.handle;
                     let flow_id = flow.local_id;
                     destroy_futures_per_remote.entry(uf.control_remote_addr).or_default().push(
                       async move {
                         info!("removing no longer needed flow index={flow_index}, remote={rem_addr:?}");
-                        control_client.stop_flow(&rem_addr, dbcp1, handle).await.log_and_forget();
+                        if let Some(handle) = handle {
+                          control_client.stop_flow(&rem_addr, dbcp1, handle).await.log_and_forget();
+                        }
                         // we can safely ignore errors - we remove the socket so keepalive messages won't arrive to the tx so it'll kick us off anyway
                         flows_recv.remove_socket(flow_index).await;
                       }

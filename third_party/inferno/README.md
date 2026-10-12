@@ -65,3 +65,11 @@ Changes for Virgil:
     channel count, frames per packet or sample size the transmit thread could
     not handle, and channel names that are not allowed are refused
     (`saved_settings.rs::valid_channel_name`).
+13. Remote input that used to panic later: multicast flows that cannot be
+    created are neither kept nor saved (`tx_multicasts.rs`), responses that
+    would not fit a packet are answered with an error (`req_resp.rs`), remote
+    names longer than 63 bytes are refused, advertised channels and bundles
+    with unsupported channel counts, encodings or latencies are ignored
+    (`mdns_client.rs`), receive flows are limited to the receiver's 32
+    sockets (`channels_subscriber.rs`, `flows_rx.rs`), and the transmit thread
+    ends when its transmitter is gone (`flows_tx.rs`).

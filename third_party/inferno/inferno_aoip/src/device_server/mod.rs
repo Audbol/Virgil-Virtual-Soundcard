@@ -153,7 +153,7 @@ impl DeviceServer {
     let shutdown_todo = async move {
       shutdown_send.send(()).unwrap();
       for task in tasks {
-        task.await.unwrap();
+        task.await.log_and_forget();
       }
       mdns_handle.shutdown_and_join();
     }
@@ -271,9 +271,11 @@ impl DeviceServer {
     let shutdown_todo = async move {
       flows_rx_handle.shutdown().await;
       channels_sub_handle.shutdown().await;
-      flows_rx_thread.join().unwrap();
+      if flows_rx_thread.join().is_err() {
+        error!("receive thread panicked");
+      }
       for task in tasks {
-        task.await.unwrap();
+        task.await.log_and_forget();
       }
       info!("receiver stopped");
     }
@@ -371,9 +373,11 @@ impl DeviceServer {
           txm.shutdown().await;
         }
         shutdown_send.send(()).unwrap();
-        flows_control_task.await.unwrap();
+        flows_control_task.await.log_and_forget();
         *flows_tx.lock().await = None;
-        flows_tx_thread.join().unwrap();
+        if flows_tx_thread.join().is_err() {
+          error!("transmit thread panicked");
+        }
         //peaks_thread.join().unwrap();
         info!("transmitter stopped");
       }

@@ -484,7 +484,8 @@ pub async fn run_server(
           _ => {
             // Log each unanswered request type once, not every second.
             let key = u64::from_be_bytes(opcode.try_into().unwrap_or([0; 8])) & !0xff;
-            if !mcaster.unknown_logged.contains(&key) {
+            // Virgil patch: bounded, any host can send endless distinct opcodes
+            if mcaster.unknown_logged.len() < 64 && !mcaster.unknown_logged.contains(&key) {
               mcaster.unknown_logged.push(key);
               info!("multicast request not implemented (logged once): opcode {}", hex::encode(opcode));
               debug!("raw udp payload: {}", hex::encode(request_buf));
