@@ -12,8 +12,10 @@
 #include "virgil/media_clock.h"
 #include "virgil/platform.h"
 #include "virgil/ptp.h"
+#include "virgil/resampler.h"
 #include "virgil/sample_convert.h"
 #include "virgil/shm_layout.h"
+#include "desktop_audio_settings.h"
 #include "diagnostics.h"
 #include "settings_model.h"
 #include "test_main.h"
@@ -1082,6 +1084,269 @@ TEST(udp_tx_timestamps_or_clean_fallback) {
     CHECK(tx.recv_from(b, sizeof b, &from) == 0);
     CHECK(mono_ns() - t1 < 100000000LL);
   }
+}
+
+// ---- desktop audio: resampler, clock bridge, settings --------------------------------
+
+// Sine of `freq` (cycles per input frame) through the resampler at a fixed
+// ratio; returns the SNR (dB) against the ideal signal at the same positions.
+static double resampler_snr(double in_rate, double out_rate, double freq_hz, double ppm, double* out_rms_db = nullptr) {
+  Resampler rs;
+  const double ratio = in_rate / out_rate * (1 + ppm * 1e-6);
+  CHECK(rs.init(1, in_rate / out_rate, 512));
+  const double w = 2 * 3.14159265358979323846 * freq_hz / in_rate;
+  const size_t total_out = size_t(out_rate);  // one second
+  std::vector<float> in, out(512);
+  uint64_t fed = 0;
+  double pos = 0;  // ideal input position of the next output frame
+  double sig = 0, err = 0, outp = 0;
+  size_t produced = 0;
+  while (produced < total_out) {
+    const size_t n = 512;
+    const size_t need = rs.needed(n, ratio);
+    in.resize(need);
+    for (size_t i = 0; i < need; ++i) in[i] = float(0.5 * std::sin(w * double(fed + i)));
+    fed += need;
+    CHECK(rs.push(in.data(), need));
+    const size_t got = rs.produce(out.data(), n, ratio);
+    CHECK(got == n);
+    for (size_t i = 0; i < got; ++i, ++produced) {
+      const double ideal = 0.5 * std::sin(w * pos);
+      pos += ratio;
+      if (produced < 2 * rs.taps()) continue;  // start-up from silence history
+      sig += ideal * ideal;
+      err += (out[i] - ideal) * (out[i] - ideal);
+      outp += double(out[i]) * out[i];
+    }
+  }
+  if (out_rms_db) *out_rms_db = 10 * std::log10(outp / double(total_out) + 1e-30);
+  return 10 * std::log10(sig / (err + 1e-30));
+}
+
+TEST(resampler_sine_snr) {
+  // Drift correction only (48 -> 48 kHz, +200 ppm): music-grade.
+  const double s1 = resampler_snr(48000, 48000, 1000, 200);
+  const double s2 = resampler_snr(48000, 48000, 12000, -200);
+  std::printf("    resampler SNR 1 kHz +200 ppm: %.1f dB, 12 kHz -200 ppm: %.1f dB\n", s1, s2);
+  CHECK(s1 > 85);
+  CHECK(s2 > 80);
+}
+
+TEST(resampler_44k1_to_48k) {
+  const double s1 = resampler_snr(44100, 48000, 1000, 0);
+  const double s2 = resampler_snr(44100, 48000, 15000, 150);
+  const double s3 = resampler_snr(96000, 48000, 5000, 0);
+  std::printf("    44.1->48 kHz SNR 1 kHz %.1f dB, 15 kHz %.1f dB; 96->48 kHz 5 kHz %.1f dB\n", s1, s2, s3);
+  CHECK(s1 > 85);
+  CHECK(s2 > 75);
+  CHECK(s3 > 85);
+  // Output frame count follows the ratio: 44100 in -> 48000 out.
+  Resampler rs;
+  CHECK(rs.init(2, 44100.0 / 48000.0, 480));
+  std::vector<float> in(44100 * 2, 0.25f), out(480 * 2);
+  size_t used = 0, made = 0;
+  while (true) {
+    const size_t need = rs.needed(480, 44100.0 / 48000.0);
+    if (used + need > 44100) break;
+    CHECK(rs.push(in.data() + used * 2, need));
+    used += need;
+    made += rs.produce(out.data(), 480, 44100.0 / 48000.0);
+  }
+  CHECK(made >= 47400 && made <= 48000);  // all but the last block and the look-ahead
+  CHECK_NEAR(out[2 * 479], 0.25, 1e-4);  // DC passes at unity gain
+}
+
+TEST(resampler_downsampling_rejects_aliases) {
+  // 23 kHz at 48 kHz is above 44.1 kHz's Nyquist frequency: must vanish
+  // instead of folding back to 21.1 kHz.
+  double rms_db = 0;
+  resampler_snr(48000, 44100, 23000, 0, &rms_db);
+  std::printf("    48->44.1 kHz, 23 kHz tone (-9 dBFS rms in): %.1f dB rms out\n", rms_db);
+  CHECK(rms_db < -80);
+  resampler_snr(96000, 48000, 30000, 0, &rms_db);
+  CHECK(rms_db < -80);
+}
+
+// A device clock (bursty 10 ms packets, delivery jitter, drift) feeding the
+// Dante clock (5.3 ms blocks): the bridge must lock to the drift with no
+// underrun or overflow, and keep its level.
+struct BridgeSimResult {
+  uint64_t underruns = 0, overflows = 0;
+  double adjust_ppm = 0;    // mean over the last 30 s
+  double level_spread_ms = 0;  // max - min level over the last 30 s
+};
+static BridgeSimResult simulate_bridge(double in_rate, double out_rate, double drift_ppm, double seconds,
+                                       size_t packet, size_t block, double jitter_ms,
+                                       bool stamp_at_arrival = false) {
+  BridgeConfig cfg;
+  cfg.channels = 1;
+  cfg.in_rate = in_rate;
+  cfg.out_rate = out_rate;
+  AdaptiveBridge b;
+  CHECK(b.init(cfg));
+  std::mt19937 rng(1234);
+  std::uniform_real_distribution<double> jit(0, jitter_ms * 1e-3);
+  const double true_in = in_rate * (1 + drift_ppm * 1e-6);
+  std::vector<float> pk(packet), out(block);
+  uint64_t k = 0, n = 0;  // packets pushed, blocks pulled
+  double next_push = (double(packet) / true_in) + jit(rng);
+  BridgeSimResult r;
+  double adj_sum = 0, lmin = 1e9, lmax = -1e9;
+  uint64_t adj_n = 0;
+  uint64_t first_underruns = 0;
+  bool running_seen = false;
+  while (true) {
+    const double next_pull = double(n) * double(block) / out_rate;
+    if (next_pull > seconds) break;
+    if (next_push <= next_pull) {
+      const double end_t = double(k + 1) * double(packet) / true_in;  // packet's last frame (device clock)
+      for (size_t i = 0; i < packet; ++i) pk[i] = float(std::sin(double(k * packet + i) * 0.01));
+      // Stamped with the device's own time stamp, or (no time stamps from
+      // the device) when the packet was picked up.
+      b.push(pk.data(), packet, int64_t((stamp_at_arrival ? next_push : end_t) * 1e9));
+      ++k;
+      next_push = double(k + 1) * double(packet) / true_in + jit(rng);
+    } else {
+      b.pull(out.data(), block, int64_t(next_pull * 1e9));
+      if (!running_seen && b.state() == AdaptiveBridge::kRunning) {
+        running_seen = true;
+        first_underruns = b.underruns();
+      }
+      if (next_pull > seconds - 30) {
+        adj_sum += b.adjust_ppm();
+        ++adj_n;
+        lmin = std::min(lmin, b.level_ms());
+        lmax = std::max(lmax, b.level_ms());
+      }
+      ++n;
+    }
+  }
+  r.underruns = b.underruns() - first_underruns;
+  r.overflows = b.overflows();
+  r.adjust_ppm = adj_n ? adj_sum / double(adj_n) : 0;
+  r.level_spread_ms = lmax - lmin;
+  return r;
+}
+
+TEST(bridge_drift_converges) {
+  for (double ppm : {200.0, -200.0}) {
+    const BridgeSimResult r = simulate_bridge(48000, 48000, ppm, 180, 480, 256, 2.0);
+    std::printf("    48 kHz device %+.0f ppm: adjust %+.1f ppm, level spread %.2f ms, %llu underruns, %llu overflows\n",
+                ppm, r.adjust_ppm, r.level_spread_ms, (unsigned long long)r.underruns,
+                (unsigned long long)r.overflows);
+    CHECK(r.underruns == 0);
+    CHECK(r.overflows == 0);
+    CHECK_NEAR(r.adjust_ppm, ppm, 5);
+    CHECK(r.level_spread_ms < 1.0);
+  }
+  // Without device time stamps: stamped on pick-up, up to 8 ms late (polling).
+  const BridgeSimResult r = simulate_bridge(48000, 48000, 200, 240, 480, 256, 8.0, true);
+  std::printf("    stamped on arrival (8 ms jitter): adjust %+.1f ppm, level spread %.2f ms\n", r.adjust_ppm,
+              r.level_spread_ms);
+  CHECK(r.underruns == 0);
+  CHECK(r.overflows == 0);
+  CHECK_NEAR(r.adjust_ppm, 200, 20);
+}
+
+TEST(bridge_44k1_device_to_48k_with_drift) {
+  // 44.1 kHz device -180 ppm into 48 kHz; and the other way (Dante -> device).
+  BridgeSimResult r = simulate_bridge(44100, 48000, -180, 180, 441, 256, 3.0);
+  std::printf("    44.1 -> 48 kHz -180 ppm: adjust %+.1f ppm, %llu underruns, %llu overflows\n", r.adjust_ppm,
+              (unsigned long long)r.underruns, (unsigned long long)r.overflows);
+  CHECK(r.underruns == 0);
+  CHECK(r.overflows == 0);
+  CHECK_NEAR(r.adjust_ppm, -180, 5);
+  r = simulate_bridge(48000, 44100, 120, 180, 256, 441, 1.0);
+  CHECK(r.underruns == 0);
+  CHECK(r.overflows == 0);
+  CHECK_NEAR(r.adjust_ppm, 120, 5);
+}
+
+TEST(bridge_source_pause_resumes_cleanly) {
+  // A loopback source delivers nothing while nothing plays: silence, then a
+  // clean restart at the target level, the drift estimate kept.
+  BridgeConfig cfg;
+  cfg.channels = 1;
+  AdaptiveBridge b;
+  CHECK(b.init(cfg));
+  std::vector<float> pk(480, 0.5f), out(256);
+  const double true_in = 48000 * (1 + 150e-6);
+  uint64_t k = 0, n = 0;
+  bool audio_during_gap = false, audio_after = false;
+  while (true) {
+    const double t_pull = double(n) * 256 / 48000;
+    if (t_pull > 150) break;
+    const double t_push = double(k + 1) * 480 / true_in;
+    if (t_push <= t_pull) {
+      const bool gap = t_push > 100 && t_push < 110;  // 10 s of nothing
+      if (!gap) b.push(pk.data(), 480, int64_t(t_push * 1e9));
+      ++k;
+    } else {
+      const bool got = b.pull(out.data(), 256, int64_t(t_pull * 1e9));
+      if (t_pull > 100.1 && t_pull < 110) audio_during_gap |= got;
+      if (t_pull > 111) audio_after |= !got;  // must be continuous again
+      ++n;
+    }
+  }
+  CHECK(!audio_during_gap);
+  CHECK(!audio_after);
+  CHECK(b.underruns() == 1);
+  CHECK_NEAR(b.adjust_ppm(), 150, 10);
+}
+
+TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
+  using namespace vc;
+  DesktopAudioSettings s;
+  s.enabled = true;
+  DesktopAudioSource a;
+  a.type = DesktopAudioSource::kDevice;
+  a.device = "{0.0.0.00000000}.{abc}";
+  a.channel = 3;
+  a.gain_db = -6.5;
+  DesktopAudioSource b;
+  b.type = DesktopAudioSource::kApp;
+  b.app = "chrome.exe";
+  b.mono = true;
+  b.mute = true;
+  b.channel = 8;
+  s.sources = {a, b};
+  s.output.enabled = true;
+  s.output.channel = 5;
+  s.output.device = "default";
+  const std::string text = format_desktop_audio(s);
+  DesktopAudioSettings t;
+  std::vector<std::string> warnings;
+  CHECK(parse_desktop_audio(text, &t, &warnings));
+  CHECK(warnings.empty());
+  CHECK(t.enabled);
+  CHECK(t.sources.size() == 2);
+  CHECK(t.sources[0].type == DesktopAudioSource::kDevice && t.sources[0].device == a.device);
+  CHECK(t.sources[0].channel == 3 && std::fabs(t.sources[0].gain_db + 6.5) < 1e-9);
+  CHECK(t.sources[1].type == DesktopAudioSource::kApp && t.sources[1].app == "chrome.exe");
+  CHECK(t.sources[1].mono && t.sources[1].mute && t.sources[1].channel == 8);
+  CHECK(t.output.enabled && t.output.channel == 5);
+  CHECK(t == s);
+
+  // Garbage, unknown keys, bad values, CRLF, BOM, comments: defaults, no crash.
+  const std::string messy =
+      "\xEF\xBB\xBF# comment\r\n[desktop-audio]\r\nenabled = yes ; trailing\r\nbogus = 1\r\n"
+      "[source]\r\ntype = app\r\napp =   Spotify.exe  \r\nchannel = 999\r\ngain_db = loud\r\n"
+      "[source]\r\ntype = nonsense\r\n"
+      "[source]\r\napp = \r\ntype=app\r\n"
+      "[output]\r\nenabled = 1\r\nchannel = -4\r\nmono = true\r\n[unknown]\r\nx=y\r\nno equals sign\r\n";
+  DesktopAudioSettings m;
+  warnings.clear();
+  CHECK(parse_desktop_audio(messy, &m, &warnings));
+  CHECK(!warnings.empty());
+  CHECK(m.enabled);
+  CHECK(m.sources.size() == 1);  // the bad type and the empty app are skipped
+  CHECK(m.sources[0].app == "Spotify.exe");
+  CHECK(m.sources[0].channel == 64);  // clamped
+  CHECK(m.sources[0].gain_db == 0);
+  CHECK(m.output.enabled && m.output.channel == 1 && m.output.mono);
+  DesktopAudioSettings e;
+  CHECK(parse_desktop_audio("", &e, nullptr));
+  CHECK(!e.enabled && e.sources.empty() && !e.output.enabled);
 }
 
 TEST_MAIN()

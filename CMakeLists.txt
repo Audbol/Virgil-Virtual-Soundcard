@@ -33,7 +33,8 @@ endif()
 add_library(virgil_client STATIC
   src/common/platform.cpp
   src/common/shm.cpp
-  src/common/client.cpp)
+  src/common/client.cpp
+  src/common/resampler.cpp)
 target_include_directories(virgil_client PUBLIC include)
 set_target_properties(virgil_client PROPERTIES POSITION_INDEPENDENT_CODE ON)
 target_link_libraries(virgil_client PUBLIC Threads::Threads)
@@ -109,7 +110,9 @@ if(APPLE)
 elseif(WIN32)
   # Native tray app with a Direct2D status window and a settings dialog.
   add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_common/api.cpp
-                 tools/control_common/settings_model.cpp tools/control_win/control.rc)
+                 tools/control_common/settings_model.cpp tools/control_win/control.rc
+                 tools/control_win/desktop_audio.cpp tools/control_win/desktop_audio_ui.cpp
+                 tools/control_win/wasapi.cpp tools/control_common/desktop_audio_settings.cpp)
   target_include_directories(virgil-control PRIVATE tools/control_win tools/control_common branding)
   if(MINGW)
     target_link_options(virgil-control PRIVATE -municode)
@@ -118,6 +121,9 @@ elseif(WIN32)
   endif()
   target_link_libraries(virgil-control PRIVATE d2d1 dwrite windowscodecs dwmapi comctl32 ole32
                         ws2_32 shell32 user32 gdi32 advapi32)
+  # Desktop audio (tools/control_win/desktop_audio.cpp) attaches to the
+  # soundcard like a driver.
+  target_link_libraries(virgil-control PRIVATE virgil_client)
 else()
   # Native GTK 3 window with tray icon; without GTK (headless builds) the
   # small launcher that opens the browser panel instead.

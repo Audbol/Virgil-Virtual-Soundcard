@@ -42,3 +42,50 @@ BEGIN
     DEFPUSHBUTTON   "Apply", IDOK, 172, 216, 52, 15
     PUSHBUTTON      "Cancel", IDCANCEL, 230, 216, 52, 15
 END
+
+IDD_DESKTOP DIALOGEX 0, 0, 330, 294
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Desktop audio"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    AUTOCHECKBOX    "Send Windows audio to Dante (desktop audio)", IDC_DA_ENABLE, 7, 7, 250, 10
+    LTEXT           "", IDC_DA_STATUS, 7, 20, 316, 17, SS_NOPREFIX
+    GROUPBOX        "Windows audio to Virgil's transmit channels", -1, 7, 39, 316, 129
+    CONTROL         "", IDC_DA_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 14, 52, 302, 92
+    PUSHBUTTON      "Add...", IDC_DA_ADD, 14, 148, 56, 14
+    PUSHBUTTON      "Edit...", IDC_DA_EDIT, 74, 148, 56, 14
+    PUSHBUTTON      "Remove", IDC_DA_REMOVE, 134, 148, 56, 14
+    GROUPBOX        "Dante receive channels to a Windows output device", -1, 7, 172, 316, 62
+    AUTOCHECKBOX    "Play receive channels", IDC_DA_OUT_ENABLE, 14, 186, 92, 10
+    COMBOBOX        IDC_DA_OUT_CH, 108, 184, 112, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Gain (dB):", -1, 232, 186, 40, 9
+    EDITTEXT        IDC_DA_OUT_GAIN, 276, 184, 32, 13, ES_AUTOHSCROLL
+    COMBOBOX        IDC_DA_OUT_DEV, 14, 201, 294, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    CONTROL         "", IDC_DA_OUT_METER, "msctls_progress32", PBS_SMOOTH, 14, 220, 60, 7
+    LTEXT           "", IDC_DA_OUT_STATE, 80, 219, 236, 10, SS_NOPREFIX | SS_ENDELLIPSIS
+    LTEXT           "Captured audio still plays on the device it was sent to. To hear it only through Dante, play those apps on an output you do not listen to, or turn that device down (on most PCs its volume does not change what is captured; the app's own volume does).", IDC_DA_NOTE, 7, 239, 316, 27
+    PUSHBUTTON      "Help", IDC_DA_HELP, 7, 273, 52, 15
+    DEFPUSHBUTTON   "Close", IDCANCEL, 271, 273, 52, 15
+END
+
+IDD_DA_SOURCE DIALOGEX 0, 0, 300, 192
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Desktop audio source"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    RADIOBUTTON     "Everything an output device plays", IDC_DS_DEV, 10, 8, 280, 10, WS_GROUP | WS_TABSTOP
+    COMBOBOX        IDC_DS_DEVICE, 22, 21, 268, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    RADIOBUTTON     "One app (and the processes it starts)", IDC_DS_APP, 10, 41, 280, 10
+    COMBOBOX        IDC_DS_APPNAME, 22, 54, 208, 200, CBS_DROPDOWN | CBS_AUTOHSCROLL | WS_VSCROLL | WS_TABSTOP
+    PUSHBUTTON      "Refresh", IDC_DS_REFRESH, 236, 53, 54, 14
+    LTEXT           "", IDC_DS_APPHINT, 22, 71, 268, 18, SS_NOPREFIX
+    RADIOBUTTON     "All apps except Virgil (no echo of what Virgil itself plays)", IDC_DS_ALL, 10, 93, 280, 10
+    LTEXT           "Virgil transmit channels:", -1, 10, 114, 90, 9
+    COMBOBOX        IDC_DS_CH, 102, 112, 188, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Gain (dB):", -1, 10, 132, 90, 9
+    EDITTEXT        IDC_DS_GAIN, 102, 130, 36, 13, ES_AUTOHSCROLL
+    AUTOCHECKBOX    "Mute", IDC_DS_MUTE, 148, 132, 60, 10
+    LTEXT           "", IDC_DS_ERR, 10, 150, 280, 18, SS_NOPREFIX
+    DEFPUSHBUTTON   "OK", IDOK, 182, 171, 52, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 238, 171, 52, 15
+END

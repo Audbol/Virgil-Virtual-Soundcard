@@ -36,6 +36,8 @@
 #include <vector>
 
 #include "api.h"
+#include "desktop_audio.h"
+#include "desktop_audio_ui.h"
 #include "resource.h"
 #include "settings_model.h"
 
@@ -98,7 +100,7 @@ const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = W
 const UINT kTrayId = 1;
 enum {
   ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_ABOUT, ID_DIAG, ID_STOP, ID_START,
-  ID_BROWSER
+  ID_BROWSER, ID_DESKTOP
 };
 
 HINSTANCE g_inst;
@@ -113,6 +115,8 @@ bool g_told_about_tray = false;
 HICON g_icon_small;          // tray, window and dialog icon (loaded once)
 HWND g_settings_dlg;         // the open settings dialog, if any (UI thread only)
 int g_pending = 0;           // command id whose request is in flight, 0 = none (UI thread only)
+// Desktop audio (Windows apps <-> Dante), running for as long as this app.
+std::unique_ptr<da::Engine> g_desktop;
 
 // Meter display state (UI thread only).
 struct MeterState {
@@ -284,7 +288,7 @@ const wchar_t* button_label(int id, const wchar_t* idle) {
   return idle;
 }
 
-const float kW = 640, kHeader = 76, kFooter = 56, kMeterH = 150, kPad = 22;
+const float kW = 700, kHeader = 76, kFooter = 56, kMeterH = 150, kPad = 22;
 
 float strip_w(unsigned n) {
   // Strips get narrower with many channels so the window stays on screen.
@@ -493,14 +497,38 @@ void paint(HWND hwnd) {
   // Footer.
   fill(D2D1::RectF(0, H - kFooter, W, H), kPanel);
   hline(0, W, H - kFooter + 0.5f, kLine);
+  // Buttons from the right (indices 1..): Stop, Restart, Settings, Dropouts,
+  // Desktop audio; laid out first so the text on the left knows its room.
+  const bool stopped_now = s.state == "stopped";
+  float text_r = W - kPad;
+  if (s.reachable) {
+    struct B {
+      int id;
+      const wchar_t* label;
+    };
+    std::vector<B> right;
+    if (!stopped_now) right = {{ID_STOP, L"Stop"}, {ID_RESTART, L"Restart"}};
+    right.push_back({ID_SETTINGS, L"Settings\u2026"});
+    right.push_back({ID_DIAG, L"Dropouts\u2026"});
+    right.push_back({ID_DESKTOP, L"Desktop audio\u2026"});
+    float bx = W - kPad;
+    for (size_t k = 0; k < right.size() && 1 + k < g_buttons.size(); ++k) {
+      Button& b = g_buttons[1 + k];
+      b.id = right[k].id;
+      b.label = button_label(b.id, right[k].label);
+      const float w = std::max(64.f, text_width(b.label, g_f_button) + 28);
+      b.primary = false;
+      b.r = D2D1::RectF(bx - w, H - kFooter + 12, bx, H - 12);
+      draw_button(b);
+      bx -= w + 8;
+    }
+    text_r = bx - 4;
+  }
   std::wstring apps;
   for (const auto& c : s.clients) {
     if (!apps.empty()) apps += L",  ";
     apps += widen(c.name) + (c.active ? L" (playing)" : L"");
   }
-  // Leave room for the footer buttons (4 while running, 2 when stopped).
-  const bool stopped_now = s.state == "stopped";
-  const float text_r = W - kPad - (stopped_now ? 200 : 352);
   if (stopped_now) apps.clear();
   if (s.reachable)
     text(stopped_now ? L"Stopped" : apps.empty() ? L"No apps connected" : apps, g_f_label,
@@ -511,29 +539,6 @@ void paint(HWND hwnd) {
     text(L"Virgil " + widen(s.version) + L"   \u00b7   " +
              (n ? fmt(L"%llu dropout%s in the last hour", n, n == 1 ? L"" : L"s") : std::wstring(L"no dropouts")),
          g_f_sub, D2D1::RectF(kPad, H - kFooter / 2 - 4, text_r, H - 8), n ? kWarn : kDim);
-  }
-  if (s.reachable) {
-    // Buttons from the right (indices 1..): Stop, Restart, Settings, Dropouts.
-    const bool stopped = s.state == "stopped";
-    struct B {
-      int id;
-      const wchar_t* label;
-    };
-    std::vector<B> right;
-    if (!stopped) right = {{ID_STOP, L"Stop"}, {ID_RESTART, L"Restart"}};
-    right.push_back({ID_SETTINGS, L"Settings\u2026"});
-    right.push_back({ID_DIAG, L"Dropouts\u2026"});
-    float bx = W - kPad;
-    for (size_t k = 0; k < right.size(); ++k) {
-      Button& b = g_buttons[1 + k];
-      b.id = right[k].id;
-      b.label = button_label(b.id, right[k].label);
-      const float w = std::max(64.f, text_width(b.label, g_f_button) + 28);
-      b.primary = false;
-      b.r = D2D1::RectF(bx - w, H - kFooter + 12, bx, H - 12);
-      draw_button(b);
-      bx -= w + 8;
-    }
   }
 
   if (g_rt->EndDraw() == HRESULT(D2DERR_RECREATE_TARGET)) discard_device();
@@ -765,6 +770,7 @@ void tray_menu() {
   const UINT req = busy() ? MF_GRAYED : 0;
   AppendMenuW(m, MF_STRING | (s.reachable && (!busy() || g_settings_dlg) ? 0 : MF_GRAYED), ID_SETTINGS,
               L"Settings\u2026");
+  AppendMenuW(m, MF_STRING, ID_DESKTOP, L"Desktop audio\u2026");
   // Like the web panel: nothing to restart while Virgil is stopped.
   AppendMenuW(m, MF_STRING | req | (stopped ? MF_GRAYED : 0), ID_RESTART,
               s.reachable ? L"Restart audio engine" : L"Start Virgil service");
@@ -787,6 +793,18 @@ void tray_menu() {
   DestroyMenu(m);
 }
 
+// Virgil's channels as the service reports them, for the Desktop audio window.
+da::ChannelInfo desktop_channels() {
+  std::lock_guard<std::mutex> l(g_mutex);
+  da::ChannelInfo c;
+  if (!g_status.reachable) return c;
+  c.tx = g_status.tx;
+  c.rx = g_status.rx;
+  c.tx_names = g_status.tx_names;
+  c.rx_names = g_status.rx_names;
+  return c;
+}
+
 void command(int id) {
   if (id == ID_SETTINGS && g_settings_dlg) {  // already open: bring it up instead of a second one
     SetForegroundWindow(g_settings_dlg);
@@ -797,6 +815,11 @@ void command(int id) {
     case ID_OPEN: show_window(); break;
     case ID_SETTINGS: run_job(ID_SETTINGS, JobKind::LoadSettings); break;  // the dialog opens when loaded
     case ID_DIAG: open_page(L"#diagnostics"); break;
+    case ID_DESKTOP:
+      // Modal; a second request brings the open window up.
+      if (g_desktop) da::show_dialog(g_inst, IsWindowVisible(g_hwnd) ? g_hwnd : nullptr, g_icon_small, *g_desktop,
+                                     desktop_channels);
+      break;
     case ID_BROWSER: open_page(L""); break;
     case ID_RESTART: restart_engine(); break;
     case ID_STOP: {
@@ -1283,7 +1306,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   }
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS};
+  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS};
   InitCommonControlsEx(&icc);
   create_device_independent();
   first_run_defaults();
@@ -1317,6 +1340,10 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   // DPI (g_dpi, from WM_CREATE), size it for that.
   resize_to_content(g_hwnd);
   tray_add();
+  // Desktop audio runs in this app (it starts at login, in the user's
+  // session, where per-app capture works). Its own threads; never blocks here.
+  g_desktop.reset(new da::Engine());
+  g_desktop->start(da::load_settings(nullptr));
   std::thread poller(poll_thread);
   if (!tray_only) show_window();
 
@@ -1327,6 +1354,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   }
   g_quit = true;
   poller.join();
+  g_desktop->shutdown();  // releases its Virgil playback slot
+  g_desktop.reset();
   discard_device();
   if (g_icon_small) DestroyIcon(g_icon_small);
   CloseHandle(single);

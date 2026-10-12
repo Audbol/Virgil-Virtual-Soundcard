@@ -178,8 +178,9 @@ how many dropouts the last hour had, and *Dropouts…*, *Settings…* and
 *Restart engine* buttons.
 
 - **Windows:** lives in the notification area (system tray) and starts with
-  Windows. Right-click the icon for *Settings…*, *Restart audio engine*,
-  *Open log*, *Start with Windows* and *Quit*.
+  Windows. Right-click the icon for *Settings…*, *Desktop audio…*, *Restart
+  audio engine*, *Open log*, *Start with Windows* and *Quit*. *Desktop
+  audio…* brings Windows programs' sound to Dante (see below).
 - **macOS:** lives in the menu bar (*Virgil Control* in Applications).
   The menu has the same entries plus *Start at login*; the log opens in
   Console.
@@ -258,6 +259,86 @@ Upgrades keep your configuration. Uninstalling also keeps it:
 
 With no interface set, the service uses the first active network interface. It
 waits for the network if the service starts at boot before the network is up.
+
+### Desktop audio (Windows)
+
+*Desktop audio…* in Virgil Control (window footer and tray menu) sends sound
+from Windows programs — a browser, Spotify, system sounds — to Virgil's Dante
+transmit channels, and can play Dante receive channels on a Windows output
+device. There is no driver to install and no third-party software (no virtual
+cable): Virgil Control records the audio with Windows' own loopback capture,
+in your user session, while it runs (it starts with Windows).
+
+Sources (*Add…*), each to a stereo pair of transmit channels or, mixed to mono,
+to one channel; sources on the same channels are mixed:
+
+- **Output device:** everything Windows plays on that device, e.g. your
+  speakers. *Default output device* follows the device chosen in Windows'
+  sound settings.
+- **App:** one program by its file name (`chrome.exe`, `spotify.exe`), with
+  the processes it starts. The list shows the apps that have played sound;
+  any name can be typed. Apps that are not running are picked up when they
+  start. Needs Windows 10 version 2004 or later.
+- **All apps except Virgil:** everything, without what Virgil Control itself
+  plays, so listening to Dante on the same PC does not echo back into Dante.
+  Windows 10 version 2004 or later.
+
+Each source has a gain (−60 to +12 dB) and mute, and a level meter and status
+in the list. *Dante receive channels to a Windows output device* plays a pair
+(or one channel on both sides) of receive channels on a device of your choice.
+
+Good to know:
+
+- Captured audio still plays on the device it was sent to. To hear it only
+  through Dante, let those apps play on an output you do not listen to, or
+  turn that device down (on most PCs its volume does not change what loopback
+  captures; the app's own volume does).
+- Do not play receive channels on a device you capture: that echoes back into
+  Dante (the window warns). Use *All apps except Virgil* instead.
+- The audio is converted to Virgil's sample rate (44.1/48/96 kHz devices are
+  all fine) and follows the small difference between the PC's sound-hardware
+  clock and the Dante clock with an adaptive resampler, so it never drifts
+  out or clicks. It adds roughly 60–80 ms of latency: fine for music, video
+  and calls, not for live monitoring (use ASIO for that).
+- Desktop audio uses one of Virgil's 8 playback slots, *Desktop audio* in
+  the app list (*playing* while it has sound). It pauses while Virgil is stopped
+  and reconnects by itself when the service restarts or its channels change.
+- Apps that use WASAPI exclusive mode are not captured, and some protected
+  streams (DRM video) may be captured as silence.
+
+The settings are per user, in `%APPDATA%\Virgil\desktop-audio.conf`:
+
+```ini
+[desktop-audio]
+enabled = true
+
+[source]
+type = app          # device | app | all-apps
+app = "spotify.exe"
+channel = 1         # first transmit channel
+mono = false
+gain_db = -3
+mute = false
+
+[source]
+type = device
+device = default    # or the device id
+channel = 3
+
+[output]
+enabled = true
+device = default
+channel = 1         # first receive channel (a pair unless mono = true)
+gain_db = 0
+```
+
+To check capture on a PC without Virgil, the Windows build has
+`desktop_audio_probe.exe` (in `build-win/tests`, not installed):
+`desktop_audio_probe list` shows the Windows build, output devices and apps
+with audio sessions; `desktop_audio_probe capture --app chrome.exe --seconds 5`
+(or `--device default`, `--device 1`, `--pid 1234`, `--all-apps`) records to
+`capture.wav` and prints packet statistics and the device clock's offset from
+the PC clock.
 
 ## Building
 
