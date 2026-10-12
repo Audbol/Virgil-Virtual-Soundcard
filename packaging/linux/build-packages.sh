@@ -1,6 +1,8 @@
 #!/bin/sh
 # Build .deb and .rpm packages into ./dist.
 #   packaging/linux/build-packages.sh [deb|rpm|portable|all]
+# all (the default) builds the .deb and the .rpm; the portable tarball is
+# only built with "portable".
 #   VIRGIL_ARCH=arm64 packaging/linux/build-packages.sh [deb|portable]
 # The ALSA plugin directory differs between distro families, so each package
 # type gets its own configure. VIRGIL_ARCH=arm64 cross-builds for 64-bit ARM

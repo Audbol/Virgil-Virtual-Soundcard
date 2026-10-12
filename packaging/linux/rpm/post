@@ -4,14 +4,26 @@ if ! getent passwd virgil >/dev/null 2>&1; then
 	useradd --system --user-group --home-dir /var/lib/virgil --no-create-home \
 		--shell "$nologin" --comment "Virgil virtual soundcard" virgil >/dev/null 2>&1 || true
 fi
-if getent passwd virgil >/dev/null 2>&1 && [ -d /etc/virgil ]; then
+# The configuration is not a packaged (%config) file: Virgil itself rewrites
+# it, so it is created from the shipped default only when missing. Upgrades
+# from packages that still owned it are finished in %posttrans.
+mkdir -p /etc/virgil
+if [ ! -e /etc/virgil/virgil.conf ] && [ -f /usr/share/virgil/virgil.conf.default ]; then
+	install -m 644 /usr/share/virgil/virgil.conf.default /etc/virgil/virgil.conf
+fi
+if getent passwd virgil >/dev/null 2>&1; then
 	chown virgil:virgil /etc/virgil
 	if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
 fi
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
 	if [ "$1" -eq 1 ]; then
+		# Fresh install: start now and at every boot.
 		systemctl enable virgild.service >/dev/null 2>&1 || :
+		systemctl restart virgild.service >/dev/null 2>&1 || :
+	elif systemctl is-enabled --quiet virgild.service 2>/dev/null || \
+		systemctl is-active --quiet virgild.service 2>/dev/null; then
+		# Upgrade: a service the admin disabled (and stopped) stays so.
+		systemctl restart virgild.service >/dev/null 2>&1 || :
 	fi
-	systemctl restart virgild.service >/dev/null 2>&1 || :
 fi

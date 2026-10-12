@@ -155,7 +155,11 @@ install(FILES README.md LICENSE NOTICE.md config/virgil.conf.example DESTINATION
 if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   configure_file(packaging/linux/virgild.service.in ${CMAKE_BINARY_DIR}/virgild.service @ONLY)
   install(FILES ${CMAKE_BINARY_DIR}/virgild.service DESTINATION lib/systemd/system)
-  install(FILES packaging/virgil.conf DESTINATION /etc/virgil)
+  # Not installed as /etc/virgil/virgil.conf: the daemon rewrites that file,
+  # so it is no package conffile. The package scripts (deb postinst, rpm
+  # %post) copy this default there when it is missing.
+  install(FILES packaging/virgil.conf DESTINATION ${CMAKE_INSTALL_DATADIR}/virgil
+          RENAME virgil.conf.default)
 endif()
 
 # ---- drivers -----------------------------------------------------------------
@@ -207,10 +211,13 @@ if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
   set(CPACK_RPM_POST_INSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/post)
   set(CPACK_RPM_PRE_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/preun)
   set(CPACK_RPM_POST_UNINSTALL_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/postun)
-  set(CPACK_RPM_USER_FILELIST "%config(noreplace) /etc/virgil/virgil.conf"
-                              "%config(noreplace) /etc/alsa/conf.d/50-virgil.conf")
+  # Restores a configuration that removing a pre-0.6.0 package moved aside
+  # (CMake >= 3.18).
+  set(CPACK_RPM_POST_TRANS_SCRIPT_FILE ${CMAKE_SOURCE_DIR}/packaging/linux/rpm/posttrans)
+  set(CPACK_RPM_USER_FILELIST "%config(noreplace) /etc/alsa/conf.d/50-virgil.conf"
+                              "%config(noreplace) /etc/xdg/autostart/virgil-control.desktop")
   set(CPACK_RPM_EXCLUDE_FROM_AUTO_FILELIST_ADDITION
-      /etc/alsa /etc/alsa/conf.d /usr/lib/systemd /usr/lib/systemd/system
+      /etc/alsa /etc/alsa/conf.d /etc/xdg /etc/xdg/autostart /usr/lib/systemd /usr/lib/systemd/system
       /usr/lib64/alsa-lib /usr/share/doc)
   include(CPack)
 endif()

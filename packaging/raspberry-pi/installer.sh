@@ -142,6 +142,8 @@ fi
 step="installing the package"
 say "1/4  Installing Virgil and the libraries it needs..."
 # The package's own dependencies (ALSA, the C++ runtime) come from apt.
+# --force-confold keeps edited package conffiles (the ALSA and autostart
+# files); virgil.conf itself is not one and is never replaced by upgrades.
 _apt_ok=0
 _apt_dir="$tmp/apt"
 mkdir -p "$_apt_dir"
@@ -163,7 +165,12 @@ step="configuring the device name and network port"
 say "2/4  Choosing the Dante device name and network port..."
 [ -f "$CONF" ] || die "$CONF is missing after installing; please report this"
 
-conf_get() { sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" | head -n 1; }
+# The value as virgild reads it: without a trailing '#' / ';' comment, the
+# surrounding blanks and the surrounding double quotes.
+conf_get() {
+	sed -n "s/^[[:space:]]*$1[[:space:]]*=[[:space:]]*//p" "$CONF" | head -n 1 |
+		sed -e 's/[[:space:]]*[#;].*$//' -e 's/[[:space:]]*$//' -e 's/^"\(.*\)"$/\1/'
+}
 conf_set() {
 	# Replace the first "key = ..." line; values never contain '|'.
 	if grep -q "^[[:space:]]*$1[[:space:]]*=" "$CONF"; then
@@ -175,17 +182,18 @@ conf_set() {
 
 # Device name: Dante names must be unique on the network, so a fresh install
 # gets Virgil-<hostname> instead of the default "Virgil".
+# A name chosen earlier (anything but the stock "Virgil") is never rewritten.
 cur_name=$(conf_get name)
 if [ -n "$name" ]; then
-	new_name=$name
+	new_name=$(printf '%s' "$name" | tr -c 'A-Za-z0-9 _-' '-' | cut -c1-31)
+	[ "$new_name" = "$cur_name" ] || conf_set name "$new_name"
 elif [ -z "$cur_name" ] || [ "$cur_name" = Virgil ]; then
 	host=$(hostname 2>/dev/null | tr -c 'A-Za-z0-9-\n' '-' | cut -c1-24)
 	new_name="Virgil-${host:-pi}"
+	conf_set name "$new_name"
 else
 	new_name=$cur_name
 fi
-new_name=$(printf '%s' "$new_name" | tr -c 'A-Za-z0-9 _-' '-' | cut -c1-31)
-[ "$new_name" = "$cur_name" ] || conf_set name "$new_name"
 
 # Network port: the wired one. Wi-Fi drops the clock packets Dante needs.
 wired_ports() {
@@ -273,8 +281,18 @@ addr=""
 host=$(hostname 2>/dev/null || echo raspberrypi)
 user=${SUDO_USER:-pi}
 
+# Stopped from Virgil Control ([device] enabled = false): the service runs,
+# but Virgil stays off the Dante network until started again.
+case $(conf_get enabled | tr '[:upper:]' '[:lower:]') in
+false | no | off | 0) stopped=1 ;;
+*) stopped=0 ;;
+esac
+
 say ""
-if [ "$started" = 1 ]; then
+if [ "$started" = 1 ] && [ "$stopped" = 1 ]; then
+	say "Virgil $VERSION is installed, but stopped: press Start in Virgil Control"
+	say "(or in the control panel below) to put it on the Dante network."
+elif [ "$started" = 1 ]; then
 	say "Virgil $VERSION is installed and running."
 else
 	say "Virgil $VERSION is installed, but the service is not running yet."

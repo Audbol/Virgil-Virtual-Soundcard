@@ -1,2 +1,2 @@
-/etc/virgil/virgil.conf
 /etc/alsa/conf.d/50-virgil.conf
+/etc/xdg/autostart/virgil-control.desktop

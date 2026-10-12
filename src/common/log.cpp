@@ -1,9 +1,11 @@
 #include "virgil/log.h"
 
 #include <cstdarg>
+#include <cstdio>
 #include <ctime>
 #include <deque>
 #include <mutex>
+#include <string>
 
 namespace virgil {
 
@@ -15,7 +17,51 @@ std::string g_last_error;
 std::mutex g_recent_mutex;
 std::deque<std::string> g_recent;  // for diagnostics reports
 constexpr size_t kRecentLines = 400;
+
+// Log file opened by the daemon itself (--log): rotated by size so it cannot
+// grow without bound (the Windows service and the macOS launch daemon log
+// this way). Guarded by g_write_mutex, like every write to stderr here.
+std::mutex g_write_mutex;
+std::string g_log_path;
+long long g_log_bytes = 0;
+constexpr long long kMaxLogBytes = 5ll * 1024 * 1024;
+
+#if defined(_WIN32)
+const char* const kNullDevice = "NUL";
+#else
+const char* const kNullDevice = "/dev/null";
+#endif
+
+// Caller holds g_write_mutex. Keeps one old file: <log>.1.
+void rotate_log_locked() {
+  std::fflush(stderr);
+  // Close the file first (Windows cannot rename an open file).
+  if (!std::freopen(kNullDevice, "w", stderr)) return;
+  const std::string old = g_log_path + ".1";
+  std::remove(old.c_str());
+  std::rename(g_log_path.c_str(), old.c_str());
+  if (!std::freopen(g_log_path.c_str(), "a", stderr)) {
+    // Could not reopen: keep stderr usable and stop rotating.
+    std::freopen(kNullDevice, "w", stderr);
+    g_log_path.clear();
+    return;
+  }
+  std::setvbuf(stderr, nullptr, _IOLBF, 1024);
+  g_log_bytes = 0;
+}
 }  // namespace
+
+void set_log_file(const std::string& path) {
+  std::lock_guard<std::mutex> l(g_write_mutex);
+  g_log_path = path;
+  g_log_bytes = 0;
+  if (path.empty()) return;
+  if (std::fseek(stderr, 0, SEEK_END) == 0) {
+    const long pos = std::ftell(stderr);
+    g_log_bytes = pos < 0 ? kMaxLogBytes : pos;
+  }
+  if (g_log_bytes >= kMaxLogBytes) rotate_log_locked();
+}
 
 std::vector<std::string> recent_log_lines() {
   std::lock_guard<std::mutex> l(g_recent_mutex);
@@ -43,7 +89,6 @@ void log_message(int level, const char* fmt, ...) {
     g_last_error = m;
   }
   if (level > g_log_level) return;
-  static std::mutex m;
   static const char* tags[] = {"error", "warn", "info", "debug"};
   char msg[1024];
   va_list ap;
@@ -65,11 +110,15 @@ void log_message(int level, const char* fmt, ...) {
     g_recent.push_back(std::string(ts) + " [" + tag + "] " + msg);
     if (g_recent.size() > kRecentLines) g_recent.pop_front();
   }
-  std::lock_guard<std::mutex> l(m);
-  std::fprintf(stderr, "%s [%s] %s\n", ts, tag, msg);
+  std::lock_guard<std::mutex> l(g_write_mutex);
+  const int n = std::fprintf(stderr, "%s [%s] %s\n", ts, tag, msg);
   // stderr may be redirected to a (buffered) file: never keep lines back,
   // or the last moments before a problem are missing from the log.
   std::fflush(stderr);
+  if (!g_log_path.empty()) {
+    if (n > 0) g_log_bytes += n;
+    if (g_log_bytes >= kMaxLogBytes) rotate_log_locked();
+  }
 }
 
 }  // namespace virgil

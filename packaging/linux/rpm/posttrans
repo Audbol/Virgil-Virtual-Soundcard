@@ -1,0 +1,19 @@
+# Runs after the old package is gone. Packages before 0.6.0 owned
+# /etc/virgil/virgil.conf as %config(noreplace); removing them on upgrade
+# deleted an unchanged copy or moved a changed one to virgil.conf.rpmsave.
+# Put the user's file back (or the default) so the configuration survives.
+if [ ! -e /etc/virgil/virgil.conf ]; then
+	mkdir -p /etc/virgil
+	if [ -f /etc/virgil/virgil.conf.rpmsave ]; then
+		mv /etc/virgil/virgil.conf.rpmsave /etc/virgil/virgil.conf
+	elif [ -f /usr/share/virgil/virgil.conf.default ]; then
+		install -m 644 /usr/share/virgil/virgil.conf.default /etc/virgil/virgil.conf
+	fi
+	if getent passwd virgil >/dev/null 2>&1; then
+		chown virgil:virgil /etc/virgil
+		if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
+	fi
+	if [ -d /run/systemd/system ] && systemctl is-active --quiet virgild.service 2>/dev/null; then
+		systemctl restart virgild.service >/dev/null 2>&1 || :
+	fi
+fi

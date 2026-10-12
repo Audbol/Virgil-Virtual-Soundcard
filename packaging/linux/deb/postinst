@@ -1,5 +1,6 @@
 #!/bin/sh
 set -e
+# $2 is the previously configured version; empty on a fresh install.
 if [ "$1" = "configure" ]; then
 	# Service account: owns /etc/virgil so the control panel can save settings.
 	if ! getent passwd virgil >/dev/null 2>&1; then
@@ -7,15 +8,34 @@ if [ "$1" = "configure" ]; then
 		useradd --system --user-group --home-dir /var/lib/virgil --no-create-home \
 			--shell "$nologin" --comment "Virgil virtual soundcard" virgil >/dev/null 2>&1 || true
 	fi
-	if getent passwd virgil >/dev/null 2>&1 && [ -d /etc/virgil ]; then
+	# The configuration is not a dpkg conffile: Virgil itself rewrites it
+	# (renames, Stop/Start, settings), which would make dpkg ask about it on
+	# every upgrade. It is created from the shipped default only when missing,
+	# so upgrades never touch it. (Older packages shipped it as a conffile;
+	# dpkg keeps such an obsolete conffile in place until purge.)
+	mkdir -p /etc/virgil
+	if [ ! -e /etc/virgil/virgil.conf ] && [ -f /usr/share/virgil/virgil.conf.default ]; then
+		install -m 644 /usr/share/virgil/virgil.conf.default /etc/virgil/virgil.conf
+	fi
+	if getent passwd virgil >/dev/null 2>&1; then
 		chown virgil:virgil /etc/virgil
 		if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
 	fi
 fi
 if [ "$1" = "configure" ] && [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || true
-	systemctl enable virgild.service >/dev/null 2>&1 || true
-	systemctl restart virgild.service >/dev/null 2>&1 || \
-		echo "virgil: virgild did not start; check 'journalctl -u virgild' and /etc/virgil/virgil.conf"
+	if [ -z "$2" ]; then
+		# Fresh install: start now and at every boot.
+		systemctl enable virgild.service >/dev/null 2>&1 || true
+		systemctl restart virgild.service >/dev/null 2>&1 || \
+			echo "virgil: virgild did not start; check 'journalctl -u virgild' and /etc/virgil/virgil.conf"
+	elif systemctl is-enabled --quiet virgild.service 2>/dev/null || \
+		systemctl is-active --quiet virgild.service 2>/dev/null; then
+		# Upgrade: restart onto the new version, but leave a service the
+		# admin disabled (and stopped) alone. Packages before 0.6.0 stop the
+		# service in prerm, so "enabled" also counts as "was running".
+		systemctl restart virgild.service >/dev/null 2>&1 || \
+			echo "virgil: virgild did not start; check 'journalctl -u virgild' and /etc/virgil/virgil.conf"
+	fi
 fi
 exit 0

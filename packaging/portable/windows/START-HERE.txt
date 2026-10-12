@@ -8,8 +8,9 @@ Controller as a device named "Virgil-<computer name>"; route it there.
    right-click "register-asio-driver.cmd" > Run as administrator.
 
 2. Double-click "virgil-control.exe".
-   It starts virgild from this folder and opens the control panel in your
-   browser, where you pick the network interface of your Dante network.
+   It starts virgild from this folder and opens the Virgil Control window
+   (also in the notification area), where you pick the network interface of
+   your Dante network in Settings.
    Allow virgild through Windows Firewall when asked (private networks).
 
 3. In Dante Controller, subscribe Virgil's receive channels (and other

@@ -12,6 +12,9 @@ std::string last_error_message();
 void clear_last_error();
 // The most recent log lines (at most a few hundred), oldest first.
 std::vector<std::string> recent_log_lines();
+// stderr was reopened on this file (virgild --log): rotate it to <path>.1
+// when it reaches 5 MB. Empty = stderr is not ours to rotate.
+void set_log_file(const std::string& path);
 void log_message(int level, const char* fmt, ...)
 #if defined(__GNUC__)
     __attribute__((format(printf, 2, 3)))

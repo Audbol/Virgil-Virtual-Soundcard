@@ -27,6 +27,9 @@ route it like any other device, and your audio apps see an ordinary soundcard:
 - Follows the Dante clock leader (PTPv1), or leads the clock itself when
   there is no Dante hardware.
 - Several apps can play at once; they are mixed.
+- **Stop / Start** in Virgil Control takes Virgil off the Dante network
+  completely and brings it back; a stopped Virgil stays stopped across
+  restarts until you start it again.
 - Installers for Windows, macOS, Debian/Ubuntu, Fedora and a one-step
   installer for the Raspberry Pi; portable versions that need no install.
 
@@ -46,15 +49,23 @@ is vendored in `third_party/inferno` with a few patches; see its README.
 
 1. Install Virgil and start it (the installers run it as a service).
 2. In **Virgil Control**, pick the network interface your Dante network is on.
-3. In **Dante Controller**, the computer appears as a device called **Virgil**
-   (rename it in Settings). Its receive channels appear in the routing grid.
-   Subscribe them to any Dante transmitter, and subscribe other devices to
-   Virgil's transmit channels. Virgil remembers subscriptions across restarts.
+3. In **Dante Controller**, the computer appears as a device called
+   **Virgil-<computer name>** (rename it in Settings). Its receive channels
+   appear in the routing grid. Subscribe them to any Dante transmitter, and
+   subscribe other devices to Virgil's transmit channels. Virgil remembers subscriptions across restarts.
 4. Play into and record from the Virgil soundcard in your apps.
 
-Clocking: Virgil follows the Dante clock master (PTPv1, as Dante uses). If no
+Clocking: Virgil follows the Dante clock leader (PTPv1, as Dante uses). If no
 other Dante device provides a clock, for example when Virgil machines only
-talk to each other, set `master_capable = true` in `[ptp]` on one of them.
+talk to each other, tick *Become clock leader when no Dante device provides
+one* in Virgil Control's settings on one of them (`master_capable = true` in
+`[ptp]`).
+
+Stop / Start: *Stop* in Virgil Control (or the tray / menu bar menu, or the
+browser panel) takes Virgil off the network: no Dante device, no network
+ports in use. The service keeps running so the controls keep working, and
+the choice is saved as `enabled = false` in `[device]`, so Virgil stays
+stopped after a restart or reboot until you press *Start*.
 
 Latency: Virgil's **receive latency** (`latency_us`, default 4 ms) works like
 the device latency in Dante Controller. Its **transmit latency**
@@ -65,8 +76,11 @@ latency after the app plays it. Lower
 both on a clean, wired gigabit network. Raise them if you hear dropouts.
 
 Network ports (allow them through the firewall; the Windows installer does):
-UDP 319/320 (PTP), 5353 (mDNS), 4400, 4455, 8700 and 8800 (Dante control),
-and the audio flows. Virgil needs administrator/root rights for the PTP
+UDP 319/320 (PTP), 5353 (mDNS), 4440, 4455, 8700 and 8800 (Dante control),
+and the audio flows. With `ports = auto` (the default) Virgil uses
+24440–24443 instead of the four control ports when other Dante software on
+the computer already has them (see below), so allow those too if your
+firewall filters by port. Virgil needs administrator/root rights for the PTP
 ports.
 
 Dante Controller can run on the same computer as Virgil. Its background
@@ -83,10 +97,10 @@ at once: both need the PTP clock ports 319/320.
  apps ─► ASIO driver ─┘   (lock-free, per-frame        └─◄ Inferno ◄─ Dante devices
                            addressed by media clock)
                                     ▲
-                    virgild daemon ── PTPv1 follower (or master), mixer, control panel
+                    virgild daemon ── PTPv1 follower (or leader), mixer, control panel
 ```
 
-* **One clock.** `virgild` steers a media clock to the Dante clock master with a
+* **One clock.** `virgild` steers a media clock to the Dante clock leader with a
   PI servo. It publishes a `(host time, media frame, rate)` anchor in shared
   memory. Every driver runs its callbacks from that anchor: CoreAudio zero
   timestamps, ASIO buffer switches and the ALSA hw pointer. Inferno gets the
@@ -226,6 +240,9 @@ Configuration file and log locations, if you prefer editing by hand:
 | macOS | `/Library/Application Support/Virgil/virgil.conf` | `/Library/Logs/Virgil/virgild.log` |
 | Linux | `/etc/virgil/virgil.conf` | `journalctl -u virgild` |
 
+The Windows and macOS log is rotated at 5 MB; the previous one is kept as
+`virgild.log.1`.
+
 Upgrades keep your configuration. Uninstalling also keeps it:
 
 - **Windows:** use Add/Remove Programs.
@@ -278,10 +295,17 @@ macos, linux, raspberry-pi) builds and releases only that platform, for a fix
 that only concerns one; the release notes then say so. The **CI** workflow
 builds and tests every platform on each push.
 
-* **macOS signing and notarisation:** set `VIRGIL_CODESIGN_ID`,
-  `VIRGIL_INSTALLER_ID` and `VIRGIL_NOTARY_PROFILE`, or the matching repository
-  secrets in CI. Unsigned packages still install, but Gatekeeper asks the
-  user to approve them in System Settings → Privacy & Security.
+* **macOS signing and notarisation:** for a local build, set
+  `VIRGIL_CODESIGN_ID`, `VIRGIL_INSTALLER_ID` and `VIRGIL_NOTARY_PROFILE`
+  (a `notarytool store-credentials` profile); the Developer ID identities
+  must already be in your login keychain. In the Release workflow, signing
+  only happens when the `MACOS_CERT_P12` (base64 `.p12` with both
+  identities) and `MACOS_CERT_PASSWORD` secrets are set, together with
+  `MACOS_CODESIGN_ID` / `MACOS_INSTALLER_ID`; notarisation additionally needs
+  `MACOS_NOTARY_APPLE_ID`, `MACOS_NOTARY_TEAM_ID` and `MACOS_NOTARY_PASSWORD`
+  (an app-specific password). Without them CI builds unsigned (ad-hoc
+  signed) packages, which still install, but Gatekeeper asks the user to
+  approve them in System Settings → Privacy & Security.
 * **Windows signing:** the installer is unsigned, so SmartScreen warns on
   first run. Sign it with `signtool` if you have a certificate.
 
@@ -305,8 +329,8 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 
 | Component | How it was verified |
 |---|---|
-| Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock master. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. A probe asks for the clock status the way Dante Controller does. In use on Windows 11 with Dante Controller, a Behringer WING (clock leader) and an AVIO USB adapter |
-| PTPv1 clock | Unit tests: message encoding, master/follower lock, servo in simulation. Across namespaces the follower locks within about 10 µs |
+| Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock leader. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. A probe asks for the clock status the way Dante Controller does. In use on Windows 11 with Dante Controller, a Behringer WING (clock leader) and an AVIO USB adapter |
+| PTPv1 clock | Unit tests: message encoding, leader/follower lock, servo in simulation. Across namespaces the follower locks within about 10 µs |
 | Engine, config | Unit tests; loopback through the Dante rings is bit-exact (24-bit) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon, 64-frame periods |
 | Linux packages | `.deb` installed in a container; portable tarball used as a user would |
@@ -324,8 +348,9 @@ Known limitations:
 * Dante features Inferno does not implement are missing: AES67 mode, Dante
   Domain Manager, device locking, encrypted control, and changing latency
   or sample rate from Dante Controller (set them in Virgil instead).
-* Sample rate and channel counts come from `virgil.conf`. Changing them
-  restarts the audio engine; on macOS also restart `coreaudiod`.
+* Changing the sample rate or channel counts restarts the audio engine;
+  apps may briefly stop (ASIO hosts get a reset request, the macOS device
+  changes format by itself).
 * The Windows service creates a `Global\` shared-memory section that every
   user session can reach. A `virgild` started by hand from a non-elevated
   console falls back to `Local\`, which only that session can reach.

@@ -5,6 +5,9 @@
 #   VIRGIL_CODESIGN_ID="Developer ID Application: ..."   signs virgild + the driver
 #   VIRGIL_INSTALLER_ID="Developer ID Installer: ..."    signs the .pkg
 #   VIRGIL_NOTARY_PROFILE=<notarytool keychain profile> notarises and staples
+#   VIRGIL_NOTARY_KEYCHAIN=<keychain file holding that profile> (optional)
+# The identities must be in a keychain on the search list (for local builds:
+# the login keychain); the Release workflow imports them from secrets.
 set -eu
 cd "$(dirname "$0")/../.."
 build=build-macos-release
@@ -61,7 +64,8 @@ productbuild --distribution packaging/macos/distribution.xml \
 	${VIRGIL_INSTALLER_ID:+--sign "$VIRGIL_INSTALLER_ID"} "$out"
 
 if [ -n "${VIRGIL_NOTARY_PROFILE:-}" ]; then
-	xcrun notarytool submit "$out" --keychain-profile "$VIRGIL_NOTARY_PROFILE" --wait
+	xcrun notarytool submit "$out" --keychain-profile "$VIRGIL_NOTARY_PROFILE" \
+		${VIRGIL_NOTARY_KEYCHAIN:+--keychain "$VIRGIL_NOTARY_KEYCHAIN"} --wait
 	xcrun stapler staple "$out"
 fi
 # Portable zip: driver + daemon + Virgil Control.app in one folder.

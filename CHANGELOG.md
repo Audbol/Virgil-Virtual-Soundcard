@@ -15,6 +15,10 @@
   - Settings: comments after a value in the configuration file are handled, duplicate keys no longer add up, and saving keeps the file's permissions; renames from Dante Controller with names that are not allowed are refused.
   - Engine shutdown can no longer hang when a channel is renamed at the same moment; a closed browser connection no longer stops the service on Linux and macOS.
 - The drivers and the service must be the same version (the shared-memory layout changed); the installers update both.
+- Packaging:
+  - Linux: upgrading the package no longer re-enables or starts a virgild service you disabled; a fresh install still enables and starts it. `/etc/virgil/virgil.conf` is no longer a package-managed configuration file (Virgil rewrites it itself, so dpkg asked about it on upgrades); it is created from `/usr/share/virgil/virgil.conf.default` only when missing, and upgrades keep yours.
+  - Raspberry Pi installer: a device name followed by a comment in the configuration (`name = Stage Left # FOH`) is kept as it is instead of being rewritten, and the installer says when Virgil was left stopped (press *Start* in Virgil Control) instead of "running".
+  - Windows and macOS: the service log (`virgild.log`) is rotated at 5 MB, keeping one older file (`virgild.log.1`).
 
 ## 0.5.2
 - **Unique device names on every platform.** Every installation used to start out named "Virgil", so two computers running Virgil conflicted in Dante Controller. Virgil now replaces the stock name with Virgil-<computer name> when it starts (and saves it, so the control panel shows it); a name you chose yourself is kept. Devices subscribed to the old "Virgil" channels need re-subscribing to the new name.

@@ -27,5 +27,9 @@ if [ "${1:-}" = "--purge" ]; then
 fi
 pkgutil --forget org.virgil.soundcard >/dev/null 2>&1 || true
 killall coreaudiod 2>/dev/null || true
-echo "Virgil removed.${1:+ Configuration purged.}"
+if [ "${1:-}" = "--purge" ]; then
+	echo "Virgil removed. Configuration and logs purged."
+else
+	echo "Virgil removed. The configuration in /Library/Application Support/Virgil was kept."
+fi
 [ "${1:-}" = "--purge" ] || rm -f "/Library/Application Support/Virgil/uninstall.sh"

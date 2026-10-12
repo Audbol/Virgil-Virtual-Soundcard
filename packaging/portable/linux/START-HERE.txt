@@ -10,7 +10,8 @@ Controller as a device named "Virgil-<computer name>"; route it there.
    Adds the "virgil" ALSA device to ~/.asoundrc, pointing at this folder.
 
 2. ./virgil-control
-   Starts virgild from this folder and opens the control panel in your browser.
+   Starts virgild from this folder and opens the Virgil Control window
+   (meters, settings, Stop / Start), with a tray icon where the desktop has one.
    For PTP (ports 319/320) and real-time priority, run virgild with
    privileges instead:  sudo ./virgild -c virgil.conf
 

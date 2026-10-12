@@ -10,8 +10,9 @@ this folder and run:      xattr -dr com.apple.quarantine .
 1. Double-click "install-driver.command" (asks for your password) to add the
    "Virgil Virtual Soundcard" Core Audio device. Core Audio restarts once.
 
-2. Double-click "Virgil Control". It starts virgild from this folder and opens the
-   control panel in your browser.
+2. Double-click "Virgil Control". It starts virgild from this folder and opens
+   the Virgil Control window (meters, settings, Stop / Start); it also lives in
+   the menu bar.
 
 3. In Dante Controller, subscribe Virgil's channels.
 

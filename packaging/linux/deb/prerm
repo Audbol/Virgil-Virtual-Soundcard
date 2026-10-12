@@ -1,12 +1,19 @@
 #!/bin/sh
 set -e
 if [ -d /run/systemd/system ]; then
-	if [ "$1" = "remove" ]; then
+	case "$1" in
+	remove)
 		systemctl disable --now virgild.service >/dev/null 2>&1 || true
 		# Added by the Raspberry Pi installer; goes away with Virgil.
 		systemctl disable virgil-cpu-performance.service >/dev/null 2>&1 || true
-	else
+		;;
+	upgrade)
+		# Keep running: postinst restarts it on the new version (only if it
+		# is enabled or running), so a stopped, disabled service stays so.
+		;;
+	*)
 		systemctl stop virgild.service >/dev/null 2>&1 || true
-	fi
+		;;
+	esac
 fi
 exit 0

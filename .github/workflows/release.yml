@@ -28,7 +28,33 @@ permissions:
   contents: write
 
 jobs:
+  # A release must carry the version it is built with: refuse a tag (or a
+  # hand-run version) that differs from project(VERSION) in CMakeLists.txt,
+  # before anything is built. Build-only runs (no version) skip the check.
+  version-check:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      - name: Tag matches the CMake project version
+        env:
+          TAG: ${{ github.event_name == 'push' && github.ref_name || github.event.inputs.version }}
+        run: |
+          [ -n "$TAG" ] || { echo "No release version: build only."; exit 0; }
+          want=$(sed -n 's/^project([^ ]* VERSION \([0-9][0-9.]*\).*/\1/p' CMakeLists.txt | head -n 1)
+          have=${TAG#v}
+          if [ -z "$want" ]; then
+            echo "::error::Could not read project(VERSION) from CMakeLists.txt"
+            exit 1
+          fi
+          if [ "$have" != "$want" ]; then
+            echo "::error::Release version $TAG does not match project(VERSION $want) in CMakeLists.txt"
+            exit 1
+          fi
+          echo "Release $TAG matches CMakeLists.txt ($want)."
+
   linux-packages:
+    needs: version-check
     if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'linux' }}
     # Oldest supported runner, so the packages install on Debian 12 /
     # Ubuntu 22.04 and newer (libc6 >= 2.34, libasound2).
@@ -42,6 +68,7 @@ jobs:
         with: { name: linux-packages, path: "dist/*" }
 
   linux-portable:
+    needs: version-check
     if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'linux' }}
     # Oldest supported runner: the tarball then runs on glibc 2.35 and newer.
     runs-on: ubuntu-22.04
@@ -54,6 +81,7 @@ jobs:
         with: { name: linux-portable, path: "dist/*.tar.gz" }
 
   raspberry-pi:
+    needs: version-check
     if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'raspberry-pi' }}
     # 64-bit ARM .deb and tarball, cross-built on the oldest supported runner
     # so they install on Raspberry Pi OS 12 (bookworm) 64-bit and newer.
@@ -70,6 +98,7 @@ jobs:
         with: { name: raspberry-pi, path: "dist/*" }
 
   windows:
+    needs: version-check
     if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'windows' }}
     # Cross-built with MinGW-w64 + NSIS, the toolchain the installer was
     # developed and tested with; binaries are statically linked.
@@ -108,18 +137,61 @@ jobs:
         with: { name: windows, path: "dist/*" }
 
   macos:
+    needs: version-check
     if: ${{ github.event.inputs.platforms == '' || github.event.inputs.platforms == 'all' || github.event.inputs.platforms == 'macos' }}
     runs-on: macos-14
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
       - run: rustup target add aarch64-apple-darwin x86_64-apple-darwin
-      - name: Build .pkg and portable zip
+      # Signing needs the Developer ID certificate in a keychain on the runner.
+      # Without the MACOS_CERT_P12 secret (base64 .p12) the identity secrets
+      # are ignored and the package is built unsigned (ad-hoc signed), as
+      # before. Notarisation additionally needs MACOS_NOTARY_APPLE_ID,
+      # MACOS_NOTARY_TEAM_ID and MACOS_NOTARY_PASSWORD (app-specific password).
+      - name: Import the signing certificate (only when the secrets are set)
         env:
-          VIRGIL_CODESIGN_ID: ${{ secrets.MACOS_CODESIGN_ID }}
-          VIRGIL_INSTALLER_ID: ${{ secrets.MACOS_INSTALLER_ID }}
-          VIRGIL_NOTARY_PROFILE: ${{ secrets.MACOS_NOTARY_PROFILE }}
+          CERT_P12: ${{ secrets.MACOS_CERT_P12 }}
+          CERT_PASSWORD: ${{ secrets.MACOS_CERT_PASSWORD }}
+          CODESIGN_ID: ${{ secrets.MACOS_CODESIGN_ID }}
+          INSTALLER_ID: ${{ secrets.MACOS_INSTALLER_ID }}
+          NOTARY_APPLE_ID: ${{ secrets.MACOS_NOTARY_APPLE_ID }}
+          NOTARY_TEAM_ID: ${{ secrets.MACOS_NOTARY_TEAM_ID }}
+          NOTARY_PASSWORD: ${{ secrets.MACOS_NOTARY_PASSWORD }}
+        run: |
+          if [ -z "$CERT_P12" ]; then
+            echo "No MACOS_CERT_P12 secret: building an unsigned (ad-hoc signed) package."
+            exit 0
+          fi
+          kc="$RUNNER_TEMP/virgil-signing.keychain-db"
+          kcpw=$(openssl rand -hex 24)
+          printf '%s' "$CERT_P12" | base64 --decode >"$RUNNER_TEMP/virgil-cert.p12"
+          security create-keychain -p "$kcpw" "$kc"
+          security set-keychain-settings -lut 21600 "$kc"
+          security unlock-keychain -p "$kcpw" "$kc"
+          security import "$RUNNER_TEMP/virgil-cert.p12" -k "$kc" -P "$CERT_PASSWORD" \
+            -T /usr/bin/codesign -T /usr/bin/productbuild -T /usr/bin/productsign
+          rm -f "$RUNNER_TEMP/virgil-cert.p12"
+          security set-key-partition-list -S apple-tool:,apple: -s -k "$kcpw" "$kc" >/dev/null
+          # shellcheck disable=SC2046
+          security list-keychains -d user -s "$kc" $(security list-keychains -d user | tr -d '"')
+          [ -n "$CODESIGN_ID" ] && echo "VIRGIL_CODESIGN_ID=$CODESIGN_ID" >>"$GITHUB_ENV"
+          [ -n "$INSTALLER_ID" ] && echo "VIRGIL_INSTALLER_ID=$INSTALLER_ID" >>"$GITHUB_ENV"
+          if [ -n "$NOTARY_APPLE_ID" ] && [ -n "$NOTARY_TEAM_ID" ] && [ -n "$NOTARY_PASSWORD" ]; then
+            xcrun notarytool store-credentials virgil-notary --apple-id "$NOTARY_APPLE_ID" \
+              --team-id "$NOTARY_TEAM_ID" --password "$NOTARY_PASSWORD" --keychain "$kc"
+            echo "VIRGIL_NOTARY_PROFILE=virgil-notary" >>"$GITHUB_ENV"
+            echo "VIRGIL_NOTARY_KEYCHAIN=$kc" >>"$GITHUB_ENV"
+          fi
+          echo "VIRGIL_SIGNING_KEYCHAIN=$kc" >>"$GITHUB_ENV"
+      - name: Build .pkg and portable zip
         run: packaging/macos/build-pkg.sh
+      - name: Remove the signing keychain
+        if: always()
+        run: |
+          if [ -n "${VIRGIL_SIGNING_KEYCHAIN:-}" ]; then
+            security delete-keychain "$VIRGIL_SIGNING_KEYCHAIN" || true
+          fi
       - uses: actions/upload-artifact@v4
         with: { name: macos, path: "dist/*" }
 
@@ -129,7 +201,7 @@ jobs:
       ${{ !cancelled() && !contains(needs.*.result, 'failure') &&
           (startsWith(github.ref, 'refs/tags/v') ||
            (github.event_name == 'workflow_dispatch' && startsWith(github.event.inputs.version, 'v'))) }}
-    needs: [linux-packages, linux-portable, raspberry-pi, windows, macos]
+    needs: [version-check, linux-packages, linux-portable, raspberry-pi, windows, macos]
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:

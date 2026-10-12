@@ -10,6 +10,11 @@
 		<string>/usr/local/bin/virgild</string>
 		<string>-c</string>
 		<string>/Library/Application Support/Virgil/virgil.conf</string>
+		<!-- virgild writes and rotates the log itself (5 MB, one old file
+		     virgild.log.1); StandardErrorPath only catches what is printed
+		     before it opens the file. -->
+		<string>--log</string>
+		<string>/Library/Logs/Virgil/virgild.log</string>
 	</array>
 	<key>RunAtLoad</key>
 	<true/>

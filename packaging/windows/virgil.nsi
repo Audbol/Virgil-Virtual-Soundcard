@@ -48,7 +48,7 @@ VIAddVersionKey "LegalCopyright" "Virgil Project"
 !define MUI_WELCOMEPAGE_TEXT "This installs Virgil (Virtual Interface Routing Gateway for Inferno-based Low-latency audio):$\r$\n$\r$\n\
   - virgild, a background service that appears in Dante Controller as an audio device \
 (independent; built on the open-source Inferno project)$\r$\n\
-  - an ASIO driver named $\"${PRODUCT}$\" for your DAW$\r$\n$\r$\n\
+  - an ASIO driver named $\"Virgil$\" for your DAW$\r$\n$\r$\n\
 After installing, open Virgil Control (Start menu or desktop) to pick the \
 network interface.$\r$\n$\r$\n\
 Virgil is not affiliated with or endorsed by Audinate. Dante is a registered \
@@ -157,6 +157,7 @@ Section "Virgil" SecMain
   ; Users may edit the configuration; inherited by files the service writes
   ; later (saving from Virgil Control replaces the file).
   nsExec::Exec '"$SYSDIR\icacls.exe" "$ConfDir" /grant *S-1-5-32-545:(OI)(CI)M'
+  Pop $0
   nsExec::Exec '"$SYSDIR\icacls.exe" "$ConfDir\virgil.conf" /grant *S-1-5-32-545:M'
   Pop $0
 
@@ -182,8 +183,9 @@ Section "Virgil" SecMain
   nsExec::Exec '"$SYSDIR\sc.exe" failure ${SERVICE} reset= 86400 actions= restart/2000/restart/5000/restart/30000'
   Pop $0
 
-  ; Firewall: Dante audio, control (4400/4455/8700/8800), PTP (319/320) and
-  ; mDNS (5353) arrive unsolicited.
+  ; Firewall: Dante audio, control (4440/4455/8700/8800, or 24440-24443 when
+  ; ports = auto moves them), PTP (319/320) and mDNS (5353) arrive
+  ; unsolicited. The rules allow virgild.exe on any port, so both work.
   nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall delete rule name="${FIREWALL_RULE}"'
   Pop $0
   nsExec::Exec '"$SYSDIR\netsh.exe" advfirewall firewall add rule name="${FIREWALL_RULE}" dir=in action=allow program="$INSTDIR\virgild.exe" protocol=udp enable=yes profile=any'
@@ -223,7 +225,13 @@ Section "Uninstall"
   Call un.StopService
   nsExec::Exec '"$SYSDIR\taskkill.exe" /F /IM virgil-control.exe'
   Pop $0
+  ; "Start with Windows" is a per-user HKCU Run value written by Virgil
+  ; Control (HKLM Run is not used; removed too in case it was added by hand).
+  ; Only the uninstalling user's value can be removed here; other users keep
+  ; a Run value pointing at the deleted virgil-control.exe, which Windows
+  ; skips at sign-in.
   DeleteRegValue HKCU "Software\Microsoft\Windows\CurrentVersion\Run" "Virgil Control"
+  DeleteRegValue HKLM "Software\Microsoft\Windows\CurrentVersion\Run" "Virgil Control"
   DeleteRegKey HKCU "Software\Virgil"
   nsExec::Exec '"$SYSDIR\sc.exe" delete ${SERVICE}'
   Pop $0
