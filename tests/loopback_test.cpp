@@ -82,6 +82,15 @@ TEST(soundcard_loopback_through_dante_rings) {
   a.set_tx_active(true);
   b.set_tx_active(true);
 
+  // The engine realigns to the clock once just after it starts (a clock
+  // step clears the rings, as audio from the old timeline must not go out).
+  // On a slow machine that can come after a write: wait for it first.
+  for (int64_t until = mono_ns() + 2000000000LL;
+       a.header()->clock_steps.load() == 0 && mono_ns() < until;)
+    wait_ms(5);
+  wait_ms(20);
+  const uint64_t steps_before = a.header()->clock_steps.load();
+
   double now;
   CHECK(a.frame_now(&now));
   const uint64_t start = uint64_t(now) + 480;  // 10 ms ahead
@@ -125,6 +134,8 @@ TEST(soundcard_loopback_through_dante_rings) {
     }
   std::printf("  loopback max error %.3g over %u frames (round trip %llu frames), %s\n", max_err,
               n, (unsigned long long)D, e.status_line().c_str());
+  if (a.header()->clock_steps.load() != steps_before)
+    std::printf("  note: the clock stepped during the round trip\n");
   CHECK(max_err < 1e-6);
 
   // Nothing before the block (it was consumed, not replayed).
