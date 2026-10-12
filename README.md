@@ -162,6 +162,13 @@ Running it again upgrades Virgil and keeps your settings. A Pi has no
 hardware timestamping, so expect a little more clock jitter than on a
 desktop; raise the latencies if you hear dropouts.
 
+**macOS:** if the macOS firewall is on, the `.pkg` allows incoming
+connections for `/usr/local/bin/virgild` (Dante clock and control traffic);
+with the firewall off it changes nothing, and `uninstall.sh` removes the
+entry again. With the portable zip, allow *virgild* when macOS asks. On first
+start Virgil Control asks to show notifications (service stopped, Dante clock
+lost).
+
 ## Virgil Control
 
 Virgil Control is a native app on every platform, with the same window: the

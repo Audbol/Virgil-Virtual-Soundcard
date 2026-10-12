@@ -22,6 +22,16 @@ chmod 664 "$SUPPORT/virgil.conf"
 chgrp admin "$SUPPORT/virgil.conf" 2>/dev/null || true
 mkdir -p /Library/Logs/Virgil
 
+# The application firewall, when it is on, would block incoming PTP (UDP
+# 319/320) and Dante control traffic for virgild: allow it. Off: leave it
+# alone. Never fails the install.
+FW=/usr/libexec/ApplicationFirewall/socketfilterfw
+VIRGILD=/usr/local/bin/virgild
+if [ -x "$FW" ] && "$FW" --getglobalstate 2>/dev/null | grep -Eq 'enabled|State = [12]'; then
+	"$FW" --add "$VIRGILD" >/dev/null 2>&1 || true
+	"$FW" --unblockapp "$VIRGILD" >/dev/null 2>&1 || true
+fi
+
 chown root:wheel "$PLIST"
 chmod 644 "$PLIST"
 launchctl bootstrap system "$PLIST" 2>/dev/null || launchctl load -w "$PLIST" 2>/dev/null || true

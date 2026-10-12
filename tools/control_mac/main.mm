@@ -5,6 +5,7 @@
 //   Virgil Control.app                  open the window (and the menu bar icon)
 //   .../MacOS/Virgil Control --tray     menu bar icon only (used at login)
 #import <AppKit/AppKit.h>
+#import <UserNotifications/UserNotifications.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -90,18 +91,28 @@ NSString* ns(const std::string& s) {
   return r ?: @"";
 }
 
-// Banner notification (service lost, clock lost), like the tray balloons on
-// Windows and the desktop notifications on Linux. NSUserNotification is
-// deprecated but needs no extra framework, entitlement or permission prompt.
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-void notify(NSString* title, NSString* text) {
-  NSUserNotification* n = [[NSUserNotification alloc] init];
-  n.title = title;
-  n.informativeText = text;
-  [[NSUserNotificationCenter defaultUserNotificationCenter] deliverNotification:n];
+// UNUserNotificationCenter raises an exception in a process without a bundle
+// identifier; Virgil Control always runs from its .app, but be safe.
+bool notifications_available() {
+  if (@available(macOS 10.14, *)) return [[NSBundle mainBundle] bundleIdentifier] != nil;
+  return false;
 }
-#pragma clang diagnostic pop
+
+// Banner notification (service lost, clock lost), like the tray balloons on
+// Windows and the desktop notifications on Linux. `ident` is per kind of
+// event, so a repeat replaces the earlier banner instead of piling up. If the
+// user did not allow notifications, the system drops the request.
+void notify(NSString* ident, NSString* title, NSString* text) {
+  if (!notifications_available()) return;
+  if (@available(macOS 10.14, *)) {
+    UNMutableNotificationContent* c = [[UNMutableNotificationContent alloc] init];
+    c.title = title;
+    c.body = text;
+    c.sound = [UNNotificationSound defaultSound];
+    UNNotificationRequest* r = [UNNotificationRequest requestWithIdentifier:ident content:c trigger:nil];
+    [[UNUserNotificationCenter currentNotificationCenter] addNotificationRequest:r withCompletionHandler:nil];
+  }
+}
 
 // Runs `block` on the main thread for a background request that may end in a
 // modal alert. Not dispatch_get_main_queue(): that queue is serial, so a modal
@@ -302,10 +313,7 @@ void set_autostart(bool on) {
 
 // ---- application ---------------------------------------------------------------------------
 
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-@interface VCApp : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, NSUserNotificationCenterDelegate>
-#pragma clang diagnostic pop
+@interface VCApp : NSObject <NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, UNUserNotificationCenterDelegate>
 @property(strong) NSWindow* window;
 @property(strong) VCView* view;
 @property(strong) NSStatusItem* item;
@@ -367,10 +375,17 @@ void set_autostart(bool on) {
   self.item.button.image = icon;
   self.item.button.toolTip = @"Virgil";
   self.item.menu = [self buildMenu];
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wdeprecated-declarations"
-  [NSUserNotificationCenter defaultUserNotificationCenter].delegate = self;
-#pragma clang diagnostic pop
+  // Ask once (the system remembers the answer; later calls do not prompt).
+  // Refused or unavailable: notify() requests are simply dropped.
+  if (notifications_available()) {
+    if (@available(macOS 10.14, *)) {
+      UNUserNotificationCenter* nc = [UNUserNotificationCenter currentNotificationCenter];
+      nc.delegate = self;
+      [nc requestAuthorizationWithOptions:(UNAuthorizationOptionAlert | UNAuthorizationOptionSound)
+                        completionHandler:^(BOOL granted, NSError* error){
+                        }];
+    }
+  }
 
   std::thread([self] { [self pollLoop]; }).detach();
   if (portable() && vc::http(g_port, "GET", "/api/status").status != 200) [self startService:nil];
@@ -509,21 +524,36 @@ void set_autostart(bool on) {
   }
   self.item.button.toolTip = ns(vc::tray_tooltip(s));
   if (g_visible) self.view.needsDisplay = YES;
-  if (event == 1) notify(@"Virgil service stopped", @"Audio to and from the Dante network has stopped.");
+  if (event == 1)
+    notify(@"org.virgil.control.service", @"Virgil service stopped",
+           @"Audio to and from the Dante network has stopped.");
   if (event == 2)
-    notify(@"Dante clock lost", @"Virgil is running on its own clock; check the network connection.");
+    notify(@"org.virgil.control.clock", @"Dante clock lost",
+           @"Virgil is running on its own clock; check the network connection.");
 }
 
+// Show the banners even while the window is in front; clicking one opens it.
+- (void)userNotificationCenter:(UNUserNotificationCenter*)center
+       willPresentNotification:(UNNotification*)notification
+         withCompletionHandler:(void (^)(UNNotificationPresentationOptions options))completionHandler {
+  if (@available(macOS 11.0, *)) {
+    completionHandler(UNNotificationPresentationOptionBanner | UNNotificationPresentationOptionList |
+                      UNNotificationPresentationOptionSound);
+  } else {
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
-// Show the banners even while the window is in front; clicking one opens it.
-- (BOOL)userNotificationCenter:(NSUserNotificationCenter*)center shouldPresentNotification:(NSUserNotification*)n {
-  return YES;
-}
-- (void)userNotificationCenter:(NSUserNotificationCenter*)center didActivateNotification:(NSUserNotification*)n {
-  [self showWindow:nil];
-}
+    completionHandler(UNNotificationPresentationOptionAlert | UNNotificationPresentationOptionSound);
 #pragma clang diagnostic pop
+  }
+}
+- (void)userNotificationCenter:(UNUserNotificationCenter*)center
+    didReceiveNotificationResponse:(UNNotificationResponse*)response
+             withCompletionHandler:(void (^)(void))completionHandler {
+  on_main(^{
+    [self showWindow:nil];
+  });
+  completionHandler();
+}
 
 // While the window is open the app is a regular one (Dock icon, menu bar,
 // Cmd-Tab, Cmd-Q); closed, it lives on as the menu bar icon only.

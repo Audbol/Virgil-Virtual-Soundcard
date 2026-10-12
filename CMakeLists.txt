@@ -98,7 +98,7 @@ if(APPLE)
   target_include_directories(virgil-control PRIVATE tools/control_common)
   target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
   target_compile_options(virgil-control PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-  target_link_libraries(virgil-control PRIVATE "-framework AppKit")
+  target_link_libraries(virgil-control PRIVATE "-framework AppKit" "-framework UserNotifications")
   set_target_properties(virgil-control PROPERTIES
     MACOSX_BUNDLE_ICON_FILE virgil.icns
     OUTPUT_NAME "Virgil Control"

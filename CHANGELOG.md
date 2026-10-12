@@ -3,6 +3,8 @@
 ## 0.6.1 (not released yet)
 - Clock: computers with noisy network timestamps (Raspberry Pi, busy PCs) report *locked* to the Dante clock leader within a minute or two instead of staying "free-running" while following it. The clock itself was already in sync; only the lock test was too strict.
 - Dropout diagnostics: audio received while Virgil and the sender were not yet on the same clock (for example in the moments before the leader appears) is no longer counted as hours-late network audio.
+- macOS: Virgil Control's notifications (service stopped, Dante clock lost) use the current notification system, so the banners also appear on recent macOS versions. Virgil Control asks once for permission; clicking a banner opens the window.
+- macOS: with the macOS firewall on, the installer allows incoming connections for virgild (Dante clock and control traffic, which the firewall could block); with it off nothing changes. The uninstaller removes the entry.
 
 ## 0.6.0
 - **Stop and start Virgil** from Virgil Control (Windows, macOS, Linux), the tray / menu bar menu and the browser panel. Stopped, Virgil leaves the network completely (no Dante device, no network ports in use) and stays stopped across restarts until you start it again; the service keeps running so the controls keep working.

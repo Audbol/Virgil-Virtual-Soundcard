@@ -10,6 +10,10 @@ fi
 launchctl bootout system/org.virgil.virgild 2>/dev/null || \
 	launchctl unload /Library/LaunchDaemons/org.virgil.virgild.plist 2>/dev/null || true
 rm -f /Library/LaunchDaemons/org.virgil.virgild.plist
+# Drop the application firewall entry the installer added (if any).
+if [ -x /usr/libexec/ApplicationFirewall/socketfilterfw ]; then
+	/usr/libexec/ApplicationFirewall/socketfilterfw --remove /usr/local/bin/virgild >/dev/null 2>&1 || true
+fi
 rm -f /usr/local/bin/virgild /usr/local/bin/virgil-latency-probe
 rm -rf /Library/Audio/Plug-Ins/HAL/VirgilAudio.driver
 rm -rf "/Applications/Virgil Control.app"
