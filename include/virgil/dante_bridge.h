@@ -41,6 +41,7 @@ typedef struct VgDanteRxStats {
   uint64_t gaps;             // holes in a stream (lost packets)
   uint64_t missing_samples;  // samples per channel that never arrived
   uint64_t max_age_samples;  // oldest packet on arrival since the last call
+  uint64_t recv_errors;      // flow socket receive errors and too-short packets
 } VgDanteRxStats;
 
 typedef struct VgDanteTxStats {
@@ -48,6 +49,14 @@ typedef struct VgDanteTxStats {
   uint64_t dropped_samples;  // samples per channel skipped by those late wakeups
   uint64_t max_lag_samples;  // worst late-wakeup lag since the last call
   uint64_t clock_jumps;      // media clock jumps seen by a running flow
+  uint64_t send_errors;      // packets that could not be sent (dropped)
+  uint64_t max_wakeup_lag_samples;  // worst lag of any wakeup, late or not, since the last call
+  // Wakeups whose lag exceeded 0.5 / 1 / 2 / 4 ms (cumulative: a 3 ms wakeup
+  // counts in the first three). Near misses below the transmit latency.
+  uint64_t lag_over_0_5ms;
+  uint64_t lag_over_1ms;
+  uint64_t lag_over_2ms;
+  uint64_t lag_over_4ms;
 } VgDanteTxStats;
 
 // Starts the Dante device. Returns an opaque handle, or NULL on failure.
@@ -70,7 +79,8 @@ void vg_dante_set_rename_callback(void (*cb)(int is_tx, uint32_t index, const ch
 int vg_dante_channel_name(int is_tx, uint32_t index, char* buf, uint32_t len);
 // Receive counters since the device started (max_age resets per call).
 void vg_dante_rx_stats(VgDanteRxStats* out);
-// Transmit counters since the device started (max_lag resets per call).
+// Transmit counters since the device started (max_lag and
+// max_wakeup_lag reset per call).
 void vg_dante_tx_stats(VgDanteTxStats* out);
 // Stops the device and releases the rings.
 // 1 while running normally, 0 after a crash of any of its threads.

@@ -83,3 +83,32 @@ Changes for Virgil:
     X ms on a running flow") and the late-wakeup error line is limited to
     one per second. `channels_subscriber.rs`: a missing saved-state file
     (first start) is logged at info level instead of as a warning.
+15. Dropout fixes and diagnostics (`flows_tx.rs`, `flows_rx.rs`,
+    `tx_stats.rs`, `rx_stats.rs`, `util/os.rs`, `util/net.rs`,
+    `channels_subscriber.rs`):
+    * A running flow whose sending thread woke more than the transmit latency
+      late keeps its packet phase and skips only the whole packets older than
+      that (`late_skip_samples`), then sends the rest of the backlog;
+      upstream restarted the flow at "now", dropping lag + 1 packet including
+      audio receivers could still play. Flow start, resuscitation and clock
+      jumps (> `DISCONTINUITY_THRESHOLD_SAMPLES`) still re-bootstrap.
+    * A packet that cannot be sent (error or short write) is dropped and
+      counted (`send_errors`) instead of retried in a tight loop, logged at
+      most once a second; the 5 ms "blocked" guard no longer sleeps 2 ms.
+    * `tx_stats` also records the worst lag of every wakeup and counts
+      wakeups later than 0.5 / 1 / 2 / 4 ms (near misses).
+    * Windows: real-time threads join MMCSS "Pro Audio" at
+      AVRT_PRIORITY_CRITICAL and their priority is not overridden by
+      SetThreadPriority afterwards (that replaced the MMCSS boost with
+      THREAD_PRIORITY_HIGHEST); without MMCSS they fall back to
+      THREAD_PRIORITY_TIME_CRITICAL and the callers log a warning.
+    * The receive loop drains the socket until WouldBlock (mio on Windows
+      re-arms readiness only then): too-short packets are skipped and receive
+      errors counted (`recv_errors`, at most 64 per wakeup) instead of ending
+      the loop, which could leave a flow socket deaf until the flow timed out.
+    * Flow sockets: 2 MB SO_RCVBUF on receive sockets (unicast and multicast);
+      on Windows SIO_UDP_CONNRESET / SIO_UDP_NETRESET are disabled on all flow
+      sockets so an ICMP port-unreachable does not fail later receives/sends.
+    * The gap counter no longer counts reordering as loss: a hole is only
+      reported once the stream is a receive latency past it (or a newer hole
+      opens), and reordered packets at its edges shrink it first.

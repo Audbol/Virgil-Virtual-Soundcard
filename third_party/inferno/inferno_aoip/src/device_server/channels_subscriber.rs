@@ -778,7 +778,11 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
       // TODO make DC display warning when removing multicast flow from the transmitter
       for (bundle_full_name, advbundle) in &bundles {
         let socket = match mio::net::UdpSocket::bind(advbundle.media_addr) {
-          Ok(socket) => socket,
+          Ok(socket) => {
+            // Virgil patch: bigger receive buffer, no UDP resets on Windows
+            crate::net_utils::tune_flow_socket(&socket, Some(crate::net_utils::FLOW_RX_SOCKET_BUFFER_BYTES));
+            socket
+          }
           Err(e) => {
             error!("failed to bind to socket {:?} for multicast media: {e:?}", advbundle.media_addr);
             continue;

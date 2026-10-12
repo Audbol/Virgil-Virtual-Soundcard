@@ -112,7 +112,23 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   // in tx_stats): media time before which further ones are only counted.
   lag_log_quiet_until: Option<Clock>,
   lag_logs_suppressed: u64,
+  // Virgil patch: the same for packets that could not be sent.
+  send_log_quiet_until: Option<Clock>,
+  send_logs_suppressed: u64,
   //callback: SamplesRequestCallback,
+}
+
+enum SendFailure {
+  Short(usize),
+  Error(std::io::ErrorKind),
+}
+
+/// Virgil patch: samples a running flow that woke `lag` samples late (lag >
+/// `max_lag`) skips: whole packets, just enough that what is left of the
+/// backlog is at most `max_lag` old. The flow keeps its packet phase.
+fn late_skip_samples(lag: ClockDiff, max_lag: usize, fpp: usize) -> usize {
+  let excess = (lag.max(0) as usize).saturating_sub(max_lag);
+  excess.div_ceil(fpp) * fpp
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
@@ -146,6 +162,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let dither_16 = self.should_dither(16);
     let dither_24 = self.should_dither(24);
     let mut late_counted = false;
+    let mut wakeup_lag: ClockDiff = 0;
     for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
       if flow.expired.load(Ordering::Relaxed) {
         continue;
@@ -158,18 +175,24 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       // distance to the first packet. Late wakeups are counted (tx_stats),
       // clock jumps are worded as such, start-ups are silent.
       let jump_ms = |lag: ClockDiff| lag as i64 * 1000 / sample_rate as i64;
+      if flow.running && lag >= 0 && lag <= DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff {
+        wakeup_lag = wakeup_lag.max(lag);
+      }
       if lag > max_lag_samples as ClockDiff {
-        let was_running = flow.running;
-        let old_next_ts = flow.next_ts;
-        flow.bootstrap_next_ts(now);
-        if !was_running {
+        if !flow.running {
           // starting: nothing was dropped
+          flow.bootstrap_next_ts(now);
         } else if lag > DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff {
+          flow.bootstrap_next_ts(now);
           super::tx_stats::clock_jump();
           error!("media clock jumped by {} ms on a running flow", jump_ms(lag));
         } else {
-          let dropped = wrapped_diff(flow.next_ts as Clock, old_next_ts as Clock).max(0) as u64;
-          super::tx_stats::late_wakeup(lag as u64, dropped, !late_counted);
+          // Virgil patch: a late wakeup keeps the flow's phase and skips only
+          // the packets that are older than max_lag_samples (receivers could
+          // not play them anyway); the rest of the backlog is sent below.
+          let dropped = late_skip_samples(lag, max_lag_samples, flow.fpp);
+          flow.next_ts = flow.next_ts.wrapping_add(dropped as LongClock);
+          super::tx_stats::late_wakeup(lag as u64, dropped as u64, !late_counted);
           if !late_counted {
             let quiet = self.lag_log_quiet_until.is_some_and(|t| wrapped_diff(now as Clock, t) < 0);
             if quiet {
@@ -252,23 +275,51 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
           }
         }
         let to_send = 9 + stride * flow.fpp;
-        if let Ok(written) = flow.socket.send(&pbuff[0..to_send]) {
-          if written == to_send {
-            flow.next_ts = flow.next_ts.wrapping_add(flow.fpp.try_into().unwrap());
-            flow.running = true;
-          } else {
-            warn!("written {written}, should have {to_send}");
+        // Virgil patch: a packet that cannot be sent is dropped (counted,
+        // logged at most once a second), not retried: retrying in a tight
+        // loop blocked the other flows and logged every attempt.
+        let sent = match flow.socket.send(&pbuff[0..to_send]) {
+          Ok(written) if written == to_send => Ok(()),
+          Ok(written) => Err(SendFailure::Short(written)),
+          Err(e) => Err(SendFailure::Error(e.kind())),
+        };
+        flow.next_ts = flow.next_ts.wrapping_add(flow.fpp as LongClock);
+        match sent {
+          Ok(()) => flow.running = true,
+          Err(failure) => {
+            super::tx_stats::send_error();
+            let quiet = self.send_log_quiet_until.is_some_and(|t| wrapped_diff(now as Clock, t) < 0);
+            if quiet {
+              self.send_logs_suppressed += 1;
+            } else {
+              let more = std::mem::take(&mut self.send_logs_suppressed);
+              match (failure, more) {
+                (SendFailure::Short(written), 0) => {
+                  warn!("tx packet dropped: sent {written} of {to_send} bytes")
+                }
+                (SendFailure::Short(written), more) => warn!(
+                  "tx packet dropped: sent {written} of {to_send} bytes ({more} more dropped since the last such line)"
+                ),
+                (SendFailure::Error(kind), 0) => warn!("tx packet dropped: send error {kind:?}"),
+                (SendFailure::Error(kind), more) => {
+                  warn!("tx packet dropped: send error {kind:?} ({more} more dropped since the last such line)")
+                }
+              }
+              self.send_log_quiet_until = Some((now as Clock).wrapping_add(sample_rate as Clock));
+            }
           }
-        } else {
-          warn!("send returned error");
         }
         iterations += 1;
         if (iterations % 16) == 0 {
           if let Some(real_now) = self.clock.wrapping_now_in_timebase(self.sample_rate as u64) {
             let diff = wrapped_diff(real_now.try_into().unwrap(), now as Clock);
             if diff > max_awake_time_samples {
+              // Virgil patch: no sleep here (it delayed every flow by 2 ms
+              // more); give up this round so the main loop can process
+              // commands, and let other threads run.
               warn!("blocked for {diff} samples, yielding to avoid CPU lockup");
-              std::thread::sleep(Duration::from_micros(2000));
+              super::tx_stats::wakeup_lag(wakeup_lag as u64, sample_rate);
+              std::thread::yield_now();
               return;
             }
           }
@@ -283,6 +334,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         }
       }
     }
+    super::tx_stats::wakeup_lag(wakeup_lag as u64, sample_rate);
   }
 
   async fn run(&mut self, mut start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>) {
@@ -333,7 +385,9 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let mut next_process_events = now as Clock;
     drop(now);
 
-    set_current_thread_realtime(81);
+    if let Err(e) = set_current_thread_realtime(81) {
+      warn!("flows TX: could not raise the thread priority: {e:?}");
+    }
     loop {
       let min_next_ts = self
         .flows
@@ -604,6 +658,8 @@ impl FlowsTransmitter {
       on_transfer,
       lag_log_quiet_until: None,
       lag_logs_suppressed: 0,
+      send_log_quiet_until: None,
+      send_logs_suppressed: 0,
     };
     internal.run(start_time_rx).await;
   }
@@ -708,6 +764,9 @@ impl FlowsTransmitter {
         let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(self.self_info.ip_address), 0))?;
         socket.connect(dst_addr)?;
         socket.set_nonblocking(true)?;
+        // Virgil patch: on Windows an ICMP "port unreachable" from a gone
+        // receiver would otherwise fail later sends with WSAECONNRESET.
+        crate::net_utils::tune_flow_socket(&socket, None);
         //socket.set_read_timeout(Some(Duration::from_micros(1)))?;
 
         self
@@ -853,5 +912,32 @@ impl FlowsTransmitter {
   }
   pub fn get_flows_info(&self) -> &Vec<Option<FlowInfo>> {
     &self.flows_info
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::late_skip_samples;
+
+  #[test]
+  fn late_wakeup_skips_only_beyond_max_lag() {
+    // fpp 16, max lag 48 (1 ms at 48 kHz)
+    assert_eq!(late_skip_samples(49, 48, 16), 16); // 1 sample over: one packet
+    assert_eq!(late_skip_samples(64, 48, 16), 16);
+    assert_eq!(late_skip_samples(65, 48, 16), 32);
+    assert_eq!(late_skip_samples(48, 48, 16), 0);
+    assert_eq!(late_skip_samples(-5, 48, 16), 0);
+    // what is left of the backlog is never older than max lag, and whole
+    // packets are skipped (the flow keeps its phase)
+    for fpp in [2usize, 16, 32, 64, 256] {
+      for max_lag in [0usize, 24, 48, 96, 480] {
+        for lag in (max_lag as isize + 1)..(max_lag as isize + 3 * fpp as isize) {
+          let skip = late_skip_samples(lag, max_lag, fpp);
+          assert_eq!(skip % fpp, 0);
+          assert!(lag - skip as isize <= max_lag as isize);
+          assert!(lag - skip as isize > max_lag as isize - fpp as isize);
+        }
+      }
+    }
   }
 }

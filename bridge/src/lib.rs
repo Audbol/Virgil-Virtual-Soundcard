@@ -281,6 +281,7 @@ pub struct VgDanteRxStats {
     gaps: u64,
     missing_samples: u64,
     max_age_samples: u64,
+    recv_errors: u64,
 }
 
 /// # Safety
@@ -295,6 +296,7 @@ pub unsafe extern "C" fn vg_dante_rx_stats(out: *mut VgDanteRxStats) {
             gaps: s.gaps,
             missing_samples: s.missing_samples,
             max_age_samples: s.max_age_samples,
+            recv_errors: s.recv_errors,
         };
     }
 }
@@ -307,6 +309,12 @@ pub struct VgDanteTxStats {
     dropped_samples: u64,
     max_lag_samples: u64,
     clock_jumps: u64,
+    send_errors: u64,
+    max_wakeup_lag_samples: u64,
+    lag_over_0_5ms: u64,
+    lag_over_1ms: u64,
+    lag_over_2ms: u64,
+    lag_over_4ms: u64,
 }
 
 /// # Safety
@@ -320,6 +328,12 @@ pub unsafe extern "C" fn vg_dante_tx_stats(out: *mut VgDanteTxStats) {
             dropped_samples: s.dropped_samples,
             max_lag_samples: s.max_lag_samples,
             clock_jumps: s.clock_jumps,
+            send_errors: s.send_errors,
+            max_wakeup_lag_samples: s.max_wakeup_lag_samples,
+            lag_over_0_5ms: s.lag_over_0_5ms,
+            lag_over_1ms: s.lag_over_1ms,
+            lag_over_2ms: s.lag_over_2ms,
+            lag_over_4ms: s.lag_over_4ms,
         };
     }
 }

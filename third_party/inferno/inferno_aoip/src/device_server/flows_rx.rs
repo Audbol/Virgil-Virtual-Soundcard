@@ -28,6 +28,8 @@ pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(250);
 pub const CLOSING_SAMPLES_INTERVAL: Duration = Duration::from_millis(1);
 const KEEPALIVE_CONTENT: [u8; 2] = [0x13, 0x37];
 
+const MAX_RECV_ERRORS: usize = 64;
+
 const SILENCE_BURST_LEN: usize = 64;
 const SILENCE_SAMPLES: [Sample; SILENCE_BURST_LEN] = [0; SILENCE_BURST_LEN];
 
@@ -49,8 +51,11 @@ struct SocketData<P: ProxyToSamplesBuffer> {
   channels: Vec<Option<Channel<P>>>,
   empty_sinks_vecs: Vec<Vec<RBInput<Sample, P>>>,
   actual_latency_samples: Arc<AtomicI32>,
-  // Virgil patch: where the next packet should start, to count lost audio.
-  next_timestamp: Option<Clock>,
+  // Virgil patch: holes in the timeline, to count lost audio.
+  gaps: super::rx_stats::GapTracker,
+  // Virgil patch: receive errors are logged at most once a second.
+  error_log_quiet_until: Option<Instant>,
+  errors_suppressed: u64,
 }
 
 struct SilenceWriter<P: ProxyToSamplesBuffer> {
@@ -103,12 +108,18 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     write: bool,
   ) -> Command<P> {
     let mut buf = [0; MTU];
+    // Virgil patch: mio (on Windows) only reports the socket readable again
+    // after a receive returned WouldBlock, so the socket is always drained:
+    // bad packets and errors are counted and skipped, never end the loop
+    // (up to MAX_RECV_ERRORS of them per wakeup, in case an error repeats).
+    let mut errors = 0usize;
     loop {
       match sd.socket.recv_from(&mut buf) {
         Ok((recv_size, src)) => {
           if recv_size < 9 {
-            error!("received corrupted (too small) packet on flow socket");
-            return Command::NoOp;
+            super::rx_stats::recv_error();
+            Self::log_error(sd, format_args!("received corrupted (too small, {recv_size} bytes) packet on flow socket"));
+            continue;
           }
           let timestamp = (u32::from_be_bytes([buf[1], buf[2], buf[3], buf[4]]) as usize)
             .wrapping_mul(sample_rate as usize)
@@ -131,19 +142,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             super::rx_stats::packet(age, sd.latency_samples, sample_rate);
             let stride = sd.channels.len().max(1) * sd.bytes_per_sample;
             let samples = (recv_size - 9) / stride;
-            if let Some(expected) = sd.next_timestamp {
-              let d = wrapped_diff(timestamp, expected);
-              // Ignore reordering and restarts of the sender (> 1 s).
-              if d > 0 && d < sample_rate as ClockDiff {
-                super::rx_stats::gap(d as u64);
-              }
-              if d < 0 && d > -(sample_rate as ClockDiff) {
-                // Older than expected: a reordered packet; keep the timeline.
-              } else {
-                sd.next_timestamp = Some(timestamp.wrapping_add(samples));
-              }
-            } else {
-              sd.next_timestamp = Some(timestamp.wrapping_add(samples));
+            // A hole is confirmed once a reordered packet could no longer
+            // fill it in time (the receive latency, at least 1 ms).
+            let window = sd.latency_samples.max(sample_rate as usize / 1000);
+            if let Some(missing) = sd.gaps.packet(timestamp, samples, sample_rate, window) {
+              super::rx_stats::gap(missing);
             }
           }
 
@@ -184,15 +187,35 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           sd.last_source = Some(src);
         }
         Err(e) => {
-          if e.kind() != WouldBlock {
-            error!("flow socket receive error: {:?}", e);
-            // TODO recreate socket?
+          if e.kind() == WouldBlock {
+            break;
           }
-          break;
+          super::rx_stats::recv_error();
+          Self::log_error(sd, format_args!("flow socket receive error: {e:?}"));
+          errors += 1;
+          if errors >= MAX_RECV_ERRORS {
+            break;
+          }
         }
       }
     }
     return Command::NoOp;
+  }
+  // Virgil patch: rate-limited error line (once a second, with a count).
+  #[cold]
+  fn log_error(sd: &mut SocketData<P>, msg: std::fmt::Arguments) {
+    let now = Instant::now();
+    if sd.error_log_quiet_until.is_some_and(|t| now < t) {
+      sd.errors_suppressed += 1;
+      return;
+    }
+    let more = std::mem::take(&mut sd.errors_suppressed);
+    if more > 0 {
+      error!("{msg} ({more} more since the last such line)");
+    } else {
+      error!("{msg}");
+    }
+    sd.error_log_quiet_until = Some(now + Duration::from_secs(1));
   }
   async fn take_command(receiver: &mut mpsc::Receiver<Command<P>>) -> Command<P> {
     receiver.recv().await.unwrap_or(Command::Shutdown)
@@ -216,7 +239,9 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     let mut may_have_command = false;
     let mut start_timestamp = None;
 
-    set_current_thread_realtime(80);
+    if let Err(e) = set_current_thread_realtime(80) {
+      warn!("flows RX: could not raise the thread priority: {e:?}");
+    }
     loop {
       let write_to_rbs =
         self.sockets.iter().find(|opt| opt.is_some()).is_some() || self.silence_writers.len() > 0;
@@ -604,7 +629,9 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
           channels: (0..channels_count).map(|_| None).collect(),
           empty_sinks_vecs,
           actual_latency_samples: als,
-          next_timestamp: None,
+          gaps: Default::default(),
+          error_log_quiet_until: None,
+          errors_suppressed: 0,
         },
       })
       .await
