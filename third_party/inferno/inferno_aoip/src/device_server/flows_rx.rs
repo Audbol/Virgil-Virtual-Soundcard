@@ -128,7 +128,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
           }
           if write {
             // Virgil patch: dropout diagnostics (see rx_stats.rs).
-            super::rx_stats::packet(age, sd.latency_samples);
+            super::rx_stats::packet(age, sd.latency_samples, sample_rate);
             let stride = sd.channels.len().max(1) * sd.bytes_per_sample;
             let samples = (recv_size - 9) / stride;
             if let Some(expected) = sd.next_timestamp {

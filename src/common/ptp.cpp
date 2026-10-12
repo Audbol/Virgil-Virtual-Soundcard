@@ -279,7 +279,11 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   m_.ratio = 1.0 + adj * 1e-9;
 
   rms_ = rms_ == 0 ? std::fabs(double(err)) : 0.95 * rms_ + 0.05 * std::fabs(double(err));
-  if (std::llabs(err) < 100000) {
+  // Within 250 us for 16 windows in a row: software timestamps on a busy or
+  // small computer (Raspberry Pi) scatter single measurements by a few
+  // hundred us even while the clock itself is within tens of us, and a
+  // tighter bound kept such machines from ever reporting a lock.
+  if (std::llabs(err) < 250000) {
     if (++good_ >= 16) locked_ = true;
   } else {
     good_ = 0;

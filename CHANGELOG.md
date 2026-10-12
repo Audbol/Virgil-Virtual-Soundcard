@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.6.1 (not released yet)
+- Clock: computers with noisy network timestamps (Raspberry Pi, busy PCs) report *locked* to the Dante clock leader within a minute or two instead of staying "free-running" while following it. The clock itself was already in sync; only the lock test was too strict.
+- Dropout diagnostics: audio received while Virgil and the sender were not yet on the same clock (for example in the moments before the leader appears) is no longer counted as hours-late network audio.
+
 ## 0.6.0
 - **Stop and start Virgil** from Virgil Control (Windows, macOS, Linux), the tray / menu bar menu and the browser panel. Stopped, Virgil leaves the network completely (no Dante device, no network ports in use) and stays stopped across restarts until you start it again; the service keeps running so the controls keep working.
 - **Dropout diagnostics.** Virgil now notices and explains dropouts: audio from the network that arrived too late for the receive latency or never arrived, apps that did not deliver their audio in time, the computer keeping Virgil's engine waiting, and clock trouble. Virgil Control shows how many dropouts the last hour had; *Dropouts…* opens the event list with a chart of the last hour, suggestions (for example the receive latency that would have covered the late audio) and *Download report*, a text file with the setup, the events and the recent log for bug reports.

@@ -24,8 +24,12 @@ pub struct RxStats {
   pub max_age_samples: u64,
 }
 
-pub(crate) fn packet(age_samples: Option<u64>, latency_samples: usize) {
+pub(crate) fn packet(age_samples: Option<u64>, latency_samples: usize, sample_rate: u32) {
   PACKETS.fetch_add(1, Ordering::Relaxed);
+  // An "age" over a second does not mean a slow network: the sender and this
+  // device are not on the same clock yet (e.g. before either follows the
+  // leader). Such packets are neither late nor counted in the maximum.
+  let age_samples = age_samples.filter(|&age| age <= sample_rate as u64);
   if let Some(age) = age_samples {
     MAX_AGE_SAMPLES.fetch_max(age, Ordering::Relaxed);
     if age > latency_samples as u64 {
@@ -47,5 +51,22 @@ pub fn take() -> RxStats {
     gaps: GAPS.load(Ordering::Relaxed),
     missing_samples: MISSING_SAMPLES.load(Ordering::Relaxed),
     max_age_samples: MAX_AGE_SAMPLES.swap(0, Ordering::Relaxed),
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn ages_beyond_a_second_are_not_late() {
+    let before = take();
+    packet(Some(300), 192, 48000); // late
+    packet(Some(100), 192, 48000); // in time
+    packet(Some(i32::MAX as u64), 192, 48000); // other clock: ignored
+    let after = take();
+    assert_eq!(after.packets - before.packets, 3);
+    assert_eq!(after.late_packets - before.late_packets, 1);
+    assert_eq!(after.max_age_samples, 300);
   }
 }
