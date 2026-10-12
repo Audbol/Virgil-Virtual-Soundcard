@@ -751,6 +751,7 @@ void set_autostart(bool on) {
     self.settingsError = nil;
     self.settingsCollect = nil;
     if (response == NSAlertThirdButtonReturn) [self openPage:"#channels"];
+    if (response == NSAlertThirdButtonReturn + 1) [self openPage:"#diagnostics"];
     return;
   }
   const std::string conf = self.settingsCollect();
@@ -834,6 +835,7 @@ void set_autostart(bool on) {
   [a addButtonWithTitle:@"Apply"];
   [a addButtonWithTitle:@"Cancel"];
   [a addButtonWithTitle:@"Channel names…"];
+  [a addButtonWithTitle:@"Dropouts and diagnostics…"];
   NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 320)];
   [box addSubview:grid];
   [grid.leadingAnchor constraintEqualToAnchor:box.leadingAnchor].active = YES;

@@ -38,7 +38,8 @@ BEGIN
     AUTOCHECKBOX    "Become clock leader when no Dante device provides one", IDC_MASTER, 16, 172, 258, 10
 
     LTEXT           "", IDC_ERR, 7, 194, 276, 18
-    LTEXT           "", IDC_CONFPATH, 7, 220, 160, 9, SS_PATHELLIPSIS | SS_NOPREFIX
+    PUSHBUTTON      "Dropouts and diagnostics...", IDC_DIAGBTN, 7, 216, 100, 15
+    LTEXT           "", IDC_CONFPATH, 112, 220, 56, 9, SS_PATHELLIPSIS | SS_NOPREFIX
     DEFPUSHBUTTON   "Apply", IDOK, 172, 216, 52, 15
     PUSHBUTTON      "Cancel", IDCANCEL, 230, 216, 52, 15
 END

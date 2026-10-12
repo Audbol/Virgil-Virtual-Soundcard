@@ -689,6 +689,7 @@ GtkWidget* label(const char* text) {
 }
 
 constexpr int kResponseNames = 1;
+constexpr int kResponseDiag = 2;
 
 // The open settings dialog (one at a time). Shared with an Apply in flight,
 // which may finish after the dialog was closed.
@@ -701,7 +702,7 @@ struct SettingsUi {
 std::shared_ptr<SettingsUi> g_settings;
 
 void settings_buttons(SettingsUi& ui, bool on) {
-  for (int r : {kResponseNames, int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
+  for (int r : {kResponseNames, kResponseDiag, int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
     gtk_dialog_set_response_sensitive(GTK_DIALOG(ui.d), r, on);
 }
 
@@ -711,6 +712,7 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
   if (response != GTK_RESPONSE_APPLY) {
     gtk_widget_destroy(ui->d);
     if (response == kResponseNames) open_channel_names();
+    if (response == kResponseDiag) open_diagnostics();
     return;
   }
   vc::SettingsForm& f = ui->f;
@@ -763,7 +765,7 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
 
   GtkWidget* d = ui->d = gtk_dialog_new_with_buttons(
       "Virgil Settings", parent_window(), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
-      "Channel _names…", kResponseNames, "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
+      "_Dropouts and diagnostics…", kResponseDiag, "Channel _names…", kResponseNames, "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
   gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_APPLY);
   GtkWidget* grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 8);

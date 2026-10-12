@@ -229,7 +229,6 @@ void StatusView::paint(Canvas& c, float W, float H) {
     std::vector<B> right;
     if (!stopped) right = {{"Stop", Action::Stop}, {"Restart", Action::Restart}};
     right.push_back({"Settings…", Action::Settings});
-    right.push_back({"Dropouts…", Action::Diagnostics});
     float bx = W - kPad;
     for (const B& b : right) {
       const float w = std::max(64.f, c.text_width(b.label, Font::Button) + 28);

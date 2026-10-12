@@ -497,8 +497,8 @@ void paint(HWND hwnd) {
   // Footer.
   fill(D2D1::RectF(0, H - kFooter, W, H), kPanel);
   hline(0, W, H - kFooter + 0.5f, kLine);
-  // Buttons from the right (indices 1..): Stop, Restart, Settings, Dropouts,
-  // Desktop audio; laid out first so the text on the left knows its room.
+  // Buttons from the right (indices 1..): Stop, Restart, Settings, Desktop
+  // audio (Dropouts and diagnostics are in Settings and the tray menu); laid out first so the text on the left knows its room.
   const bool stopped_now = s.state == "stopped";
   float text_r = W - kPad;
   if (s.reachable) {
@@ -509,7 +509,6 @@ void paint(HWND hwnd) {
     std::vector<B> right;
     if (!stopped_now) right = {{ID_STOP, L"Stop"}, {ID_RESTART, L"Restart"}};
     right.push_back({ID_SETTINGS, L"Settings\u2026"});
-    right.push_back({ID_DIAG, L"Dropouts\u2026"});
     right.push_back({ID_DESKTOP, L"Desktop audio\u2026"});
     float bx = W - kPad;
     for (size_t k = 0; k < right.size() && 1 + k < g_buttons.size(); ++k) {
@@ -1039,6 +1038,11 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       if (!data) break;
       if (LOWORD(wp) == IDC_NAMES) {  // the editor lives in the control panel
         open_page(L"#channels");
+        EndDialog(d, 0);
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDC_DIAGBTN) {
+        open_page(L"#diagnostics");
         EndDialog(d, 0);
         return TRUE;
       }

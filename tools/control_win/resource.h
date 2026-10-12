@@ -13,6 +13,7 @@
 #define IDC_ERR 1010
 #define IDC_CONFPATH 1011
 #define IDC_NAMES 1012
+#define IDC_DIAGBTN 1019
 #define IDC_TXSPIN 1013
 #define IDC_RXSPIN 1014
 

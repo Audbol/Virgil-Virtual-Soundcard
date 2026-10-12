@@ -1,9 +1,10 @@
 # Changelog
 
-## 0.6.2 (Windows only)
+## 0.6.2
+Includes everything in 0.6.1 below (0.6.1 was not released on its own).
+- Virgil Control (all platforms): *Dropouts and diagnostics…* moved from the window's footer into Settings (and stays in the tray / menu bar menu), so the footer is less crowded.
 - **Desktop audio (Windows).** Virgil Control can send sound from Windows programs to Virgil's Dante transmit channels, and play Dante receive channels on a Windows output device, with no driver and no extra software (*Desktop audio…* in the window and the tray menu). Sources: everything an output device plays (WASAPI loopback, *Default* follows Windows), one app with the processes it starts (`chrome.exe`, Windows 10 version 2004 or later), or all apps except Virgil itself (no echo when you also listen to Dante on the PC). Each source goes to a stereo pair or, mixed to mono, one transmit channel, with gain, mute, a level meter and status. Audio is converted to Virgil's sample rate and follows the drift between the sound hardware's clock and the Dante clock with a new adaptive resampler (about 100 dB signal-to-noise, ±0.5 % range), roughly 60–80 ms of latency. It uses a playback slot named *Desktop audio*, pauses while Virgil is stopped and reconnects when the service restarts. Settings are per user in `%APPDATA%\Virgil\desktop-audio.conf`.
 - Windows: `desktop-audio-probe.exe` (in the portable zip) lists output devices and apps with audio, and records 5 s from a device or an app to a WAV file, to check capture on a PC without Virgil.
-- Virgil Control (Windows): the window is a little wider, for the *Desktop audio…* button.
 
 ## 0.6.1
 - **More accurate Dante clock.** Virgil's own clock-delay measurements no longer favour the ones a busy computer delayed (they biased the clock behind the leader), the frequency is learnt from the leader alone, the servo settles faster, and "locked" is reported once the clock really is close (about 30 s, filtered, not single readings). In simulations of Windows, macOS, Linux and Raspberry Pi timing the error to the leader drops 2-5x (Windows about 47 to 18 us, Raspberry Pi 30 to 9 us). Linux uses kernel send timestamps; macOS and Windows use kernel receive timestamps where available.
