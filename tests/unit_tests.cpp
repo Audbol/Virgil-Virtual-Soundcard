@@ -871,7 +871,8 @@ Config engine_test_config(const char* tag) {
 #if defined(_WIN32)
   c.shm_name = std::string(kFallbackShmName) + "-unit-" + tag + std::to_string(process_id());
 #else
-  c.shm_name = std::string(kDefaultShmName) + "-unit-" + tag + std::to_string(process_id());
+  // Short: macOS limits shared memory names to 31 characters.
+  c.shm_name = std::string("/vgu-") + tag + std::to_string(process_id());
 #endif
   c.clock = "free";
   c.lock_memory = false;
