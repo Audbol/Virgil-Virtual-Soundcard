@@ -43,6 +43,13 @@ typedef struct VgDanteRxStats {
   uint64_t max_age_samples;  // oldest packet on arrival since the last call
 } VgDanteRxStats;
 
+typedef struct VgDanteTxStats {
+  uint64_t late_wakeups;     // sending thread woke after the transmit latency: audio dropped
+  uint64_t dropped_samples;  // samples per channel skipped by those late wakeups
+  uint64_t max_lag_samples;  // worst late-wakeup lag since the last call
+  uint64_t clock_jumps;      // media clock jumps seen by a running flow
+} VgDanteTxStats;
+
 // Starts the Dante device. Returns an opaque handle, or NULL on failure.
 void* vg_dante_start(const VgDanteConfig* config);
 // Software version Dante Controller shows for the device.
@@ -63,6 +70,8 @@ void vg_dante_set_rename_callback(void (*cb)(int is_tx, uint32_t index, const ch
 int vg_dante_channel_name(int is_tx, uint32_t index, char* buf, uint32_t len);
 // Receive counters since the device started (max_age resets per call).
 void vg_dante_rx_stats(VgDanteRxStats* out);
+// Transmit counters since the device started (max_lag resets per call).
+void vg_dante_tx_stats(VgDanteTxStats* out);
 // Stops the device and releases the rings.
 // 1 while running normally, 0 after a crash of any of its threads.
 int vg_dante_healthy(void* handle);

@@ -24,6 +24,7 @@ class Diagnostics {
     AppLate,     // an app's audio came after its deadline (dropped)
     AppMissed,   // an app had not written its audio in time (silence sent)
     EngineLate,  // the engine woke up late (computer busy)
+    NetSendLate, // the Dante sending thread woke up after the transmit latency (audio dropped)
     ClockJump,   // media clock realigned while running
     ClockLost,   // lost the clock leader
     ClockInfo,   // locked, leader changed (not a dropout)
@@ -68,7 +69,7 @@ class Diagnostics {
   void bump_minute_locked(Kind k, int64_t now);
   std::vector<std::string> hints_locked(int64_t now) const;
   static const char* kind_name(Kind k);
-  static std::string event_text(const Event& e, double period_ms, double rx_latency_ms);
+  static std::string event_text(const Event& e, double period_ms, double rx_latency_ms, double tx_latency_ms);
 
   mutable std::mutex m_;
   int64_t since_ms_ = 0;
@@ -80,6 +81,7 @@ class Diagnostics {
   std::string prev_gm_;
   double period_ms_ = 1, rx_latency_ms_ = 4, tx_latency_ms_ = 4;
   double worst_age_ms_ = 0;  // since reset
+  double worst_send_lag_ms_ = 0;  // since reset
   std::deque<Event> events_;
   std::deque<Minute> minutes_;
   std::map<Kind, uint64_t> totals_;  // dropout events by kind

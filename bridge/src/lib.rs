@@ -16,7 +16,7 @@ use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 
 use inferno_aoip::device_server::{
-    current_name, rx_stats, set_name_overrides, set_rename_hook, AtomicSample, DeviceServer,
+    current_name, rx_stats, set_name_overrides, tx_stats, set_rename_hook, AtomicSample, DeviceServer,
     ExternalBufferParameters, Sample, Settings,
 };
 
@@ -295,6 +295,31 @@ pub unsafe extern "C" fn vg_dante_rx_stats(out: *mut VgDanteRxStats) {
             gaps: s.gaps,
             missing_samples: s.missing_samples,
             max_age_samples: s.max_age_samples,
+        };
+    }
+}
+
+// ---- transmit statistics ---------------------------------------------------------
+
+#[repr(C)]
+pub struct VgDanteTxStats {
+    late_wakeups: u64,
+    dropped_samples: u64,
+    max_lag_samples: u64,
+    clock_jumps: u64,
+}
+
+/// # Safety
+/// `out` points to a writable VgDanteTxStats.
+#[no_mangle]
+pub unsafe extern "C" fn vg_dante_tx_stats(out: *mut VgDanteTxStats) {
+    if let Some(o) = out.as_mut() {
+        let s = tx_stats::take();
+        *o = VgDanteTxStats {
+            late_wakeups: s.late_wakeups,
+            dropped_samples: s.dropped_samples,
+            max_lag_samples: s.max_lag_samples,
+            clock_jumps: s.clock_jumps,
         };
     }
 }

@@ -34,6 +34,10 @@ struct EngineCounters {
   int64_t max_offset_ns = 0;   // largest |PTP offset| since the last sample
   uint64_t rx_packets = 0, rx_late_packets = 0, rx_gaps = 0, rx_missing_samples = 0;
   uint64_t rx_max_age_samples = 0;  // since the last sample
+  // Dante sending thread woke up after the transmit latency (audio to the
+  // network dropped); since the process started.
+  uint64_t tx_late_wakeups = 0, tx_dropped_samples = 0, tx_clock_jumps = 0;
+  uint64_t tx_max_lag_samples = 0;  // since the last sample
   struct App {
     uint32_t slot = 0, pid = 0;
     std::string name;
@@ -68,6 +72,8 @@ class Engine {
   // ---- Introspection for the control panel (safe from any thread) ----
   uint32_t interface_address() const { return iface_; }
   std::string grandmaster() const { return clock_ ? clock_->grandmaster() : std::string(); }
+  // The clock in use (a PtpClock when clock = ptp); null when stopped.
+  const ClockSource* clock_source() const { return clock_.get(); }
   bool dante_running() const { return dante_ != nullptr; }
   // First Dante control port in use (4440 = the standard ports).
   uint16_t control_port_base() const { return alt_port_ ? alt_port_ : 4440; }

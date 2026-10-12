@@ -54,12 +54,16 @@ struct Flow {
   bytes_per_sample: usize,
   expires: Option<Clock>,
   expired: Arc<AtomicBool>,
+  // Virgil patch: a packet was sent since the last (re)bootstrap. Until then
+  // a big lag or clock jump is the flow starting, not a dropout.
+  running: bool,
 }
 
 impl Flow {
   fn bootstrap_next_ts(&mut self, now: LongClock) {
     let remainder = now % (self.fpp as LongClock);
     self.next_ts = now.wrapping_add(self.fpp as LongClock - remainder);
+    self.running = false;
   }
   fn keep_alive(&mut self, now: Clock, sample_rate: u32) {
     self.expires.as_mut().map(|expires| {
@@ -104,6 +108,10 @@ struct FlowsTransmitterInternal<P: ProxyToSamplesBuffer> {
   tx_source_bit_depth: u8,
   current_timestamp: Arc<AtomicUsize>,
   on_transfer: Option<TransferNotifier>,
+  // Virgil patch: late-wakeup log lines are rate-limited (they are counted
+  // in tx_stats): media time before which further ones are only counted.
+  lag_log_quiet_until: Option<Clock>,
+  lag_logs_suppressed: u64,
   //callback: SamplesRequestCallback,
 }
 
@@ -137,6 +145,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let mut max_missing_samples = 0;
     let dither_16 = self.should_dither(16);
     let dither_24 = self.should_dither(24);
+    let mut late_counted = false;
     for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
       if flow.expired.load(Ordering::Relaxed) {
         continue;
@@ -144,12 +153,45 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       let channels_in_flow = flow.channel_indices.len();
       let stride = channels_in_flow * flow.bytes_per_sample;
       let lag = wrapped_diff(now as Clock, flow.next_ts as Clock);
+      // Virgil patch: only a flow that has been sending can drop out; right
+      // after AddFlow / resuscitation / a clock start the "lag" is just the
+      // distance to the first packet. Late wakeups are counted (tx_stats),
+      // clock jumps are worded as such, start-ups are silent.
+      let jump_ms = |lag: ClockDiff| lag as i64 * 1000 / sample_rate as i64;
       if lag > max_lag_samples as ClockDiff {
-        error!("tx lag of {} samples detected, or media clock jumped, dropout occurs!", lag);
+        let was_running = flow.running;
+        let old_next_ts = flow.next_ts;
         flow.bootstrap_next_ts(now);
+        if !was_running {
+          // starting: nothing was dropped
+        } else if lag > DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff {
+          super::tx_stats::clock_jump();
+          error!("media clock jumped by {} ms on a running flow", jump_ms(lag));
+        } else {
+          let dropped = wrapped_diff(flow.next_ts as Clock, old_next_ts as Clock).max(0) as u64;
+          super::tx_stats::late_wakeup(lag as u64, dropped, !late_counted);
+          if !late_counted {
+            let quiet = self.lag_log_quiet_until.is_some_and(|t| wrapped_diff(now as Clock, t) < 0);
+            if quiet {
+              self.lag_logs_suppressed += 1;
+            } else {
+              let more = std::mem::take(&mut self.lag_logs_suppressed);
+              if more > 0 {
+                error!("tx lag of {lag} samples detected, dropout occurs! ({more} more since the last such line)");
+              } else {
+                error!("tx lag of {lag} samples detected, dropout occurs!");
+              }
+              self.lag_log_quiet_until = Some((now as Clock).wrapping_add(sample_rate as Clock));
+            }
+          }
+          late_counted = true;
+        }
       }
       if lag < -(DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff) {
-        error!("media clock jumped: {}", lag);
+        if flow.running {
+          super::tx_stats::clock_jump();
+          error!("media clock jumped by {} ms on a running flow", jump_ms(lag));
+        }
         flow.bootstrap_next_ts(now);
       }
       pbuff[9..9 + stride * flow.fpp].fill(0);
@@ -213,6 +255,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
         if let Ok(written) = flow.socket.send(&pbuff[0..to_send]) {
           if written == to_send {
             flow.next_ts = flow.next_ts.wrapping_add(flow.fpp.try_into().unwrap());
+            flow.running = true;
           } else {
             warn!("written {written}, should have {to_send}");
           }
@@ -420,6 +463,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
             bytes_per_sample,
             expires: if needs_keepalives { Some(0) } else { None },
             expired,
+            running: false,
           };
           if let Some(now) = self.now() {
             flow.bootstrap_next_ts(now);
@@ -558,6 +602,8 @@ impl FlowsTransmitter {
         .unwrap(),
       current_timestamp,
       on_transfer,
+      lag_log_quiet_until: None,
+      lag_logs_suppressed: 0,
     };
     internal.run(start_time_rx).await;
   }

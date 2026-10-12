@@ -35,6 +35,7 @@ pub(crate) mod flows_rx;
 pub(crate) mod flows_tx;
 mod peaks;
 pub mod rx_stats;
+pub mod tx_stats;
 pub(crate) mod samples_collector;
 pub(crate) mod samples_utils;
 pub(crate) mod saved_settings;

@@ -645,6 +645,12 @@ EngineCounters Engine::counters() {
     c.rx_gaps = rs.gaps;
     c.rx_missing_samples = rs.missing_samples;
     c.rx_max_age_samples = rs.max_age_samples;
+    VgDanteTxStats ts{};
+    vg_dante_tx_stats(&ts);
+    c.tx_late_wakeups = ts.late_wakeups;
+    c.tx_dropped_samples = ts.dropped_samples;
+    c.tx_max_lag_samples = ts.max_lag_samples;
+    c.tx_clock_jumps = ts.clock_jumps;
   }
   for (uint32_t i = 0; i < kMaxTxClients; ++i) {
     const ClientSlot& s = hdr_->clients[i];

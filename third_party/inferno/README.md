@@ -73,3 +73,13 @@ Changes for Virgil:
     (`mdns_client.rs`), receive flows are limited to the receiver's 32
     sockets (`channels_subscriber.rs`, `flows_rx.rs`), and the transmit thread
     ends when its transmitter is gone (`flows_tx.rs`).
+14. `device_server/tx_stats.rs` (new) and `flows_tx.rs`: counters of the
+    transmit thread's late wakeups (woke after the transmit latency, so
+    audio was skipped), the samples skipped and the worst lag, for Virgil's
+    dropout diagnostics. A flow counts only once it has sent a packet since
+    its last (re)bootstrap, so the start of a flow (AddFlow, a resuscitated
+    flow, the clock becoming available) is neither counted nor logged;
+    clock jumps of a running flow are logged as such ("media clock jumped by
+    X ms on a running flow") and the late-wakeup error line is limited to
+    one per second. `channels_subscriber.rs`: a missing saved-state file
+    (first start) is logged at info level instead of as a warning.

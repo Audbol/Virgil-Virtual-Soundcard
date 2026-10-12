@@ -1301,7 +1301,15 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
         // TODO: remove old state after migration
       });
       if let Err(e) = result {
-        warn!("Unable to load state (this is normal in first run): {e:?}");
+        // Virgil patch: a missing file is the normal first start, not a problem.
+        let not_found = e
+          .downcast_ref::<std::io::Error>()
+          .is_some_and(|io| io.kind() == std::io::ErrorKind::NotFound);
+        if not_found {
+          info!("no saved state yet (first start, or nothing subscribed)");
+        } else {
+          warn!("unable to load saved state: {e}");
+        }
         return;
       }
       result.unwrap().channels

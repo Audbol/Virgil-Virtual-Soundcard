@@ -139,8 +139,9 @@ CONF
   sox "$work/rec.wav" -n remix 1 trim 1.5 2 stat 2>&1 | grep -E "RMS +amplitude|Rough +frequency"
 fi
 
-echo "--- diagnostics on B (receiver); on a quiet machine there should be none"
-diag=$(ip netns exec vg-b curl -s http://127.0.0.1:8480/api/diagnostics || true)
+for ns in vg-a vg-b; do
+echo "--- diagnostics on ${ns#vg-} ($([ $ns = vg-a ] && echo sender || echo receiver)); on a quiet machine there should be none"
+diag=$(ip netns exec $ns curl -s http://127.0.0.1:8480/api/diagnostics || true)
 echo "$diag" | python3 -c '
 import json, sys
 d = json.load(sys.stdin)
@@ -148,6 +149,7 @@ for e in reversed(d["events"]):
     print("  [%s] %s" % (e["kind"], e["text"]))
 print("  dropouts in the last hour:", d["dropouts_last_hour"])
 ' || status=1
+done
 
 echo "--- clock status as Dante Controller asks for it"
 ip netns exec vg-c python3 "$(dirname "$0")/clock_status_probe.py" 10.77.0.1 10.77.0.3 || status=1
