@@ -3,7 +3,8 @@
 //
 // Follower: E2E delay mechanism, two-step ("assist") and one-step masters,
 // best master chosen from the properties carried in Sync messages, software
-// timestamps (kernel receive timestamps on Linux). Like Dante Virtual
+// timestamps (kernel receive stamps on Linux, macOS and Windows where
+// available; kernel send stamps on Linux, else a bracket around sendto()). Like Dante Virtual
 // Soundcard, Virgil normally never becomes master; `master_capable` exists
 // for networks with only virtual devices (and for tests).
 #pragma once
@@ -103,7 +104,9 @@ std::string format_uuid(const Uuid& u);  // 00:1d:c1:12:34:56
 class PiServo {
  public:
   enum Result { kInit, kStep, kTracking, kOutlier };
-  Result sample(int64_t local_ns, int64_t master_ns);
+  // master_ns = t1 + delay_ns: the frequency seed is measured on t1 alone,
+  // so a path-delay estimate still settling cannot bias it.
+  Result sample(int64_t local_ns, int64_t master_ns, int64_t delay_ns = 0);
   ClockModel model() const { return m_; }
   // Continue from model m (keeps phase); the first sample after this starts
   // a fresh frequency measurement.
@@ -118,6 +121,11 @@ class PiServo {
     rejects_ = 0;
     nbig_ = 0;
     seeded_ = false;
+    reseeded_ = false;
+    age_ = 0;
+    aerr_ = 0;
+    calm_since_ = 0;
+    hist_n_ = 0;
     first_local_ = last_local_ = 0;
   }
   bool locked() const { return locked_; }
@@ -128,6 +136,9 @@ class PiServo {
     nbig_ = 0;
   }
   int64_t last_error_ns() const { return last_err_; }
+  double drift_ppb() const { return drift_ppb_; }
+  // Smoothed |error| (time constant ~5 s), what the lock decision uses.
+  double filtered_error_ns() const { return aerr_; }
 
   double kp = 0.03;
   double ki = 0.0006;
@@ -136,6 +147,16 @@ class PiServo {
   // consecutive windows agree on it (a passing timestamp disturbance must
   // not step the clock and then step it back).
   int confirm_windows = 5;
+  // Gain schedule: start with the fast gains, blend geometrically to kp/ki
+  // between update fast_updates and 3 * fast_updates.
+  double kp_fast = 0.1;
+  double ki_fast = 0.003;
+  int fast_updates = 60;
+  // Lock: smoothed |error| below lock_error_ns, frequency moving less than
+  // lock_drift_ppb over the last ~4 s, both for lock_hold_s seconds.
+  double lock_error_ns = 100000;
+  double lock_drift_ppb = 1000;
+  double lock_hold_s = 5;
 
  private:
   void hold(int64_t local, int64_t est);
@@ -149,11 +170,21 @@ class PiServo {
   int64_t big_errs_[8] = {};
   int rejects_ = 0;  // consecutive samples rejected by the envelope gate
   bool seeded_ = false;  // frequency seeded from a raw measurement
+  bool reseeded_ = false;  // and refined once over a longer baseline
   double drift_ppb_ = 0;
   double rms_ = 0;
   int64_t last_local_ = 0;
   int64_t last_err_ = 0;
   int64_t first_local_ = 0, first_master_ = 0;
+  int64_t first_delay_ = 0;
+  int age_ = 0;              // tracking updates since reset_to / initial step
+  double aerr_ = 0;          // EWMA of |err|
+  int64_t calm_since_ = 0;   // local ns the lock conditions began to hold; 0 = not
+  // Frequency history, one entry per >= 1 s, for the settled check.
+  int64_t hist_local_[8] = {};
+  double hist_drift_[8] = {};
+  int hist_n_ = 0;
+  void update_lock(int64_t local, int64_t err, double dt);
 };
 
 class PtpClock : public ClockSource {
@@ -213,6 +244,10 @@ class PtpClock : public ClockSource {
   void consider_master(const ptp1::PortId& src, const ptp1::ClockProps& props, int64_t now);
   void process_sync_pair(int64_t t1, int64_t t2);
   void send_delay_req();
+  // Takes the Delay_Req send time (t3) from the mono_ns() stamps read just
+  // before and after sendto() and, when nonzero, a kernel TX timestamp.
+  // Discards the sample when the send was preempted (bracket too wide).
+  void accept_delay_tx(int64_t before, int64_t after, int64_t kernel_ns);
   void master_duties(int64_t now);
   void publish(const ClockModel& m);
 
@@ -258,6 +293,11 @@ class PtpClock : public ClockSource {
   int64_t delays_[9] = {};
   int delay_count_ = 0;
   int64_t mean_path_delay_ = 0;
+  int64_t tx_span_min_ = 0;    // narrowest before/after bracket seen around sendto()
+  int tx_wide_run_ = 0;        // consecutive brackets discarded as too wide
+  int tx_kernel_tries_ = 0;    // kernel TX stamps: misses left before giving up
+  uint64_t tx_kernel_ = 0, tx_bracket_ = 0, tx_discarded_ = 0;  // counts, for the log
+  int64_t next_diag_ns_ = 0;   // once-a-minute debug line
   uint64_t jitter_state_ = 0;  // Delay_Req timing jitter (seeded per instance)
 
   // Master mode.

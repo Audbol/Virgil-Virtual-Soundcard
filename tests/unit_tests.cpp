@@ -975,4 +975,113 @@ TEST(engine_rx_second_copy_and_lost_late_audio) {
   e.stop();
 }
 
+// ---- PTP servo: seed, gain schedule, lock criterion, send timestamps -------
+
+TEST(servo_seed_ignores_settling_path_delay) {
+  // The first path delays are unfiltered (here 300 us, then the real 30 us):
+  // the frequency seed must be measured on t1 alone. Seeding from t1 + delay
+  // was 270 us / 8 s = 34 ppm off.
+  PiServo s;
+  const double ppm = 25.0;
+  const int64_t master0 = 1700000000000000000LL;
+  for (int i = 0; i < 9; ++i) {  // the seed is taken at the 8 s sample
+    const int64_t t1 = master0 + int64_t(i) * 1000000000LL;
+    const int64_t d = i < 3 ? 300000 : 30000;
+    const int64_t local = 5000000000LL + int64_t(double(t1 + 30000 - master0) * (1.0 + ppm * 1e-6));
+    s.sample(local, t1 + d, d);
+  }
+  const double want = (1.0 / (1.0 + ppm * 1e-6) - 1.0) * 1e9;
+  CHECK(std::fabs(s.drift_ppb() - want) < 500);
+}
+
+TEST(servo_lock_needs_small_error_and_settled_frequency) {
+  // One update per second (best of 4 Sync), 25 ppm, timestamps late by an
+  // exponential 40 us plus rare 1 ms spikes (a busy Windows or Pi machine).
+  // Lock must come within a minute, and only once the true error is small.
+  for (unsigned seed = 1; seed <= 4; ++seed) {
+    std::mt19937 rng(seed);
+    std::exponential_distribution<double> late(1.0 / 40000.0);
+    std::uniform_real_distribution<double> u(0, 1);
+    PiServo s;
+    ClockModel start;
+    start.base_local = 5000000000LL;
+    start.base_ptp = 1700000000000000000LL + 50000000;  // 50 ms off: first step
+    s.reset_to(start);
+    const int64_t master0 = 1700000000000000000LL;
+    int lock_at = -1;
+    int64_t err_at_lock = 0;
+    for (int i = 0; i < 120 && lock_at < 0; ++i) {
+      const int64_t master = master0 + int64_t(i) * 1000000000LL;
+      const int64_t local = 5000000000LL + int64_t(double(master - master0) * (1.0 + 25e-6));
+      int64_t j = int64_t(late(rng));
+      if (u(rng) < 0.02) j += 1000000;
+      s.sample(local + j, master);
+      if (s.locked()) {
+        lock_at = i;
+        err_at_lock = s.model().ptp_at(local) - master;
+      }
+    }
+    std::printf("  seed %u: locked after %d s, true error %.1f us\n", seed, lock_at,
+                err_at_lock / 1000.0);
+    CHECK(lock_at >= 10 && lock_at <= 60);  // not before the frequency is known
+    CHECK(std::llabs(err_at_lock) < 100000);
+  }
+}
+
+TEST(servo_gain_schedule_restarts_after_reset) {
+  // A 200 us phase error right after reset_to is pulled in by the fast gains
+  // well within 30 s; with the slow gains alone it took over a minute.
+  PiServo s;
+  ClockModel start;
+  start.base_local = 5000000000LL;
+  start.base_ptp = 1700000000000000000LL;
+  s.reset_to(start);
+  int64_t local = 6000000000LL, err = 0;
+  for (int i = 0; i < 30; ++i, local += 1000000000LL) {
+    const int64_t master = start.ptp_at(local) + 200000;
+    s.sample(local, master);
+    err = s.model().ptp_at(local) - master;
+  }
+  CHECK(std::llabs(err) < 40000);
+}
+
+TEST(udp_tx_timestamps_or_clean_fallback) {
+  // Kernel send timestamps where available (Linux), else a clean "none".
+  UdpSocket tx, rx;
+  if (!tx.open(0, false) || !rx.open(0, false)) return;
+  int64_t k = 0;
+  CHECK(!tx.read_tx_timestamp(&k, 1));  // not enabled: nothing, at once
+  const bool on = tx.enable_tx_timestamps();
+  const int64_t t0 = mono_ns();
+  CHECK(!tx.read_tx_timestamp(&k, 2));  // enabled but nothing sent: times out
+  CHECK(mono_ns() - t0 < 200000000LL);
+  int got = 0;
+  for (int i = 0; i < 20; ++i) {
+    uint8_t b[124] = {};
+    const int64_t before = mono_ns();
+    // Unbound destination port on loopback: the datagram is still sent.
+    CHECK(tx.send_to(b, sizeof b, {0x7F000001, 9}) == int(sizeof b));
+    const int64_t after = mono_ns();
+    if (tx.read_tx_timestamp(&k, 5)) {
+      ++got;
+      CHECK(k >= before - 50000 && k <= after + 5000000);
+    }
+  }
+  std::printf("  kernel TX timestamps %s: %d of 20\n", on ? "enabled" : "unavailable", got);
+  if (!on) CHECK(got == 0);
+  if (on) {
+    // A stamp left on the error queue makes select() report the socket
+    // readable: the receive that follows must not block.
+    uint8_t p[124] = {};
+    tx.send_to(p, sizeof p, {0x7F000001, 9});
+    sleep_until_ns(mono_ns() + 5000000LL);
+    CHECK(UdpSocket::wait_readable(tx, nullptr, 0) & 1);
+    uint8_t b[16];
+    Endpoint from;
+    const int64_t t1 = mono_ns();
+    CHECK(tx.recv_from(b, sizeof b, &from) == 0);
+    CHECK(mono_ns() - t1 < 100000000LL);
+  }
+}
+
 TEST_MAIN()

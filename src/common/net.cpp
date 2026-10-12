@@ -12,6 +12,7 @@
 #include <winsock2.h>
 #include <ws2tcpip.h>
 #include <iphlpapi.h>
+#include <mswsock.h>
 #include <vector>
 #else
 #include <arpa/inet.h>
@@ -32,6 +33,22 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <unistd.h>
+#if defined(__APPLE__)
+#include <mach/mach_time.h>
+#endif
+#if defined(__linux__)
+#include <linux/errqueue.h>
+#include <linux/net_tstamp.h>
+#include <poll.h>
+// (SOF_TIMESTAMPING_* are enumerators, not macros; OPT_TSONLY needs the
+// headers of Linux 4.0 or later, which every supported distribution has.)
+#if defined(SO_TIMESTAMPING) && defined(SCM_TIMESTAMPING)
+#define VIRGIL_LINUX_TX_TS 1
+#endif
+#endif
+#endif
+#if defined(__APPLE__) && defined(SO_TIMESTAMP_MONOTONIC) && defined(SCM_TIMESTAMP_MONOTONIC)
+#define VIRGIL_APPLE_RX_TS 1
 #endif
 
 namespace virgil {
@@ -256,6 +273,9 @@ void UdpSocket::close() {
   if (fd_ != kInvalid) VIRGIL_CLOSESOCK(fd_);
   fd_ = kInvalid;
   kernel_ts_ = false;
+  tx_ts_ = false;
+  tx_key_ = 0;
+  win_recvmsg_ = nullptr;
 }
 
 static bool mreq_op(uintptr_t fd, int op, uint32_t group, uint32_t iface) {
@@ -330,12 +350,168 @@ bool UdpSocket::set_buffer_sizes(int bytes) {
   return ok;
 }
 
+namespace {
+#if !defined(_WIN32)
+// Kernel stamps on CLOCK_REALTIME; move one onto the monotonic clock. The
+// realtime-to-monotonic offset is read with both clocks back to back, retried
+// if we were preempted in between (an offset taken across a preemption makes
+// the timestamp early by that long).
+[[maybe_unused]] int64_t realtime_to_mono(int64_t rt) {
+  int64_t offset = 0;
+  for (int tries = 0; tries < 4; ++tries) {
+    const int64_t r1 = realtime_ns(), m = mono_ns(), r2 = realtime_ns();
+    offset = (r1 + (r2 - r1) / 2) - m;
+    if (r2 - r1 < 5000) break;
+  }
+  return rt - offset;
+}
+#endif
+#if defined(VIRGIL_APPLE_RX_TS)
+// mach_absolute_time units -> ns, exactly as platform.cpp's mono_ns().
+int64_t mach_to_mono(uint64_t t) {
+  static const mach_timebase_info_data_t tb = [] {
+    mach_timebase_info_data_t i;
+    mach_timebase_info(&i);
+    return i;
+  }();
+  return int64_t((__uint128_t)t * tb.numer / tb.denom);
+}
+#endif
+#if defined(_WIN32)
+// Winsock timestamping (Windows 10 2004+/11): SIO_TIMESTAMPING and the
+// SO_TIMESTAMP control message, declared here from the documented values
+// because MinGW only exposes them for NTDDI_WIN10_FE and later targets.
+constexpr DWORD kSioTimestamping = IOC_IN | IOC_VENDOR | 235;  // _WSAIOW(IOC_VENDOR, 235)
+constexpr INT kWinSoTimestamp = 0x300A;
+constexpr ULONG kTimestampingFlagRx = 0x1;
+struct WinTimestampingConfig {
+  ULONG Flags;
+  USHORT TxTimestampsBuffered;
+};
+// QPC ticks -> ns, exactly as platform.cpp's mono_ns().
+int64_t qpc_to_mono(int64_t t) {
+  static const int64_t f = [] {
+    LARGE_INTEGER li;
+    QueryPerformanceFrequency(&li);
+    return int64_t(li.QuadPart);
+  }();
+  return (t / f) * 1000000000LL + (t % f) * 1000000000LL / f;
+}
+#endif
+// A kernel receive stamp is used only if plausible: not after the moment we
+// read the packet, and not absurdly long before it (wrong clock base).
+[[maybe_unused]] bool plausible_rx(int64_t k, int64_t after) { return k <= after + 1000000 && k > after - 2000000000LL; }
+}  // namespace
+
 bool UdpSocket::enable_rx_timestamps() {
-#if defined(SO_TIMESTAMPNS)
+#if defined(_WIN32)
+  // Runtime capability check: older Windows rejects the ioctl. Where it
+  // succeeds but the adapter provides no stamps, the control message is
+  // simply absent and recv_from stamps in user space as before.
+  WinTimestampingConfig cfg{kTimestampingFlagRx, 0};
+  DWORD ret = 0;
+  if (WSAIoctl(fd_, kSioTimestamping, &cfg, sizeof cfg, nullptr, 0, &ret, nullptr, nullptr) != 0)
+    return false;
+  GUID g = WSAID_WSARECVMSG;
+  LPFN_WSARECVMSG fn = nullptr;
+  if (WSAIoctl(fd_, SIO_GET_EXTENSION_FUNCTION_POINTER, &g, sizeof g, &fn, sizeof fn, &ret, nullptr,
+               nullptr) != 0 || !fn)
+    return false;
+  win_recvmsg_ = reinterpret_cast<void*>(fn);
+  kernel_ts_ = true;
+  return true;
+#elif defined(VIRGIL_APPLE_RX_TS)
+  // mach_absolute_time() at UDP input, the clock mono_ns() reads.
+  int one = 1;
+  kernel_ts_ = setsockopt(fd_, SOL_SOCKET, SO_TIMESTAMP_MONOTONIC, &one, sizeof one) == 0;
+  return kernel_ts_;
+#elif defined(SO_TIMESTAMPNS)
   int one = 1;
   kernel_ts_ = setsockopt(fd_, SOL_SOCKET, SO_TIMESTAMPNS, &one, sizeof one) == 0;
   return kernel_ts_;
 #else
+  return false;
+#endif
+}
+
+bool UdpSocket::enable_tx_timestamps() {
+#if defined(VIRGIL_LINUX_TX_TS)
+  // Software stamp in the driver's transmit path, reported on the error
+  // queue without the packet (OPT_TSONLY needs no privilege), keyed per send.
+  int flags = SOF_TIMESTAMPING_TX_SOFTWARE | SOF_TIMESTAMPING_SOFTWARE |
+              SOF_TIMESTAMPING_OPT_TSONLY | SOF_TIMESTAMPING_OPT_ID;
+  tx_ts_ = setsockopt(fd_, SOL_SOCKET, SO_TIMESTAMPING, &flags, sizeof flags) == 0;
+  tx_key_ = 0;
+  return tx_ts_;
+#else
+  return false;
+#endif
+}
+
+void UdpSocket::drain_tx_timestamps() {
+#if defined(VIRGIL_LINUX_TX_TS)
+  for (int i = 0; i < 64; ++i) {
+    char data[64];
+    alignas(cmsghdr) char ctrl[256];
+    iovec iov{data, sizeof data};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrl;
+    msg.msg_controllen = sizeof ctrl;
+    if (recvmsg(fd_, &msg, MSG_ERRQUEUE | MSG_DONTWAIT) < 0) break;
+  }
+#endif
+}
+
+bool UdpSocket::read_tx_timestamp(int64_t* tx_mono_ns, int timeout_ms) {
+#if defined(VIRGIL_LINUX_TX_TS)
+  if (!tx_ts_ || fd_ == kInvalid) return false;
+  const uint32_t want = tx_key_ - 1;
+  const int64_t deadline = mono_ns() + int64_t(timeout_ms) * 1000000LL;
+  for (;;) {
+    char data[64];
+    alignas(cmsghdr) char ctrl[256];
+    iovec iov{data, sizeof data};
+    msghdr msg{};
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = ctrl;
+    msg.msg_controllen = sizeof ctrl;
+    if (recvmsg(fd_, &msg, MSG_ERRQUEUE | MSG_DONTWAIT) >= 0) {
+      int64_t rt = 0;
+      bool have_key = false;
+      uint32_t key = 0;
+      for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPING) {
+          scm_timestamping st;
+          std::memcpy(&st, CMSG_DATA(c), sizeof st);
+          rt = int64_t(st.ts[0].tv_sec) * 1000000000LL + st.ts[0].tv_nsec;  // [0]: software
+        } else if (c->cmsg_level == SOL_IP && c->cmsg_type == IP_RECVERR) {
+          sock_extended_err ee;
+          std::memcpy(&ee, CMSG_DATA(c), sizeof ee);
+          if (ee.ee_errno == ENOMSG && ee.ee_origin == SO_EE_ORIGIN_TIMESTAMPING) {
+            have_key = true;
+            key = ee.ee_data;
+          }
+        }
+      }
+      if (rt != 0 && (!have_key || int32_t(key - want) >= 0)) {
+        if (have_key) tx_key_ = key + 1;  // resynchronise if we counted wrong
+        *tx_mono_ns = realtime_to_mono(rt);
+        return true;
+      }
+      continue;  // an older send's stamp: look further
+    }
+    if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) return false;
+    const int64_t left = deadline - mono_ns();
+    if (left <= 0) return false;
+    pollfd p{fd_, 0, 0};  // POLLERR: something on the error queue
+    poll(&p, 1, int((left + 999999) / 1000000));
+  }
+#else
+  (void)tx_mono_ns;
+  (void)timeout_ms;
   return false;
 #endif
 }
@@ -345,17 +521,51 @@ int UdpSocket::send_to(const void* buf, size_t len, const Endpoint& to) {
   sa.sin_family = AF_INET;
   sa.sin_port = htons(to.port);
   sa.sin_addr.s_addr = htonl(to.addr);
-  return int(sendto(fd_, static_cast<const char*>(buf), int(len), 0,
-                    reinterpret_cast<sockaddr*>(&sa), sizeof sa));
+  if (tx_ts_) drain_tx_timestamps();  // stale stamps (too late for their send)
+  const int n = int(sendto(fd_, static_cast<const char*>(buf), int(len), 0,
+                           reinterpret_cast<sockaddr*>(&sa), sizeof sa));
+  if (n >= 0 && tx_ts_) ++tx_key_;
+  return n;
 }
 
 int UdpSocket::recv_from(void* buf, size_t len, Endpoint* from, int64_t* rx_mono_ns) {
   sockaddr_in sa{};
 #if defined(_WIN32)
   int salen = sizeof sa;
-  int n = recvfrom(fd_, static_cast<char*>(buf), int(len), 0, reinterpret_cast<sockaddr*>(&sa),
-                   &salen);
-  if (rx_mono_ns) *rx_mono_ns = mono_ns();
+  int n = 0;
+  if (win_recvmsg_) {
+    WSABUF data;
+    data.len = ULONG(len);
+    data.buf = static_cast<char*>(buf);
+    alignas(WSACMSGHDR) char ctrl[128];
+    WSAMSG msg{};
+    msg.name = reinterpret_cast<LPSOCKADDR>(&sa);
+    msg.namelen = salen;
+    msg.lpBuffers = &data;
+    msg.dwBufferCount = 1;
+    msg.Control.len = sizeof ctrl;
+    msg.Control.buf = ctrl;
+    DWORD got = 0;
+    const int rc = reinterpret_cast<LPFN_WSARECVMSG>(win_recvmsg_)(fd_, &msg, &got, nullptr, nullptr);
+    const int64_t after_mono = mono_ns();
+    if (rx_mono_ns) *rx_mono_ns = after_mono;
+    n = rc == 0 ? int(got) : -1;
+    if (n >= 0 && rx_mono_ns) {
+      for (WSACMSGHDR* c = WSA_CMSG_FIRSTHDR(&msg); c; c = WSA_CMSG_NXTHDR(&msg, c)) {
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == kWinSoTimestamp) {
+          UINT64 qpc;
+          std::memcpy(&qpc, WSA_CMSG_DATA(c), sizeof qpc);
+          const int64_t k = qpc_to_mono(int64_t(qpc));
+          if (plausible_rx(k, after_mono)) *rx_mono_ns = k;
+          break;
+        }
+      }
+    }
+  } else {
+    n = recvfrom(fd_, static_cast<char*>(buf), int(len), 0, reinterpret_cast<sockaddr*>(&sa),
+                 &salen);
+    if (rx_mono_ns) *rx_mono_ns = mono_ns();
+  }
   if (n < 0) {
     int e = WSAGetLastError();
     return (e == WSAETIMEDOUT || e == WSAEWOULDBLOCK) ? 0 : -1;
@@ -370,34 +580,35 @@ int UdpSocket::recv_from(void* buf, size_t len, Endpoint* from, int64_t* rx_mono
   msg.msg_iovlen = 1;
   msg.msg_control = ctrl;
   msg.msg_controllen = sizeof ctrl;
-  ssize_t n = recvmsg(fd_, &msg, 0);
+  // With TX timestamps on, select() also reports the socket readable for
+  // a (late) stamp on the error queue: drain it and do not block.
+  if (tx_ts_) drain_tx_timestamps();
+  ssize_t n = recvmsg(fd_, &msg, tx_ts_ ? MSG_DONTWAIT : 0);
   const int64_t after_mono = mono_ns();
   if (n < 0) return (errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR) ? 0 : -1;
   if (rx_mono_ns) {
     *rx_mono_ns = after_mono;
-#if defined(SO_TIMESTAMPNS)
     if (kernel_ts_) {
       for (cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+#if defined(VIRGIL_APPLE_RX_TS)
+        if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMP_MONOTONIC) {
+          uint64_t t;
+          std::memcpy(&t, CMSG_DATA(c), sizeof t);
+          const int64_t k = mach_to_mono(t);
+          if (plausible_rx(k, after_mono)) *rx_mono_ns = k;
+          break;
+        }
+#elif defined(SO_TIMESTAMPNS)
         if (c->cmsg_level == SOL_SOCKET && c->cmsg_type == SCM_TIMESTAMPNS) {
           timespec ts;
           std::memcpy(&ts, CMSG_DATA(c), sizeof ts);
-          // Kernel stamps on CLOCK_REALTIME; move it onto the monotonic clock.
-          const int64_t rt = int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-          // Read the realtime-to-monotonic offset with both clocks read back
-          // to back; retry if we were preempted in between (an offset taken
-          // across a preemption makes the timestamp early by that long).
-          int64_t offset = 0;
-          for (int tries = 0; tries < 4; ++tries) {
-            const int64_t r1 = realtime_ns(), m = mono_ns(), r2 = realtime_ns();
-            offset = (r1 + (r2 - r1) / 2) - m;
-            if (r2 - r1 < 5000) break;
-          }
-          *rx_mono_ns = rt - offset;
+          const int64_t k = realtime_to_mono(int64_t(ts.tv_sec) * 1000000000LL + ts.tv_nsec);
+          if (plausible_rx(k, after_mono)) *rx_mono_ns = k;
           break;
         }
+#endif
       }
     }
-#endif
   }
 #endif
   if (from) {

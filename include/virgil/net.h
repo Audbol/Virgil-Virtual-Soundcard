@@ -44,7 +44,13 @@ class UdpSocket {
   ~UdpSocket() { close(); }
   UdpSocket(const UdpSocket&) = delete;
   UdpSocket& operator=(const UdpSocket&) = delete;
-  UdpSocket(UdpSocket&& o) noexcept : fd_(o.fd_) { o.fd_ = kInvalid; }
+  UdpSocket(UdpSocket&& o) noexcept
+      : fd_(o.fd_), kernel_ts_(o.kernel_ts_), tx_ts_(o.tx_ts_), tx_key_(o.tx_key_),
+        win_recvmsg_(o.win_recvmsg_) {
+    o.fd_ = kInvalid;
+    o.kernel_ts_ = o.tx_ts_ = false;
+    o.win_recvmsg_ = nullptr;
+  }
 
   // Bind to INADDR_ANY:port (port 0 = ephemeral) with SO_REUSEADDR/PORT so
   // several receivers and other PTP software can share the port.
@@ -60,8 +66,17 @@ class UdpSocket {
   bool set_dscp(int dscp);
   bool set_recv_timeout_ms(int ms);
   bool set_buffer_sizes(int bytes);
-  // Ask the kernel for receive timestamps (SO_TIMESTAMPNS on Linux).
+  // Ask the kernel for receive timestamps: SO_TIMESTAMPNS on Linux,
+  // SO_TIMESTAMP_MONOTONIC on macOS, SIO_TIMESTAMPING on Windows (where
+  // supported; recv_from falls back to a user-space stamp otherwise).
   bool enable_rx_timestamps();
+  // Ask for kernel software send timestamps (Linux SO_TIMESTAMPING); false
+  // where unavailable.
+  bool enable_tx_timestamps();
+  // Right after a send_to(): wait up to timeout_ms for the kernel's send
+  // timestamp of that packet, on the virgil monotonic clock. False if none
+  // came (not enabled, driver without TX stamps, or too late).
+  bool read_tx_timestamp(int64_t* tx_mono_ns, int timeout_ms);
 
   int send_to(const void* buf, size_t len, const Endpoint& to);
   // Returns bytes received, 0 on timeout, <0 on error. `rx_mono_ns` is the
@@ -82,6 +97,10 @@ class UdpSocket {
 #endif
   Fd fd_ = kInvalid;
   bool kernel_ts_ = false;
+  bool tx_ts_ = false;
+  uint32_t tx_key_ = 0;           // SOF_TIMESTAMPING_OPT_ID key of the next send
+  void* win_recvmsg_ = nullptr;   // WSARecvMsg, when RX timestamping is on (Windows)
+  void drain_tx_timestamps();
 };
 
 }  // namespace virgil

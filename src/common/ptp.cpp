@@ -10,6 +10,10 @@
 #include "virgil/log.h"
 #include "virgil/platform.h"
 
+#if defined(__linux__)
+#include <sys/timex.h>
+#endif
+
 namespace virgil {
 
 FreeRunClock::FreeRunClock() {
@@ -171,13 +175,14 @@ void PiServo::hold(int64_t local, int64_t est) {
   m_.ratio = 1.0 + drift_ppb_ * 1e-9;
 }
 
-PiServo::Result PiServo::sample(int64_t local, int64_t master) {
+PiServo::Result PiServo::sample(int64_t local, int64_t master, int64_t delay) {
   if (!init_) {
     m_ = ClockModel{local, master, m_.ratio > 0 ? m_.ratio : 1.0};
     init_ = true;
     count_ = 0;
     last_local_ = first_local_ = local;
     first_master_ = master;
+    first_delay_ = delay;
     return kInit;
   }
   const int64_t est = m_.ptp_at(local);
@@ -187,6 +192,7 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
     // First sample after reset_to: start the frequency measurement here.
     last_local_ = first_local_ = local;
     first_master_ = master;
+    first_delay_ = delay;
     return kTracking;
   }
   const double dt = double(local - last_local_) * 1e-9;
@@ -229,6 +235,10 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
       good_ = 0;
       locked_ = false;
       rms_ = 0;
+      age_ = 0;  // a fresh start: fast gains again
+      aerr_ = 0;
+      calm_since_ = 0;
+      hist_n_ = 0;
     }
     rejects_ = 0;
     m_.ratio = 1.0 + drift_ppb_ * 1e-9;
@@ -236,6 +246,7 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
     if (count_ == 0) {
       first_local_ = local;
       first_master_ = master;
+      first_delay_ = delay;
     }
     return kStep;
   }
@@ -256,7 +267,27 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
   big_ = 0;
   last_local_ = local;
   ++count_;
-  if (!seeded_ && count_ >= 4 && local - first_local_ > 8000000000LL) {
+  ++age_;
+  // Gain schedule: the fast gains pull in the initial phase and frequency
+  // error within a few tens of seconds; the slow ones then average the
+  // timestamp noise. Geometric blend so neither end jumps.
+  double KP = kp, KI = ki;
+  if (age_ < 3 * fast_updates) {
+    const double x = std::clamp(double(age_ - fast_updates) / double(2 * fast_updates), 0.0, 1.0);
+    KP = std::exp(std::log(kp_fast) * (1 - x) + std::log(kp) * x);
+    KI = std::exp(std::log(ki_fast) * (1 - x) + std::log(ki) * x);
+  }
+  if (seeded_ && !reseeded_ && local - first_local_ > 32000000000LL) {
+    // Once more over a 4x longer baseline: on a noisy machine (Windows user
+    // space, busy Pi) the 8 s seed can be several ppm off, and the integral
+    // term then needed a minute to work it out. Only replace the running
+    // estimate when the two disagree clearly.
+    reseeded_ = true;
+    const double raw = double((master - delay) - (first_master_ - first_delay_)) /
+                       double(local - first_local_);
+    if (std::fabs((raw - 1.0) * 1e9 - drift_ppb_) > 1000.0) drift_ppb_ = (raw - 1.0) * 1e9;
+    else drift_ppb_ -= KI * double(err) / dt;
+  } else if (!seeded_ && count_ >= 4 && local - first_local_ > 8000000000LL) {
     // Seed the integrator with the raw frequency offset so the first lock
     // does not have to wait for the slow integral term (only once: after
     // that the running estimate is better). By elapsed time, not a window
@@ -264,31 +295,57 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master) {
     // offset (VM clocks, 100+ ppm) the count never reached the seeding point
     // and the servo stepped again and again. The raw measurement stays valid
     // across phase steps (both ends are untouched master and local time).
-    const double raw = double(master - first_master_) / double(local - first_local_);
+    // Without the path-delay term: during the first samples the delay
+    // estimate is still unfiltered and its change over these 8 s biased the
+    // seed by up to several ppm.
+    const double raw = double((master - delay) - (first_master_ - first_delay_)) /
+                       double(local - first_local_);
     drift_ppb_ = (raw - 1.0) * 1e9;
     seeded_ = true;
   } else {
-    drift_ppb_ -= ki * double(err) / dt;
+    drift_ppb_ -= KI * double(err) / dt;
   }
   drift_ppb_ = std::clamp(drift_ppb_, -1e6, 1e6);
   const double adj =
-      std::clamp(drift_ppb_ - kp * double(err) / dt, -1e6, 1e6);
+      std::clamp(drift_ppb_ - KP * double(err) / dt, -1e6, 1e6);
 
   m_.base_local = local;
   m_.base_ptp = est;  // keep phase continuous; frequency does the steering
   m_.ratio = 1.0 + adj * 1e-9;
 
   rms_ = rms_ == 0 ? std::fabs(double(err)) : 0.95 * rms_ + 0.05 * std::fabs(double(err));
-  // Within 250 us for 16 windows in a row: software timestamps on a busy or
-  // small computer (Raspberry Pi) scatter single measurements by a few
-  // hundred us even while the clock itself is within tens of us, and a
-  // tighter bound kept such machines from ever reporting a lock.
-  if (std::llabs(err) < 250000) {
-    if (++good_ >= 16) locked_ = true;
-  } else {
-    good_ = 0;
-  }
+  update_lock(local, err, dt);
   return kTracking;
+}
+
+// Locked once the smoothed error is small and the frequency has settled,
+// both for lock_hold_s seconds (by time, not by window count). Software
+// timestamps on a busy or small computer (Raspberry Pi, Windows) scatter
+// single measurements by a few hundred us while the clock itself is within
+// tens of us, so the decision uses the smoothed |error|, not raw samples;
+// and before the frequency has settled the phase error is still growing
+// even when the last samples were small.
+void PiServo::update_lock(int64_t local, int64_t err, double dt) {
+  const double a = std::clamp(dt / 5.0, 0.02, 1.0);  // ~5 s time constant
+  const double e = std::fabs(double(err));
+  aerr_ = aerr_ == 0 ? e : (1 - a) * aerr_ + a * e;
+  if (hist_n_ == 0 || local - hist_local_[(hist_n_ - 1) % 8] >= 1000000000LL) {
+    hist_local_[hist_n_ % 8] = local;
+    hist_drift_[hist_n_ % 8] = drift_ppb_;
+    ++hist_n_;
+  }
+  // Frequency change over the last >= 4 s of history.
+  bool settled = false;
+  if (seeded_ && hist_n_ >= 5) {
+    const int i = (hist_n_ - 5) % 8;
+    settled = std::fabs(drift_ppb_ - hist_drift_[i]) < lock_drift_ppb;
+  }
+  if (settled && aerr_ < lock_error_ns) {
+    if (calm_since_ == 0) calm_since_ = local;
+    if (double(local - calm_since_) * 1e-9 >= lock_hold_s) locked_ = true;
+  } else {
+    calm_since_ = 0;
+  }
 }
 
 // ---- PtpClock (PTPv1) -------------------------------------------------------
@@ -309,8 +366,17 @@ bool PtpClock::start(const Options& o) {
     s->set_multicast_ttl(1);
     s->set_multicast_loop(true);  // several instances may share a host
     s->set_dscp(kDscpPtp);
-    s->enable_rx_timestamps();
   }
+  const bool rx_ts = event_.enable_rx_timestamps();
+  general_.enable_rx_timestamps();
+  const bool tx_ts = event_.enable_tx_timestamps();
+  tx_kernel_tries_ = tx_ts ? 8 : 0;
+  tx_span_min_ = 0;
+  tx_wide_run_ = 0;
+  tx_kernel_ = tx_bracket_ = tx_discarded_ = 0;
+  VIRGIL_LOG_INFO("ptp: receive timestamps %s, send timestamps %s",
+                  rx_ts ? "from the kernel" : "in user space",
+                  tx_ts ? "from the kernel where the driver provides them" : "bracketed in user space");
 
   // 6-byte UUID: the interface's MAC address, as Dante devices use. Dante
   // Controller matches the clock leader's identity to a device by it, so a
@@ -578,8 +644,9 @@ void PtpClock::handle_general(const uint8_t* p, size_t n) {
     const int64_t ms_t2 = have_best_ms_ ? last_best_t2_ : last_t2_;
     ms -= int64_t(double(delay_tx_ns_ - ms_t2) * (servo_.model().ratio - 1.0));
     int64_t d = (ms + (t4 - delay_tx_ns_)) / 2;
-    // Software send timestamps are taken just after sendto(), so on fast
-    // links the estimate can dip slightly below zero: clamp, don't discard.
+    // The send time comes from a software stamp around sendto() (or the
+    // kernel's), so on fast links the estimate can dip slightly below zero:
+    // clamp, don't discard.
     if (d < -1000000 || d > 10000000) return;  // not a LAN path
     if (d < 0) d = 0;
     delays_[delay_count_ % 9] = d;
@@ -604,7 +671,9 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   last_t1_ = t1;
   last_t2_ = t2;
   have_pair_ = true;
-  if (delay_count_ == 0) return;  // need a path delay before steering
+  // Need a few path delays before steering: the first ones are unfiltered
+  // (the lower quartile of one or two samples is just the latest sample).
+  if (delay_count_ < 4) return;
   // Least delayed by the model's estimate of the master time at arrival; raw
   // t2 - t1 trends with the frequency offset across the window.
   const ClockModel mm = servo_.model();
@@ -619,7 +688,7 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   last_best_ms_ = t2 - t1;
   last_best_t2_ = t2;
   have_best_ms_ = true;
-  const auto r = servo_.sample(t2, t1 + mean_path_delay_);
+  const auto r = servo_.sample(t2, t1 + mean_path_delay_, mean_path_delay_);
   if (r == PiServo::kOutlier) {
     publish(servo_.model());  // held at the estimated frequency
     return;
@@ -629,6 +698,25 @@ void PtpClock::process_sync_pair(int64_t t1, int64_t t2) {
   publish(servo_.model());
   VIRGIL_LOG_DEBUG("ptp: offset %lld ns, delay %lld ns, ratio %.9f", (long long)servo_.last_error_ns(),
                    (long long)mean_path_delay_, servo_.model().ratio);
+  if (t2 >= next_diag_ns_) {
+    next_diag_ns_ = t2 + 60000000000LL;
+    // Once a minute: where send stamps came from, and (Linux) the kernel's
+    // NTP frequency correction, which slews CLOCK_MONOTONIC too: a servo
+    // drift that wanders with it points at NTP rather than the oscillator.
+    char ntp[96] = "";
+#if defined(__linux__)
+    timex tx{};
+    tx.modes = 0;  // read only
+    if (adjtimex(&tx) >= 0)
+      std::snprintf(ntp, sizeof ntp, ", kernel NTP frequency %.3f ppm (status 0x%x)",
+                    double(tx.freq) / 65536.0, unsigned(tx.status));
+#endif
+    VIRGIL_LOG_DEBUG("ptp: servo drift %.3f ppm, smoothed error %.1f us%s; send stamps kernel %llu, "
+                     "bracketed %llu, discarded %llu",
+                     servo_.drift_ppb() / 1000.0, servo_.filtered_error_ns() / 1000.0, ntp,
+                     (unsigned long long)tx_kernel_, (unsigned long long)tx_bracket_,
+                     (unsigned long long)tx_discarded_);
+  }
   offset_ns_ = servo_.last_error_ns();
   state_ = servo_.locked() ? kStatePtpLocked : kStateFreeRun;
 }
@@ -647,9 +735,59 @@ void PtpClock::send_delay_req() {
   props.sync_interval = 0x7f;
   ptp1::write_sync(out, h, ptp1::Timestamp{}, props, master_);
   out[95] = 255;  // local stratum: slave only
-  event_.send_to(out, sizeof out, {ptp1::kDefaultGroup, ptp1::kEventPort});
-  delay_tx_ns_ = mono_ns();
+  delay_pending_ = false;
+  // Bracket the send: a stamp taken only after sendto() is late by however
+  // long the call was preempted, which makes the path delay look *shorter*,
+  // and the lower-quartile delay filter then preferred exactly those samples.
+  const int64_t before = mono_ns();
+  const int sent = event_.send_to(out, sizeof out, {ptp1::kDefaultGroup, ptp1::kEventPort});
+  const int64_t after = mono_ns();
+  if (sent <= 0) return;
+  int64_t kernel = 0;
+  if (tx_kernel_tries_ > 0) {
+    if (event_.read_tx_timestamp(&kernel, 2)) {
+      tx_kernel_tries_ = 8;
+    } else {
+      kernel = 0;
+      // A driver without software TX stamps: stop waiting 2 ms per request.
+      if (--tx_kernel_tries_ == 0)
+        VIRGIL_LOG_INFO("ptp: the network driver gives no send timestamps; using user-space ones");
+    }
+  }
+  accept_delay_tx(before, after, kernel);
+}
+
+void PtpClock::accept_delay_tx(int64_t before, int64_t after, int64_t kernel_ns) {
+  delay_pending_ = false;
+  // A kernel (driver) TX stamp is taken next to the wire. It must fall inside
+  // the bracket, allowing for the realtime->monotonic conversion and for a
+  // stamp taken on completion just after sendto() returned.
+  if (kernel_ns != 0 && kernel_ns >= before - 50000 && kernel_ns <= after + 5000000) {
+    delay_tx_ns_ = kernel_ns;
+    delay_pending_ = true;
+    ++tx_kernel_;
+    return;
+  }
+  const int64_t span = std::max<int64_t>(after - before, 0);
+  if (tx_span_min_ <= 0 || span < tx_span_min_) tx_span_min_ = std::max<int64_t>(span, 1);
+  // Preempted around sendto(): the departure time is unknown within the
+  // bracket, discard. A long run of wide brackets means the minimum was a
+  // fluke (or the machine got slower): adopt the current width.
+  if (span > tx_span_min_ * 3 / 2 + 15000) {
+    if (++tx_wide_run_ < 8) {
+      ++tx_discarded_;
+      return;
+    }
+    tx_span_min_ = span;
+  }
+  tx_wide_run_ = 0;
+  // The packet leaves during the call. Of before / midpoint / after, the
+  // stamp before it gave the smallest bias in simulation (with preemption
+  // modelled on either side of the departure): the late receive stamps on
+  // the Sync leg already bias the path delay low, and an early t3 offsets it.
+  delay_tx_ns_ = before;
   delay_pending_ = true;
+  ++tx_bracket_;
 }
 
 void PtpClock::master_duties(int64_t now) {
