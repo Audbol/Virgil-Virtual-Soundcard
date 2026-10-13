@@ -140,6 +140,8 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "rt_priority") { uint32_t p; if (!need_u32(&p)) return false; c->rt_priority = int(p); }
       else if (key == "spin_us") { if (!need_u32(&c->spin_us)) return false; }
       else if (key == "lock_memory") { if (!need_bool(&c->lock_memory)) return false; }
+      else if (key == "remote_access") { if (!need_bool(&c->remote_access)) return false; }
+      else if (key == "remote_password") c->remote_password = val;
       else if (key == "control_port") { if (!to_u32(val, &u) || u > 65535) return fail("bad control_port"); c->control_port = u; }
       else if (key == "clock") c->clock = lower(val);
       else if (key == "ports") c->ports = lower(val);
@@ -214,6 +216,14 @@ bool validate_config(Config* c, std::string* error) {
     if (!to_u32(c->ports, &p) || p < 1024 || p > 65500)
       return fail("ports must be auto, standard or a port number between 1024 and 65500");
   }
+  if (c->remote_access && c->remote_password.size() < 8)
+    return fail(c->remote_password.empty()
+                    ? "remote access needs a password: set remote_password (at least 8 characters)"
+                    : "remote_password must be at least 8 characters");
+  for (char ch : c->remote_password)
+    if (ch == '"' || uint8_t(ch) < 0x20) return fail("remote_password cannot contain quotes or control characters");
+  if (c->remote_access && c->control_port == 0)
+    return fail("remote access needs the web panel: control_port cannot be 0");
   if (c->ptp_subdomain.empty() || c->ptp_subdomain.size() > 15)
     return fail("ptp subdomain must be 1 to 15 characters");
 
@@ -475,6 +485,8 @@ std::string format_config(const Config& c) {
   if (c.ports != "auto") o << "ports = " << c.ports << "\n";
   if (!c.enabled) o << "enabled = false\n";
   o << "control_port = " << c.control_port << "\n";
+  if (c.remote_access) o << "remote_access = true\n";
+  if (!c.remote_password.empty()) o << "remote_password = \"" << c.remote_password << "\"\n";
   if (c.tick_us != 1000) o << "tick_us = " << c.tick_us << "\n";
   if (c.tx_lead_us) o << "tx_lead_us = " << c.tx_lead_us << "\n";
   o << "rt_priority = " << c.rt_priority << "\n";

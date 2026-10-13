@@ -159,8 +159,8 @@ bool parse_json(const std::string& text, Json* out) {
 
 // ---- HTTP -----------------------------------------------------------------------
 
-HttpResult http(unsigned port, const char* method, const std::string& path,
-                const std::string& body) {
+HttpResult http(unsigned port, const char* method, const std::string& path, const std::string& body,
+                const std::string& extra_headers) {
   HttpResult r;
 #if defined(_WIN32)
   static bool wsa = [] {
@@ -186,7 +186,7 @@ HttpResult http(unsigned port, const char* method, const std::string& path,
   sa.sin_addr.s_addr = htonl(0x7F000001);
   if (connect(s, reinterpret_cast<sockaddr*>(&sa), sizeof sa) == 0) {
     std::string req = std::string(method) + " " + path + " HTTP/1.1\r\nHost: 127.0.0.1:" +
-                      std::to_string(port) + "\r\nConnection: close\r\nX-Virgil-Request: 1\r\n";
+                      std::to_string(port) + "\r\nConnection: close\r\nX-Virgil-Request: 1\r\n" + extra_headers;
     if (!body.empty() || std::strcmp(method, "POST") == 0)
       req += "Content-Type: text/plain\r\nContent-Length: " + std::to_string(body.size()) + "\r\n";
     req += "\r\n" + body;
@@ -207,6 +207,8 @@ HttpResult http(unsigned port, const char* method, const std::string& path,
     const size_t hdr_end = resp.find("\r\n\r\n");
     if (resp.compare(0, 5, "HTTP/") == 0 && sp != std::string::npos && hdr_end != std::string::npos) {
       r.status = std::atoi(resp.c_str() + sp + 1);
+      const size_t first_nl = resp.find("\r\n");
+      if (first_nl < hdr_end) r.headers = resp.substr(first_nl + 2, hdr_end - first_nl);
       r.body = resp.substr(hdr_end + 4);
     }
   }
@@ -216,6 +218,36 @@ HttpResult http(unsigned port, const char* method, const std::string& path,
   close(s);
 #endif
   return r;
+}
+
+std::string HttpResult::header(const char* name) const {
+  const size_t n = std::strlen(name);
+  size_t a = 0;
+  while (a < headers.size()) {
+    size_t b = headers.find("\r\n", a);
+    if (b == std::string::npos) b = headers.size();
+    const size_t colon = headers.find(':', a);
+    if (colon != std::string::npos && colon < b && colon - a == n) {
+      bool same = true;
+      for (size_t k = 0; k < n && same; ++k)
+        same = std::tolower(static_cast<unsigned char>(headers[a + k])) == std::tolower(static_cast<unsigned char>(name[k]));
+      if (same) {
+        size_t v = colon + 1, e = b;
+        while (v < e && (headers[v] == ' ' || headers[v] == '\t')) ++v;
+        while (e > v && (headers[e - 1] == ' ' || headers[e - 1] == '\t')) --e;
+        return headers.substr(v, e - v);
+      }
+    }
+    a = b + 2;
+  }
+  return {};
+}
+
+std::string http_error(const HttpResult& r) {
+  if (!r.status) return "Could not reach the Virgil service.";
+  Json j;
+  if (parse_json(r.body, &j) && !j["error"].str().empty()) return valid_utf8(j["error"].str());
+  return "HTTP " + std::to_string(r.status);
 }
 
 // ---- config text editing (same rules as the daemon's parser) --------------------
@@ -348,6 +380,23 @@ std::string conf_set(const std::string& text, const std::string& section, const 
   while (at > sec_start + 1 && trim(lines[size_t(at - 1)]).empty()) --at;
   lines.insert(lines.begin() + at, line);
   return join_lines(lines);
+}
+
+std::string conf_remove(const std::string& text, const std::string& section, const std::string& key) {
+  auto lines = split_lines(text);
+  std::vector<std::string> out;
+  std::string cur;
+  bool removed = false;
+  for (const auto& line : lines) {
+    const std::string h = header_of(line);
+    if (!h.empty()) cur = h;
+    else if (section_matches(section, cur) && key_matches(key, key_of(line, nullptr), section)) {
+      removed = true;
+      continue;
+    }
+    out.push_back(line);
+  }
+  return removed ? join_lines(out) : text;
 }
 
 // ---- status -----------------------------------------------------------------------

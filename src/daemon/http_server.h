@@ -1,4 +1,5 @@
-// Minimal HTTP/1.1 server for the local control panel. One request per
+// Minimal HTTP/1.1 server for the control panel (127.0.0.1, or all IPv4
+// addresses with remote access). One request per
 // connection (Connection: close); bodies up to 256 KiB. Each connection gets
 // a short-lived thread (a few at most), so an idle connection (a browser's
 // preconnect) cannot hold up the others.
@@ -19,6 +20,7 @@ struct HttpRequest {
   std::string query;  // after '?', undecoded
   std::map<std::string, std::string> headers;  // names lower-cased
   std::string body;
+  uint32_t peer = 0x7F000001;  // client's IPv4 address, host byte order
 
   std::string header(const std::string& name) const {
     auto it = headers.find(name);
@@ -37,13 +39,14 @@ class HttpServer {
  public:
   using Handler = std::function<HttpResponse(const HttpRequest&)>;
   ~HttpServer() { stop(); }
-  // Binds addr:port (host byte order). Returns false if the port is taken.
+  // Binds addr:port (host byte order; 0 = all IPv4 addresses). Returns false
+  // if the port is taken.
   bool start(uint32_t addr, uint16_t port, Handler handler);
   void stop();
 
  private:
   void run();
-  void serve(intptr_t client);
+  void serve(intptr_t client, uint32_t peer);
 
   intptr_t listen_fd_ = -1;
   Handler handler_;

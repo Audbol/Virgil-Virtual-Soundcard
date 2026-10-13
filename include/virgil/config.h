@@ -35,6 +35,11 @@ struct Config {
   bool ptp_master_capable = false;    // only for networks without Dante hardware
 
   uint32_t control_port = 8480;       // local web control panel; 0 = off
+  // The web panel also on the network (all IPv4 addresses, control_port),
+  // for other computers: they must log in with remote_password (HTTP Basic
+  // auth). This computer (127.0.0.1) needs no password.
+  bool remote_access = false;
+  std::string remote_password;
   // Dante control ports: "auto" (standard 4440/8800/4455/8700 unless other
   // Dante software on this computer, e.g. Dante Controller, already uses
   // them), "standard", or the first of four alternative ports.

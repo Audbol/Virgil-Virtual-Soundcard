@@ -29,9 +29,16 @@ bool parse_json(const std::string& text, Json* out);
 struct HttpResult {
   int status = 0;  // 0 = no connection
   std::string body;
+  std::string headers;  // response header lines ("Name: value\r\n" each)
+  // Value of response header `name` (case-insensitive), or "".
+  std::string header(const char* name) const;
 };
+// `extra_headers`: more request header lines, each ending in "\r\n".
 HttpResult http(unsigned port, const char* method, const std::string& path,
-                const std::string& body = std::string());
+                const std::string& body = std::string(), const std::string& extra_headers = std::string());
+// The daemon's {"error": "..."} message of a failed request, or a message for
+// the user when the service did not answer.
+std::string http_error(const HttpResult& r);
 
 // --- virgil.conf editing that keeps comments and layout -----------------------
 // As the daemon reads it: [device] and [network] are one section, keys known
@@ -41,6 +48,8 @@ HttpResult http(unsigned port, const char* method, const std::string& path,
 std::string conf_get(const std::string& text, const std::string& section, const std::string& key);
 std::string conf_set(const std::string& text, const std::string& section, const std::string& key,
                      const std::string& value);
+// Removes every occurrence of `key` from `section` (as conf_get finds it).
+std::string conf_remove(const std::string& text, const std::string& section, const std::string& key);
 
 // --- daemon status, as shown by the UI ----------------------------------------
 struct Client {

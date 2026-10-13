@@ -119,6 +119,7 @@ if(APPLE)
                               MACOSX_PACKAGE_LOCATION Resources)
   add_executable(virgil-control MACOSX_BUNDLE tools/control_mac/main.mm tools/control_mac/desktop_audio_mac.mm
                  tools/control_common/api.cpp tools/control_common/settings_model.cpp
+                 tools/control_common/diagnostics_model.cpp tools/control_common/config_model.cpp
                  tools/control_common/view.cpp branding/virgil.icns branding/virgil-256.png)
   target_include_directories(virgil-control PRIVATE tools/control_common tools/control_mac)
   target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
@@ -138,7 +139,8 @@ if(APPLE)
 elseif(WIN32)
   # Native tray app with a Direct2D status window and a settings dialog.
   add_executable(virgil-control WIN32 tools/control_win/main.cpp tools/control_common/api.cpp
-                 tools/control_common/settings_model.cpp tools/control_win/control.rc
+                 tools/control_common/settings_model.cpp tools/control_common/diagnostics_model.cpp
+                 tools/control_common/config_model.cpp tools/control_win/control.rc
                  tools/control_win/desktop_audio.cpp tools/control_win/desktop_audio_ui.cpp
                  tools/control_win/wasapi.cpp tools/control_common/desktop_audio_settings.cpp)
   target_include_directories(virgil-control PRIVATE tools/control_win tools/control_common branding)
@@ -165,6 +167,7 @@ else()
   if(GTK3_FOUND)
     add_executable(virgil-control tools/control_linux/main.cpp tools/control_linux/desktop_audio_gtk.cpp
                    tools/control_common/api.cpp tools/control_common/settings_model.cpp
+                 tools/control_common/diagnostics_model.cpp tools/control_common/config_model.cpp
                    tools/control_common/view.cpp)
     target_include_directories(virgil-control PRIVATE tools/control_common tools/control_linux)
     target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")

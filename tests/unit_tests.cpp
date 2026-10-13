@@ -15,8 +15,11 @@
 #include "virgil/resampler.h"
 #include "virgil/sample_convert.h"
 #include "virgil/shm_layout.h"
+#include "config_model.h"
 #include "desktop_audio_settings.h"
 #include "diagnostics.h"
+#include "diagnostics_model.h"
+#include "remote_auth.h"
 #include "settings_model.h"
 #include "test_main.h"
 #include "view.h"
@@ -1354,6 +1357,309 @@ TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
   DesktopAudioSettings e;
   CHECK(parse_desktop_audio("", &e, nullptr));
   CHECK(!e.enabled && e.sources.empty() && !e.output.enabled);
+}
+
+// The diagnostics window's model, parsed from JSON the daemon's own code
+// produces.
+TEST(control_diagnostics_model) {
+  Config cfg;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  EngineCounters::App app;
+  app.pid = 42;
+  app.name = "REAPER";
+  c.apps.push_back(app);
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  c.rx_late_packets += 10;
+  c.rx_lost_late_samples += 48;
+  c.rx_max_age_samples = 48 * 5;
+  d.sample(c, cfg, t += 1000);
+  c.rx_late_packets += 3;
+  c.rx_lost_late_samples += 96;
+  d.sample(c, cfg, t += 1000);  // merged: one event lasting 1 s
+  c.apps[0].underrun_ticks += 3;
+  c.rx_gaps += 2;
+  c.rx_missing_samples += 96;
+  c.rx_max_age_samples = 0;
+  d.sample(c, cfg, t += 10000);
+  c.state = kStateFreeRun;
+  c.grandmaster.clear();
+  d.sample(c, cfg, t += 1000);
+
+  vc::Diagnostics g;
+  CHECK(vc::parse_diagnostics(d.json(t), &g));
+  CHECK(g.now_ms == t && g.since_ms == 1700000000000LL);
+  CHECK(g.dropouts_last_hour == 4 && g.dropouts_total == 4);
+  CHECK(g.headline == "4 dropouts in the last hour" && g.headline_severity == vc::Severity::Warn);
+  CHECK(g.since_text == "since " + vc::format_local_time(g.since_ms, "%H:%M:%S") + " \xC2\xB7 4 in total");
+  CHECK(g.totals[int(vc::DiagCategory::Network)] == 2 && g.totals[int(vc::DiagCategory::Apps)] == 1);
+  CHECK(g.totals[int(vc::DiagCategory::Computer)] == 0 && g.totals[int(vc::DiagCategory::Clock)] == 1);
+  CHECK(g.rx_latency_ms == 4.0);
+  // 60 minutes, oldest first, ending with the current one.
+  CHECK(g.minutes.size() == size_t(vc::kDiagMinutes));
+  CHECK(g.minutes.back().t_ms == t - t % 60000 && g.minutes.front().t_ms == g.minutes.back().t_ms - 59 * 60000);
+  unsigned sum[vc::kDiagCategories] = {}, peak = 0;
+  for (const auto& m : g.minutes) {
+    for (int k = 0; k < vc::kDiagCategories; ++k) sum[k] += m.counts[k];
+    peak = std::max(peak, m.total());
+  }
+  CHECK(sum[0] == 3 && sum[1] == 1 && sum[2] == 0 && sum[3] == 1);  // seconds with trouble
+  CHECK(g.peak == std::max(1u, peak));
+  CHECK(g.minutes.back().label == vc::format_local_time(g.minutes.back().t_ms, "%H:%M"));
+  CHECK(g.minutes.back().tooltip.find("clock (seconds with trouble)") != std::string::npos);
+  // Events newest first, with severities, durations and local times.
+  CHECK(g.events.size() == 6);  // started, locked, late, missed, lost, clock lost
+  CHECK(g.events.front().kind == "clock-lost" && g.events.front().severity == vc::Severity::Error &&
+        g.events.front().dropout);
+  CHECK(g.events.front().text.find("Lost the Dante clock leader 00:1d:c1:aa:bb:cc") == 0);
+  CHECK(g.events.front().time_text == vc::format_local_time(g.events.front().start_ms, "%H:%M:%S"));
+  CHECK(g.events.back().kind == "service" && !g.events.back().dropout &&
+        g.events.back().severity == vc::Severity::Info);
+  CHECK(g.events.back().text.find("Audio engine started") == 0);
+  bool late = false;
+  for (const auto& e : g.events)
+    if (e.kind == "network-late") {
+      late = true;
+      CHECK(e.severity == vc::Severity::Warn && e.duration_text == "1 s");
+      CHECK(e.text.find("3.0 ms of audio from the network arrived too late") == 0);
+    } else {
+      CHECK(e.duration_text.empty());
+    }
+  CHECK(late);
+  bool reaper = false;
+  for (const auto& h : g.hints) reaper |= h.find("REAPER did not keep up") != std::string::npos;
+  CHECK(reaper && g.hints.size() >= 3);
+  vc::DiagCategory cat;
+  CHECK(vc::diag_kind_category("network-send-late", &cat) && cat == vc::DiagCategory::Computer);
+  CHECK(!vc::diag_kind_category("service", &cat) && !vc::diag_kind_category("clock", &cat));
+  CHECK(std::string(vc::diag_category_label(vc::DiagCategory::Computer)) == "computer busy");
+
+  // Chart: one rectangle per non-empty segment, stacked inside the area.
+  const auto bars = vc::diag_chart_layout(g, 600, 64);
+  size_t segs = 0;
+  for (const auto& m : g.minutes)
+    for (int k = 0; k < vc::kDiagCategories; ++k) segs += m.counts[k] ? 1 : 0;
+  CHECK(bars.size() == segs && segs > 0);
+  float tallest = 0;
+  for (const auto& b : bars) {
+    CHECK(b.x >= 0 && b.x + b.w <= 600.01f && b.y >= -0.01f && b.y + b.h <= 64.01f && b.w > 0);
+    if (g.minutes[size_t(b.minute)].total() == g.peak) tallest = std::max(tallest, 64 - b.y);
+  }
+  CHECK_NEAR(tallest, 64, 0.01);
+  CHECK(vc::diag_chart_minute_at(0, 600) == 0 && vc::diag_chart_minute_at(599, 600) == 59 &&
+        vc::diag_chart_minute_at(600, 600) == -1);
+
+  // After Clear.
+  d.reset(t);
+  CHECK(vc::parse_diagnostics(d.json(t), &g));
+  CHECK(g.headline == "No dropouts in the last hour" && g.headline_severity == vc::Severity::Ok);
+  CHECK(g.events.empty() && g.hints.empty() && g.peak == 1 && g.minutes.size() == 60);
+  CHECK(g.since_text == "since " + vc::format_local_time(t, "%H:%M:%S"));
+  CHECK(!vc::parse_diagnostics("not json", &g));
+
+  const std::string f = vc::default_report_file_name(1700000000000LL);
+  CHECK(f == "virgil-report-" + vc::format_local_time(1700000000000LL, "%Y%m%d-%H%M") + ".txt");
+  CHECK(f.size() == std::string("virgil-report-20231114-2213.txt").size());
+}
+
+TEST(control_http_header_and_conf_remove) {
+  vc::HttpResult r;
+  r.headers = "Content-Type: text/plain\r\nX-Virgil-Config-Version:  0123abcd \r\n";
+  CHECK(r.header("x-virgil-config-version") == "0123abcd" && r.header("Content-type") == "text/plain");
+  CHECK(r.header("X-Virgil").empty());
+  r.status = 400;
+  r.body = "{\"error\":\"line 3: unknown key 'x'\"}";
+  CHECK(vc::http_error(r) == "line 3: unknown key 'x'");
+  CHECK(vc::http_error(vc::HttpResult()) == "Could not reach the Virgil service.");
+  CHECK(vc::conf_remove("[channel_names]\ntx1 = A\n# tx1 = old\ntx1 = B\nrx1 = C\n", "channel_names", "tx1") ==
+        "[channel_names]\n# tx1 = old\nrx1 = C\n");
+  CHECK(vc::conf_remove("[device]\nname = A\n", "channel_names", "tx1") == "[device]\nname = A\n");
+}
+
+TEST(control_channel_names) {
+  const std::string conf =
+      "# my setup\n[device]\nname = Stage\ntx_channels = 4\nrx_channels = 2\n\n[channel_names]\ntx1 = Kick\n"
+      "tx3 = \"Vox; lead\"\n";
+  vc::ChannelNames n = vc::load_channel_names(conf);
+  CHECK(n.tx == 4 && n.rx == 2 && n.tx_names.size() == 4 && n.rx_names.size() == 2);
+  CHECK(n.tx_names[0] == "Kick" && n.tx_names[1].empty() && n.tx_names[2] == "Vox; lead" && n.rx_names[0].empty());
+  CHECK(vc::validate_channel_names(n).empty());
+  CHECK(vc::load_channel_names("").tx == 8 && vc::load_channel_names("").tx_names.size() == 8);
+  CHECK(vc::default_channel_name(false, 3) == "RX 3");
+  CHECK(vc::channel_name_placeholder({"Kick", ""}, true, 1) == "TX 2");
+  CHECK(vc::channel_name_placeholder({"Kick", ""}, true, 0) == "Kick");
+
+  // Per-field errors, as the daemon would refuse them.
+  vc::ChannelNames e = n;
+  e.tx_names[1] = "kick";       // same as channel 1, ignoring case
+  e.tx_names[3] = "a@b";
+  e.rx_names[0] = "RX 2";       // channel 2's default, but channel 2 is named
+  e.rx_names[1] = std::string(32, 'x');
+  auto errs = vc::validate_channel_names(e);
+  CHECK(errs.size() == 4);
+  CHECK(vc::name_error(errs, true, 0) == "also the name of channel 2");
+  CHECK(vc::name_error(errs, true, 1) == "also the name of channel 1");
+  CHECK(vc::name_error(errs, true, 2).empty());
+  CHECK(vc::name_error(errs, true, 3) == "names cannot contain '@'");
+  CHECK(vc::name_error(errs, false, 0).empty());
+  CHECK(vc::name_error(errs, false, 1) == "names can be at most 31 characters");
+  std::string err;
+  CHECK(!vc::save_channel_names(1, n, e, &err) && err == "Transmit channel 1: also the name of channel 2");
+  e.rx_names[1] = "";  // channel 2 back to its default "RX 2": still a clash
+  CHECK(vc::name_error(vc::validate_channel_names(e), false, 0) == "also the name of channel 2");
+  vc::ChannelNames sp = n;
+  sp.tx_names[1] = "  Snare  ";  // trimmed, like the daemon wants it
+  CHECK(vc::validate_channel_names(sp).empty());
+
+  // Apply: the file keeps its comments; an emptied field removes its line.
+  vc::ChannelNames ed = n;
+  ed.tx_names[0] = "";
+  ed.tx_names[1] = " Snare ";
+  ed.rx_names[1] = "Talk back";
+  const std::string out = vc::apply_channel_names(conf, ed, &n);
+  CHECK(out.find("# my setup") == 0 && out.find("Kick") == std::string::npos);
+  Config c;
+  CHECK(parse_config(out, &c, &err) && validate_config(&c, &err));
+  CHECK(c.device_name == "Stage" && c.tx_name(0).empty() && c.tx_name(1) == "Snare" && c.tx_name(2) == "Vox; lead");
+  CHECK(c.rx_name(1) == "Talk back");
+  const vc::ChannelNames back = vc::load_channel_names(out);
+  CHECK(back.tx_names[1] == "Snare" && back.tx_names[2] == "Vox; lead" && back.rx_names[1] == "Talk back");
+  // Unchanged: same text. With `base`, a rename made meanwhile in Dante
+  // Controller (rx1 here) is kept.
+  CHECK(vc::apply_channel_names(conf, n, &n) == conf);
+  const std::string fresh = conf + "rx1 = Ambience\n";
+  const std::string merged = vc::apply_channel_names(fresh, ed, &n);
+  Config m;
+  CHECK(parse_config(merged, &m, &err) && m.rx_name(0) == "Ambience" && m.tx_name(1) == "Snare");
+  // Without base, every field is written.
+  CHECK(vc::load_channel_names(vc::apply_channel_names(fresh, ed)).rx_names[0].empty());
+
+  // The same rules as the daemon: single characters, and random sets of names.
+  for (int ch = 1; ch < 256; ++ch) {
+    const std::string s(1, char(ch));
+    CHECK(vc::channel_name_problem(s) == virgil::channel_name_problem(s));
+    const std::string w = "a" + s + "b";
+    CHECK(vc::channel_name_problem(w) == virgil::channel_name_problem(w));
+  }
+  for (const std::string& s : std::vector<std::string>{"", " a", "a ", std::string(31, 'x'), std::string(32, 'x'), "Vox 1 (L)"})
+    CHECK(vc::channel_name_problem(s) == virgil::channel_name_problem(s));
+  static const char* const pool[] = {"",     "Kick", "kick",  "TX 1", "tx 2", "RX 1", "rx 3",   "Vox; lead",
+                                     "a#b",  "a.b",  "x\"y",  " pad ", "@",   "TX 3", "Snare", "Talk back"};
+  std::mt19937 rng(7);
+  int agree = 0;
+  for (int iter = 0; iter < 2000; ++iter) {
+    vc::ChannelNames r;
+    r.tx = 1 + rng() % 4;
+    r.rx = rng() % 4;
+    r.tx_names.resize(r.tx);
+    r.rx_names.resize(r.rx);
+    for (auto& v : r.tx_names) v = pool[rng() % 16];
+    for (auto& v : r.rx_names) v = pool[rng() % 16];
+    const std::string base = "[device]\ntx_channels = " + std::to_string(r.tx) + "\nrx_channels = " +
+                             std::to_string(r.rx) + "\n";
+    Config dc;
+    std::string de;
+    const bool daemon_ok =
+        parse_config(vc::apply_channel_names(base, r), &dc, &de) && validate_config(&dc, &de);
+    const bool app_ok = vc::validate_channel_names(r).empty();
+    CHECK(daemon_ok == app_ok);
+    agree += daemon_ok == app_ok;
+  }
+  CHECK(agree == 2000);
+}
+
+TEST(remote_access_auth) {
+  // "Basic base64(user:pass)": any user name.
+  std::string pw;
+  CHECK(basic_auth_password("Basic dmlyZ2lsOnNlY3JldC1wdw==", &pw) && pw == "secret-pw");  // virgil:secret-pw
+  CHECK(basic_auth_password("basic OnNlY3JldC1wdw==", &pw) && pw == "secret-pw");        // :secret-pw
+  CHECK(!basic_auth_password("Bearer abc", &pw) && !basic_auth_password("Basic !!!", &pw));
+  CHECK(!basic_auth_password("Basic c2VjcmV0", &pw));  // "secret": no colon
+  CHECK(constant_time_equal("abc", "abc") && !constant_time_equal("abc", "abd") && !constant_time_equal("abc", "ab"));
+  CHECK(!constant_time_equal("", "x") && constant_time_equal("", ""));
+
+  RemoteAuth a;
+  const uint32_t lan = 0xC0000202, other = 0xC0000203;  // 192.0.2.2, 192.0.2.3
+  const std::string good = "Basic dmlyZ2lsOnNlY3JldC1wdw==", bad = "Basic dmlyZ2lsOndyb25n";  // virgil:wrong
+  int64_t t = 1000;
+  // This computer: no password, also with remote access off.
+  CHECK(a.check(0x7F000001, false, "", "", t) == RemoteAuth::Result::Allowed);
+  CHECK(a.check(0x7F000002, true, "secret-pw", bad, t) == RemoteAuth::Result::Allowed);
+  // Others: refused while off, a login asked for, the password checked.
+  CHECK(a.check(lan, false, "secret-pw", good, t) == RemoteAuth::Result::Refused);
+  CHECK(a.check(lan, true, "", good, t) == RemoteAuth::Result::Refused);
+  CHECK(a.check(lan, true, "secret-pw", "", t) == RemoteAuth::Result::NeedLogin);
+  CHECK(a.check(lan, true, "secret-pw", good, t) == RemoteAuth::Result::Allowed);
+  // Requests without credentials do not count; wrong passwords do: the 5th
+  // locks the address out for 10 s, even with the right password.
+  for (int i = 0; i < 10; ++i) CHECK(a.check(lan, true, "secret-pw", "", t) == RemoteAuth::Result::NeedLogin);
+  for (int i = 0; i < 4; ++i) CHECK(a.check(lan, true, "secret-pw", bad, t) == RemoteAuth::Result::NeedLogin);
+  CHECK(a.check(lan, true, "secret-pw", bad, t) == RemoteAuth::Result::LockedOut);
+  CHECK(a.check(lan, true, "secret-pw", good, t + 5000) == RemoteAuth::Result::LockedOut);
+  CHECK(a.retry_after_s(lan, t + 5000) == 5);
+  CHECK(a.check(other, true, "secret-pw", good, t + 5000) == RemoteAuth::Result::Allowed);  // per address
+  CHECK(a.check(lan, true, "secret-pw", good, t + 10000) == RemoteAuth::Result::Allowed);
+  // A success clears the count.
+  for (int i = 0; i < 4; ++i) a.check(lan, true, "secret-pw", bad, t + 11000);
+  CHECK(a.check(lan, true, "secret-pw", good, t + 11000) == RemoteAuth::Result::Allowed);
+  CHECK(a.check(lan, true, "secret-pw", bad, t + 11000) == RemoteAuth::Result::NeedLogin);
+
+  // Masking: remote clients see the mask; posting it back keeps the password.
+  const std::string conf = "# setup\n[device]\nname = Stage\nremote_access = true\nremote_password = \"secret; pw\"\n"
+                           "[ptp]\nsubdomain = _DFLT\n";
+  const std::string masked = mask_remote_password(conf);
+  CHECK(masked.find("secret") == std::string::npos && masked.find(kPasswordMask) != std::string::npos);
+  CHECK(masked.find("# setup") == 0 && mask_remote_password("[device]\nname = A\n") == "[device]\nname = A\n");
+  Config mc;
+  std::string err, out;
+  CHECK(parse_config(masked, &mc, &err) && mc.remote_password == kPasswordMask);
+  std::string edited = masked;
+  edited.replace(edited.find("name = Stage"), 12, "name = Booth");
+  CHECK(resolve_posted_config(edited, conf, false, &out, &err));
+  Config rc;
+  CHECK(parse_config(out, &rc, &err) && rc.device_name == "Booth" && rc.remote_password == "secret; pw" &&
+        rc.remote_access);
+  // Remote clients cannot change remote access or its password; this computer can.
+  std::string off = masked;
+  off.replace(off.find("remote_access = true"), 20, "remote_access = false");
+  CHECK(!resolve_posted_config(off, conf, false, &out, &err) && err.find("only be changed") != std::string::npos);
+  std::string newpw = conf;
+  newpw.replace(newpw.find("secret; pw"), 10, "another-pw");
+  CHECK(!resolve_posted_config(newpw, conf, false, &out, &err));
+  CHECK(!resolve_posted_config("[device]\nname = Booth\n", conf, false, &out, &err));  // removing them
+  CHECK(resolve_posted_config(off, conf, true, &out, &err) && out.find("secret; pw") != std::string::npos);
+  CHECK(resolve_posted_config(newpw, conf, true, &out, &err) && out == newpw);
+
+  // The configuration: off by default; on needs a password of 8 or more.
+  Config d;
+  CHECK(parse_config("[device]\n", &d, &err) && !d.remote_access && validate_config(&d, &err));
+  Config on;
+  CHECK(parse_config("[device]\nremote_access = true\n", &on, &err));
+  CHECK(!validate_config(&on, &err) && err.find("needs a password") != std::string::npos);
+  on.remote_password = "short";
+  CHECK(!validate_config(&on, &err));
+  on.remote_password = "long enough";
+  CHECK(validate_config(&on, &err));
+  Config back;
+  CHECK(parse_config(format_config(on), &back, &err) && back.remote_access && back.remote_password == "long enough");
+
+  // Virgil Control's settings form.
+  vc::SettingsForm f = vc::load_settings(conf, {});
+  CHECK(f.remote_access && f.remote_password == "secret; pw" && vc::remote_access_problem(f).empty());
+  f.remote_password = "x";
+  CHECK(!vc::remote_access_problem(f).empty());
+  f.remote_password = "new; password";
+  Config sc;
+  CHECK(parse_config(vc::apply_settings(conf, f), &sc, &err) && sc.remote_password == "new; password");
+  // A file without the keys keeps none when remote access stays off.
+  const std::string plain = "[device]\nname = A\n";
+  CHECK(vc::apply_settings(plain, vc::load_settings(plain, {})).find("remote") == std::string::npos);
 }
 
 TEST_MAIN()

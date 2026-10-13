@@ -82,6 +82,8 @@ SettingsForm load_settings(const std::string& c, const std::vector<Interface>& a
   if (!tl.empty()) f.tx_latency_ms = ms_text(tl);
   f.local_clock = lower(conf_get(c, "device", "clock")) == "free";
   f.master_capable = truthy(conf_get(c, "ptp", "master_capable"));
+  f.remote_access = truthy(conf_get(c, "device", "remote_access"));
+  f.remote_password = conf_get(c, "device", "remote_password");
   return f;
 }
 
@@ -98,16 +100,26 @@ std::string apply_settings(const std::string& conf, const SettingsForm& f) {
   c = conf_set(c, "device", "tx_latency_us", us_text(f.tx_latency_ms));
   c = conf_set(c, "device", "clock", f.local_clock ? "free" : "ptp");
   c = conf_set(c, "ptp", "master_capable", f.master_capable ? "true" : "false");
+  // Written only when used, so files that never had them stay as they are.
+  if (f.remote_access || !conf_get(conf, "device", "remote_access").empty())
+    c = conf_set(c, "device", "remote_access", f.remote_access ? "true" : "false");
+  if (!f.remote_password.empty()) c = conf_set(c, "device", "remote_password", f.remote_password);
+  else c = conf_remove(c, "device", "remote_password");
   return c;
+}
+
+std::string remote_access_problem(const SettingsForm& f) {
+  for (char ch : f.remote_password)
+    if (ch == '"' || static_cast<unsigned char>(ch) < 0x20) return "The password cannot contain quotes.";
+  if (f.remote_access && f.remote_password.size() < 8)
+    return "Remote access needs a password of at least 8 characters.";
+  return "";
 }
 
 bool save_settings(unsigned port, const std::string& conf, std::string* error) {
   const auto r = http(port, "POST", "/api/config", conf);
   if (r.status == 200) return true;
-  Json j;
-  std::string err = "Could not reach the Virgil service.";
-  if (r.status && parse_json(r.body, &j)) err = j["error"].str("HTTP " + std::to_string(r.status));
-  if (error) *error = err;
+  if (error) *error = http_error(r);
   return false;
 }
 

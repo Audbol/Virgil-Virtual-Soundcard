@@ -1,6 +1,9 @@
 add_executable(virgil_unit_tests unit_tests.cpp ${CMAKE_SOURCE_DIR}/src/daemon/diagnostics.cpp
+               ${CMAKE_SOURCE_DIR}/src/daemon/remote_auth.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/api.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/settings_model.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/diagnostics_model.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/config_model.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/desktop_audio_settings.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/view.cpp)
 target_include_directories(virgil_unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/daemon

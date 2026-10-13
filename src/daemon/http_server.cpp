@@ -36,11 +36,13 @@ const char* reason(int status) {
     case 200: return "OK";
     case 204: return "No Content";
     case 400: return "Bad Request";
+    case 401: return "Unauthorized";
     case 403: return "Forbidden";
     case 404: return "Not Found";
     case 405: return "Method Not Allowed";
     case 409: return "Conflict";
     case 413: return "Payload Too Large";
+    case 429: return "Too Many Requests";
     case 500: return "Internal Server Error";
     case 503: return "Service Unavailable";
     default: return "Error";
@@ -140,13 +142,14 @@ void HttpServer::run() {
     socklen_t len = sizeof peer;
     auto c = accept(lfd, reinterpret_cast<sockaddr*>(&peer), &len);
     if (c == decltype(c)(-1)) continue;
+    const uint32_t from = ntohl(peer.sin_addr.s_addr);
     // A thread per connection (bounded): one that sends nothing yet does
     // not delay the next. At the bound, serve here as before.
     constexpr int kMaxWorkers = 8;
     if (workers_.fetch_add(1) < kMaxWorkers) {
       try {
-        std::thread([this, c] {
-          serve(intptr_t(c));
+        std::thread([this, c, from] {
+          serve(intptr_t(c), from);
           VIRGIL_CLOSE(c);
           workers_.fetch_sub(1);
         }).detach();
@@ -155,22 +158,24 @@ void HttpServer::run() {
       }
     }
     workers_.fetch_sub(1);
-    serve(intptr_t(c));
+    serve(intptr_t(c), from);
     VIRGIL_CLOSE(c);
   }
 }
 
-void HttpServer::serve(intptr_t fd) {
-  // Short receive timeout: requests come from this computer and arrive at
-  // once; an idle connection is dropped quickly.
-  set_timeout(fd, 500);
+void HttpServer::serve(intptr_t fd, uint32_t peer) {
+  // Short receive timeout: requests from this computer arrive at once; an
+  // idle connection is dropped quickly. Other computers (remote access) get
+  // a little longer.
+  const bool local = (peer >> 24) == 127;
+  set_timeout(fd, local ? 500 : 2000);
   const auto sfd = decltype(socket(0, 0, 0))(fd);
   std::string buf;
   char chunk[4096];
   size_t header_end = std::string::npos;
   // One overall deadline per connection: a client trickling bytes must not
   // hold a server thread, or stop() waiting for it, for long.
-  const int64_t deadline = mono_ns() + 3000000000LL;
+  const int64_t deadline = mono_ns() + (local ? 3000000000LL : 6000000000LL);
   auto expired = [&] { return mono_ns() > deadline || !running_; };
   while (header_end == std::string::npos) {
     if (expired()) return;
@@ -182,6 +187,7 @@ void HttpServer::serve(intptr_t fd) {
   }
 
   HttpRequest req;
+  req.peer = peer;
   {
     size_t line_end = buf.find("\r\n");
     const std::string request_line = buf.substr(0, line_end);
