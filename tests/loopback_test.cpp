@@ -92,9 +92,8 @@ static void loopback(uint32_t C) {
   wait_ms(20);
   const uint64_t steps_before = a.header()->clock_steps.load();
 
-  double now;
-  CHECK(a.frame_now(&now));
-  const uint64_t start = uint64_t(now) + 480;  // 10 ms ahead
+  // The audio is made before reading the clock: at 128 channels under
+  // emulation (arm64 CI) making it could take longer than a short head start.
   const uint32_t n = 2400;
   std::vector<float> sa(n * C), sb(n * 2);
   for (uint32_t f = 0; f < n; ++f) {
@@ -103,6 +102,9 @@ static void loopback(uint32_t C) {
     sb[f * 2 + 0] = 0.125f;  // DC on ch 1 from client b
     sb[f * 2 + 1] = 0.f;
   }
+  double now;
+  CHECK(a.frame_now(&now));
+  const uint64_t start = uint64_t(now) + 2400;  // 50 ms ahead
   CHECK(a.write_tx(start, sa.data(), n, C) == 0);
   CHECK(b.write_tx(start, sb.data(), n, 2) == 0);
 
