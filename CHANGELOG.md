@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+- **Follows network address changes.** When the computer's address changes or goes away while Virgil runs (DHCP renewal, Wi-Fi joining another network or a phone hotspot, an adapter unplugged), Virgil restarts its audio engine on the new address, or waits until the network is back, within a few seconds. It used to stay on the old address, and every send failed with "Can't assign requested address" until it was restarted by hand. The diagnostics event log records it.
+- Fixed a crash of the Dante engine when a device re-requested its flows while Virgil was removing timed-out ones (seen with an RME Digiface Dante on macOS): receiving stopped on some channels, and every later subscription change failed until Virgil was restarted.
+
 ## 0.6.2
 Includes everything in 0.6.1 below (0.6.1 was not released on its own).
 - Virgil Control (all platforms): *Dropouts and diagnostics…* moved from the window's footer into Settings (and stays in the tray / menu bar menu), so the footer is less crowded.

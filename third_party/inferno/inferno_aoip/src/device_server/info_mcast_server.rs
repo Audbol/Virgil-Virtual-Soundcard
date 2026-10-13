@@ -270,7 +270,7 @@ impl<'s> Multicaster<'s> {
       // rx latency:
       if let Some(chsub) = self.channels_subscriber.as_ref() {
         let flows_info = chsub.flows_info();
-        let flows_info = flows_info.read().unwrap();
+        let flows_info = flows_info.read().unwrap_or_else(|e| e.into_inner());
         let flows_count = flows_info.len() as u16;
         bytes.write_u16(24 + flows_count * 4);
         bytes.write_u16(0x8003);

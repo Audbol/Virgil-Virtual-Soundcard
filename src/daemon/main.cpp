@@ -33,6 +33,21 @@ namespace {
 std::atomic<bool> g_quit{false};
 void on_signal(int) { g_quit = true; }
 
+// Is `addr` assigned to one of this computer's interfaces?
+bool address_present(uint32_t addr) {
+  for (const auto& i : virgil::list_interfaces())
+    if (i.addr == addr) return true;
+  return false;
+}
+
+// The address of the configured interface, like resolve_interface, except
+// that an interface given as an address only counts while it is assigned.
+bool interface_address(const std::string& iface, uint32_t* out) {
+  if (!virgil::resolve_interface(iface, out)) return false;
+  uint32_t literal = 0;
+  return !virgil::parse_ipv4(iface, &literal) || address_present(*out);
+}
+
 bool file_exists(const std::string& p) {
   if (FILE* f = std::fopen(p.c_str(), "r")) {
     std::fclose(f);
@@ -153,7 +168,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
     // At boot the NIC may not have an address yet (DHCP, link): wait for it.
     uint32_t addr = 0;
     bool warned = false;
-    while (!stopped && !g_quit && !ctx.reload && !virgil::resolve_interface(cfg.interface, &addr)) {
+    while (!stopped && !g_quit && !ctx.reload && !interface_address(cfg.interface, &addr)) {
       if (!warned) {
         VIRGIL_LOG_WARN("waiting for network interface '%s' to come up...",
                      cfg.interface.empty() ? "(any)" : cfg.interface.c_str());
@@ -197,8 +212,35 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
 
     // Watchdog: if the Dante stack dies (a crash in one of its threads),
     // restart the audio engine rather than staying silent.
+    int addr_gone_s = 0;
     while (!g_quit && !ctx.reload) {
       wait_reload(1000000000LL);
+      // The engine is bound to the address it started with. When that
+      // address goes away (DHCP renewal, Wi-Fi joining another network, a
+      // cable or adapter change), every send fails with "address not
+      // available" until the engine restarts: follow the interface. A few
+      // seconds of grace so a brief link flap does not restart it.
+      if (engine && !ctx.reload) {
+        uint32_t now_addr = 0;
+        const bool have = interface_address(cfg.interface, &now_addr);
+        // Automatic: restart only when the address is gone from every
+        // interface (a better adapter appearing does not move Virgil).
+        const bool ok = cfg.interface.empty() ? address_present(addr) : have && now_addr == addr;
+        if (ok) {
+          addr_gone_s = 0;
+        } else if (++addr_gone_s >= 3) {
+          const std::string was = virgil::ipv4_to_string(addr);
+          const std::string text =
+              have && now_addr != addr
+                  ? "The network address changed from " + was + " to " + virgil::ipv4_to_string(now_addr) +
+                        "; the audio engine was restarted on the new address"
+                  : "The network address " + was + " went away; the audio engine restarts when it is back";
+          VIRGIL_LOG_WARN("%s", text.c_str());
+          ctx.diag.note(virgil::Diagnostics::Kind::Service, text, virgil::wall_ms());
+          ctx.reload = true;
+          break;
+        }
+      }
       if (engine && !ctx.reload) {
         // Once a second: diagnostics, and channel names changed from the
         // network (Dante Controller), which the configuration keeps.

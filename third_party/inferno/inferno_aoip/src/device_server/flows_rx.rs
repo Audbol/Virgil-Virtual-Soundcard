@@ -328,9 +328,13 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               let previous = std::mem::replace(&mut self.sockets[index], Some(socket));
               debug_assert!(previous.is_none());
             }
-            Command::RemoveSocket { index } => {
-              self.poll.registry().deregister(&mut self.sockets[index].as_mut().unwrap().socket).unwrap();
-              let socket = self.sockets[index].take().unwrap();
+            Command::RemoveSocket { index } => 'cmd: {
+              // Virgil patch: a flow may already be gone (removed twice, or never
+              // added because add_socket refused it): nothing to do then.
+              let Some(mut socket) = self.sockets.get_mut(index).and_then(|s| s.take()) else {
+                break 'cmd;
+              };
+              self.poll.registry().deregister(&mut socket.socket).log_and_forget();
               if cfg!(debug_assertions) {
                 let count: usize = socket
                   .channels
@@ -347,7 +351,7 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
               let _ = socket;
             }
-            Command::ConnectChannel { socket_index, channel_in_flow, sink } => {
+            Command::ConnectChannel { socket_index, channel_in_flow, sink } => 'cmd: {
               if cfg!(debug_assertions) {
                 for sd in self.sockets.iter().filter_map(|opt| opt.as_ref()) {
                   for ch in sd.channels.iter().filter_map(|opt| opt.as_ref()) {
@@ -357,7 +361,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                   }
                 }
               }
-              let socket = self.sockets[socket_index].as_mut().unwrap();
+              // Virgil patch: the flow can be gone by the time this arrives (it
+              // timed out, or the remote device restarted): drop the request.
+              let Some(socket) = self.sockets.get_mut(socket_index).and_then(|s| s.as_mut()) else {
+                break 'cmd;
+              };
 
               let timestamp_shift = (0 as ClockDiff)
                 .wrapping_sub_unsigned(start_timestamp.unwrap_or(0))
@@ -394,8 +402,8 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
               }
             }
             Command::DisconnectChannel { socket_index, channel_in_flow, rb_shared } => {
-              if let Some(sd) = self.sockets[socket_index].as_mut() {
-                if let Some(ch) = sd.channels[channel_in_flow].as_mut() {
+              if let Some(sd) = self.sockets.get_mut(socket_index).and_then(|s| s.as_mut()) {
+                if let Some(ch) = sd.channels.get_mut(channel_in_flow).and_then(|c| c.as_mut()) {
                   let sink_index_opt =
                     ch.sinks.iter().position(|sink| Arc::ptr_eq(sink.shared(), &rb_shared));
                   if let Some(sink_index) = sink_index_opt {
@@ -589,7 +597,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     // TODO: it would be more logical to move socket creation here from channels_subscriber.rs which is already convoluted
     debug!("adding flow receiver local index={local_index}");
     // Virgil patch: the receive thread indexes and divides by these.
-    if local_index >= self.flows_info.read().unwrap().len()
+    if local_index >= self.flows_info.read().unwrap_or_else(|e| e.into_inner()).len()
       || !(2..=4).contains(&bytes_per_sample)
       || channels_count == 0
       || channels_count > 64
@@ -609,7 +617,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       .collect_vec();
     let port = socket.local_addr().unwrap().port();
     let als: Arc<AtomicI32> = Arc::new(0.into());
-    self.flows_info.write().unwrap()[local_index] = Some(FlowInfo {
+    self.flows_info.write().unwrap_or_else(|e| e.into_inner())[local_index] = Some(FlowInfo {
       rx_port: port,
       channels_map: (0..channels_count).map(|_| boolvec![false; self.max_channels]).collect(),
       latency_samples: latency_samples.try_into().unwrap(),
@@ -640,7 +648,9 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   }
   pub async fn remove_socket(&self, local_index: usize) {
     debug!("removing flow receiver local index={local_index}");
-    self.flows_info.write().unwrap()[local_index] = None;
+    if let Some(slot) = self.flows_info.write().unwrap_or_else(|e| e.into_inner()).get_mut(local_index) {
+      *slot = None;
+    }
     self.commands_sender.send(Command::RemoveSocket { index: local_index }).await.log_and_forget();
     self.waker.wake().log_and_forget();
   }
@@ -654,9 +664,20 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     debug!("connecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
 
     {
-      let mut flows_info = self.flows_info.write().unwrap();
-      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow]
-        .set(local_channel_index, true);
+      // Virgil patch: the flow may already be removed (flows time out and are
+      // removed while subscriptions are still being changed): skip it instead
+      // of panicking with the lock held (which poisoned it for every later
+      // call and crashed the Dante engine).
+      let mut flows_info = self.flows_info.write().unwrap_or_else(|e| e.into_inner());
+      match flows_info.get_mut(local_flow_index).and_then(|f| f.as_mut()) {
+        Some(f) => {
+          f.channels_map[channel_in_flow].set(local_channel_index, true);
+        }
+        None => {
+          warn!("receive flow index={local_flow_index} is gone, not changing its channel {channel_in_flow}");
+          return;
+        }
+      }
     }
 
     self
@@ -676,9 +697,20 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     debug!("disconnecting channel: flow index={local_flow_index}, channel in flow: {channel_in_flow}");
 
     {
-      let mut flows_info = self.flows_info.write().unwrap();
-      flows_info[local_flow_index].as_mut().unwrap().channels_map[channel_in_flow]
-        .set(local_channel_index, false);
+      // Virgil patch: the flow may already be removed (flows time out and are
+      // removed while subscriptions are still being changed): skip it instead
+      // of panicking with the lock held (which poisoned it for every later
+      // call and crashed the Dante engine).
+      let mut flows_info = self.flows_info.write().unwrap_or_else(|e| e.into_inner());
+      match flows_info.get_mut(local_flow_index).and_then(|f| f.as_mut()) {
+        Some(f) => {
+          f.channels_map[channel_in_flow].set(local_channel_index, false);
+        }
+        None => {
+          warn!("receive flow index={local_flow_index} is gone, not changing its channel {channel_in_flow}");
+          return;
+        }
+      }
     }
 
     self
