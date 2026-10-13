@@ -166,7 +166,7 @@ else()
     pkg_check_modules(GTK3 IMPORTED_TARGET gtk+-3.0)
   endif()
   if(GTK3_FOUND)
-    add_executable(virgil-control tools/control_linux/main.cpp tools/control_linux/desktop_audio_gtk.cpp
+    add_executable(virgil-control tools/control_linux/main.cpp tools/control_linux/desktop_audio_gtk.cpp tools/control_linux/panels_gtk.cpp
                    tools/control_common/api.cpp tools/control_common/settings_model.cpp
                  tools/control_common/diagnostics_model.cpp tools/control_common/config_model.cpp
                    tools/control_common/view.cpp)

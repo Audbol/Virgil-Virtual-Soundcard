@@ -37,6 +37,7 @@
 #include "api.h"
 #include "desktop_audio_engine.h"
 #include "desktop_audio_gtk.h"
+#include "panels_gtk.h"
 #include "settings_model.h"
 #include "view.h"
 
@@ -58,6 +59,12 @@ GtkWidget* g_log_button;  // "Show log" over the offline view
 vc::StatusView g_view;
 std::mutex g_mutex;
 vc::Status g_latest;  // guarded by g_mutex
+// /api/status "remote": the control panel served to other computers.
+struct RemoteInfo {
+  bool listening = false;
+  std::vector<std::string> urls;
+};
+RemoteInfo g_remote;  // guarded by g_mutex
 std::atomic<bool> g_visible{false};
 std::atomic<bool> g_quit{false};
 bool g_started = false;
@@ -330,6 +337,8 @@ void show_settings();
 void restart_engine();
 void start_service();
 void open_diagnostics();
+void open_channel_names();
+void open_config_editor();
 void stop_virgil();
 void start_virgil();
 void show_log();
@@ -507,9 +516,18 @@ void poll_thread() {
       continue;
     }
     if (!ok) s = vc::Status();
+    RemoteInfo remote;
+    vc::Json j;
+    if (ok && vc::parse_json(r.body, &j)) {
+      const vc::Json& rj = j["remote"];
+      remote.listening = rj["listening"].boolean();
+      for (size_t i = 0; i < rj["urls"].size(); ++i)
+        if (!rj["urls"][i].str().empty()) remote.urls.push_back(rj["urls"][i].str());
+    }
     {
       std::lock_guard<std::mutex> l(g_mutex);
       g_latest = s;
+      g_remote = remote;
     }
     int event = 0;
     if (was_reachable && !s.reachable) event = 1;
@@ -635,13 +653,19 @@ void show_log() {
   gtk_widget_destroy(d);
 }
 
-void open_page(const char* anchor) {
-  spawn_detached({"xdg-open", "http://127.0.0.1:" + std::to_string(g_port) + "/" + anchor});
+// Dropouts and diagnostics, the channel name editor and the configuration
+// file editor: native windows (panels_gtk.cpp).
+void open_diagnostics() { vcgtk::show_diagnostics(parent_window(), g_logo, g_port); }
+void open_channel_names() {
+  std::vector<std::string> tx, rx;  // the names on the network now, for the placeholders
+  {
+    std::lock_guard<std::mutex> l(g_mutex);
+    tx = g_latest.tx_names;
+    rx = g_latest.rx_names;
+  }
+  vcgtk::show_channel_names(parent_window(), g_logo, g_port, tx, rx);
 }
-void open_browser() { open_page(""); }
-// Dropout details and the channel name editor live in the control panel.
-void open_diagnostics() { open_page("#diagnostics"); }
-void open_channel_names() { open_page("#channels"); }
+void open_config_editor() { vcgtk::show_config_editor(parent_window(), g_logo, g_port); }
 
 // Virgil's channels as the service reports them, for the Desktop audio window.
 dagtk::ChannelInfo desktop_channels() {
@@ -714,11 +738,13 @@ GtkWidget* label(const char* text) {
 
 constexpr int kResponseNames = 1;
 constexpr int kResponseDiag = 2;
+constexpr int kResponseConfig = 3;
 
 // The open settings dialog (one at a time). Shared with an Apply in flight,
 // which may finish after the dialog was closed.
 struct SettingsUi {
-  GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *err;
+  GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *remote, *password, *err;
+  std::vector<GtkWidget*> more;  // Dropouts and diagnostics…, Channel names…, Edit configuration…
   vc::SettingsForm f;
   std::string conf;
   bool applying = false;
@@ -726,8 +752,9 @@ struct SettingsUi {
 std::shared_ptr<SettingsUi> g_settings;
 
 void settings_buttons(SettingsUi& ui, bool on) {
-  for (int r : {kResponseNames, kResponseDiag, int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
+  for (int r : {int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
     gtk_dialog_set_response_sensitive(GTK_DIALOG(ui.d), r, on);
+  for (GtkWidget* b : ui.more) gtk_widget_set_sensitive(b, on);
 }
 
 void on_settings_response(GtkDialog*, int response, gpointer) {
@@ -737,6 +764,7 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
     gtk_widget_destroy(ui->d);
     if (response == kResponseNames) open_channel_names();
     if (response == kResponseDiag) open_diagnostics();
+    if (response == kResponseConfig) open_config_editor();
     return;
   }
   vc::SettingsForm& f = ui->f;
@@ -752,6 +780,16 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
   f.tx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui->txl))));
   f.local_clock = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->clock)) == 1;
   f.master_capable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->master));
+  f.remote_access = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->remote));
+  f.remote_password = gtk_entry_get_text(GTK_ENTRY(ui->password));
+  const std::string problem = vc::remote_access_problem(f);
+  if (!problem.empty()) {
+    char* m = g_markup_printf_escaped("<span foreground='#D2553F'>%s</span>", problem.c_str());
+    gtk_label_set_markup(GTK_LABEL(ui->err), m);
+    g_free(m);
+    gtk_widget_grab_focus(ui->password);
+    return;
+  }
   gtk_label_set_text(GTK_LABEL(ui->err), "Applying…");
   ui->applying = true;
   settings_buttons(*ui, false);
@@ -789,7 +827,7 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
 
   GtkWidget* d = ui->d = gtk_dialog_new_with_buttons(
       "Virgil Settings", parent_window(), GtkDialogFlags(GTK_DIALOG_MODAL | GTK_DIALOG_DESTROY_WITH_PARENT),
-      "_Dropouts and diagnostics…", kResponseDiag, "Channel _names…", kResponseNames, "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
+      "_Cancel", GTK_RESPONSE_CANCEL, "_Apply", GTK_RESPONSE_APPLY, nullptr);
   gtk_dialog_set_default_response(GTK_DIALOG(d), GTK_RESPONSE_APPLY);
   GtkWidget* grid = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(grid), 8);
@@ -860,6 +898,70 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
       gtk_check_button_new_with_label("Become clock leader when no Dante device provides one");
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(master), f.master_capable);
   gtk_grid_attach(GTK_GRID(grid), master, 0, row++, 2, 1);
+
+  // The web control panel from other computers (only this computer may change it).
+  heading("Remote access");
+  GtkWidget* remote = ui->remote =
+      gtk_check_button_new_with_label("Allow remote access from other computers (web browser)");
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(remote), f.remote_access);
+  gtk_grid_attach(GTK_GRID(grid), remote, 0, row++, 2, 1);
+  GtkWidget* password = ui->password = gtk_entry_new();
+  gtk_entry_set_visibility(GTK_ENTRY(password), FALSE);
+  gtk_entry_set_input_purpose(GTK_ENTRY(password), GTK_INPUT_PURPOSE_PASSWORD);
+  gtk_entry_set_placeholder_text(GTK_ENTRY(password), "at least 8 characters");
+  gtk_entry_set_text(GTK_ENTRY(password), f.remote_password.c_str());
+  gtk_entry_set_activates_default(GTK_ENTRY(password), TRUE);
+  gtk_widget_set_sensitive(password, f.remote_access);
+  GtkWidget* password_label = label("Password:");
+  gtk_widget_set_sensitive(password_label, f.remote_access);
+  g_object_set_data(G_OBJECT(remote), "vg-password-label", password_label);
+  g_signal_connect(remote, "toggled", G_CALLBACK(+[](GtkToggleButton* b, gpointer entry) {
+                     const bool on = gtk_toggle_button_get_active(b);
+                     gtk_widget_set_sensitive(GTK_WIDGET(entry), on);
+                     gtk_widget_set_sensitive(GTK_WIDGET(g_object_get_data(G_OBJECT(b), "vg-password-label")), on);
+                   }),
+                   password);
+  gtk_grid_attach(GTK_GRID(grid), password_label, 0, row, 1, 1);
+  gtk_grid_attach(GTK_GRID(grid), password, 1, row++, 1, 1);
+  RemoteInfo ri;
+  {
+    std::lock_guard<std::mutex> l(g_mutex);
+    ri = g_remote;
+  }
+  if (ri.listening) {
+    std::string text = "Open from another computer:";
+    for (const auto& u : ri.urls) text += "\n" + u;
+    GtkWidget* urls = gtk_label_new(text.c_str());
+    gtk_label_set_selectable(GTK_LABEL(urls), TRUE);
+    gtk_widget_set_can_focus(urls, FALSE);
+    gtk_label_set_xalign(GTK_LABEL(urls), 0);
+    gtk_grid_attach(GTK_GRID(grid), urls, 0, row++, 2, 1);
+    GtkWidget* plain = gtk_label_new("Plain HTTP: the password crosses the network unencrypted.");
+    gtk_label_set_line_wrap(GTK_LABEL(plain), TRUE);
+    gtk_label_set_max_width_chars(GTK_LABEL(plain), 60);
+    gtk_label_set_xalign(GTK_LABEL(plain), 0);
+    gtk_style_context_add_class(gtk_widget_get_style_context(plain), "dim-label");
+    gtk_grid_attach(GTK_GRID(grid), plain, 0, row++, 2, 1);
+  }
+
+  // The other windows (they close this dialog, which is modal, and open on their own).
+  GtkWidget* more = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
+  gtk_widget_set_margin_top(more, 8);
+  const std::pair<const char*, int> more_buttons[] = {{"_Dropouts and diagnostics…", kResponseDiag},
+                                                      {"Channel _names…", kResponseNames},
+                                                      {"_Edit configuration…", kResponseConfig}};
+  for (const auto& mb : more_buttons) {
+    GtkWidget* b = gtk_button_new_with_mnemonic(mb.first);
+    g_object_set_data(G_OBJECT(b), "vg-response", GINT_TO_POINTER(mb.second));
+    g_signal_connect(b, "clicked", G_CALLBACK(+[](GtkButton* btn, gpointer dialog) {
+                       gtk_dialog_response(GTK_DIALOG(dialog),
+                                           GPOINTER_TO_INT(g_object_get_data(G_OBJECT(btn), "vg-response")));
+                     }),
+                     d);
+    gtk_box_pack_start(GTK_BOX(more), b, FALSE, FALSE, 0);
+    ui->more.push_back(b);
+  }
+  gtk_grid_attach(GTK_GRID(grid), more, 0, row++, 2, 1);
 
   GtkWidget* err = ui->err = gtk_label_new("");
   gtk_label_set_line_wrap(GTK_LABEL(err), TRUE);
@@ -937,7 +1039,8 @@ void build_menu() {
   gtk_menu_shell_append(GTK_MENU_SHELL(g_menu), g_run_item);
   menu_sep();
   menu_item("Dropouts and diagnostics…", open_diagnostics);
-  menu_item("Open control panel in browser", open_browser);
+  menu_item("Channel names…", open_channel_names);
+  menu_item("Edit configuration…", open_config_editor);
   menu_item("Show log", show_log);
   g_autostart_item = gtk_check_menu_item_new_with_label("Start at login");
   gtk_check_menu_item_set_active(GTK_CHECK_MENU_ITEM(g_autostart_item), autostart_enabled());
@@ -954,7 +1057,7 @@ void build_menu() {
   // Right click in the window (the only menu when there is no tray icon).
   g_context_menu = gtk_menu_new();
   menu_item(g_context_menu, "Show log", show_log);
-  menu_item(g_context_menu, "Open control panel in browser", open_browser);
+  menu_item(g_context_menu, "Dropouts and diagnostics…", open_diagnostics);
   menu_item(g_context_menu, "About Virgil", show_about);
   gtk_menu_shell_append(GTK_MENU_SHELL(g_context_menu), gtk_separator_menu_item_new());
   menu_item(g_context_menu, "Quit Virgil Control", quit_app);
