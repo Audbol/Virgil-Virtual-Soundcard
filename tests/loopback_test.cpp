@@ -30,7 +30,8 @@ static void loopback(uint32_t C) {
 #if defined(_WIN32)
   c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C);
 #else
-  c.shm_name = std::string(kDefaultShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C);
+  // macOS caps shared memory names at 31 characters: keep it short.
+  c.shm_name = "/vgl-" + std::to_string(process_id()) + "-" + std::to_string(C);
 #endif
   c.clock = "free";
   c.lock_memory = false;
