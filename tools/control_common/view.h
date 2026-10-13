@@ -40,7 +40,7 @@ class Canvas {
   virtual void logo(const Rect& r) = 0;
 };
 
-enum class Action { None, Settings, Restart, StartService, Diagnostics, Stop, Start };
+enum class Action { None, Settings, Restart, StartService, Diagnostics, Stop, Start, DesktopAudio };
 
 class StatusView {
  public:
@@ -58,6 +58,8 @@ class StatusView {
   float width() const;
   float height() const;
   const Status& status() const { return status_; }
+  // A "Desktop audio…" button in the footer (apps that have desktop audio).
+  void set_desktop_audio(bool on) { desktop_audio_ = on; }
 
  private:
   struct Meter {
@@ -80,6 +82,7 @@ class StatusView {
   uint64_t now_ = 0, last_ = 0;
   std::vector<Button> buttons_;
   int hover_ = -1, down_ = -1;
+  bool desktop_audio_ = false;
 };
 
 // One-line summary for a tray tooltip.

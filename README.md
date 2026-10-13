@@ -187,7 +187,9 @@ how many dropouts the last hour had, and *Dropouts…*, *Settings…* and
 - **Linux and Raspberry Pi:** a GTK app with a tray icon (AppIndicator /
   StatusNotifier, or the classic system tray) that starts at login on desktop
   systems; *Show log* displays the service journal. Without a tray, closing
-  the window quits it.
+  the window quits it. *Desktop audio…* (window footer and tray menu) brings
+  the desktop's sound to Dante, as on Windows (see below);
+  `virgil-control --desktop-audio` opens that window directly.
 
 Closing the window keeps the icon; Virgil itself (the service) runs either
 way, and you are notified when the service stops or the Dante clock is lost.
@@ -340,6 +342,43 @@ with audio sessions; `desktop-audio-probe capture --app chrome.exe --seconds 5`
 `capture.wav` and prints packet statistics and the device clock's offset from
 the PC clock.
 
+### Desktop audio (Linux)
+
+The same feature on Linux desktops (Virgil Control for Linux, *Desktop
+audio…* in the window footer and tray menu): sound from apps to Virgil's
+transmit channels, and receive channels to an output device, with no driver
+and no virtual cable. It uses the PulseAudio client library, which talks to
+PulseAudio and to PipeWire (`pipewire-pulse`, the default on current Ubuntu,
+Mint, Fedora and Debian desktops). The library is loaded when desktop audio
+is first used, so the package does not depend on it; without it the window
+says that desktop audio needs PulseAudio or PipeWire.
+
+- **Output device:** everything a device (a PulseAudio / PipeWire *sink*)
+  plays, recorded from its monitor. *Default output device* follows the
+  output chosen in the sound settings.
+- **App:** every sound stream of one app, by its name as the sound settings
+  show it (`Firefox`, `Spotify`) or its program file (`firefox`). The list
+  shows the apps that have a stream open now; streams the app opens later
+  (the next video, the next track) are picked up as they appear.
+- **All apps except Virgil:** every app's streams, without Virgil Control's
+  own (and without what plays on a sink whose name contains "virgil").
+
+The rest is as on Windows: gain, mute, mono, a level meter and status per
+source; receive channels to a device with a warning when that device is also
+captured; one playback slot named *Desktop audio*; roughly 60 ms of latency
+per direction (measured: about 117 ms from a device through Virgil and back
+out to another device, Virgil's own 14 ms not counted); drift between the
+sound hardware and the Dante clock followed by the adaptive resampler. To
+hear captured apps only through Dante, play them on a virtual output:
+`pactl load-module module-null-sink sink_name=dante sink_properties=device.description=Dante`
+(add it to `~/.config/pulse/default.pa`, or for PipeWire to a
+`pipewire-pulse.conf.d` file, to keep it). Settings are per user in
+`~/.config/virgil/desktop-audio.conf` (`$XDG_CONFIG_HOME`), the same format as
+on Windows, with sink names as device ids and app names for `app`.
+
+`VIRGIL_DA_DEBUG=1` in Virgil Control's environment adds the resampler
+bridges' fill level and counters to the status texts.
+
 ## Building
 
 Requirements: CMake ≥ 3.16, a C++17 compiler and a Rust toolchain (stable,
@@ -427,6 +466,7 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 | Raspberry Pi (arm64) | In use with REAPER on a Raspberry Pi (64-bit Raspberry Pi OS); unit and loopback tests also run under QEMU in CI |
 | CoreAudio driver, macOS `.pkg`, Virgil Control for macOS | Built by CI on macOS; **not yet run on a real Mac** |
 | Virgil Control (Linux / Pi) | Run under X11 with a live daemon: meters, settings dialog and apply |
+| Desktop audio (Linux) | `tests/desktop_audio_e2e.sh`: a private PulseAudio with null sinks and a free-running `virgild`; a tone from the default device, from one named app and from all apps arrives on the mapped transmit channels only; a round trip device → Virgil → receive channels → another device measures the latency (about 117 ms both ways); with Virgil's clock 150 ppm off, both bridges follow it. The engine itself: `ctest` (`desktop_audio`, against a fake sound system) |
 
 Known limitations:
 

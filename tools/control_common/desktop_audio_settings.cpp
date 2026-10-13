@@ -232,7 +232,7 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
 
 std::string format_desktop_audio(const DesktopAudioSettings& s) {
   std::string o;
-  o += "# Virgil desktop audio (Virgil Control): Windows audio to Dante and back.\n";
+  o += "# Virgil desktop audio (Virgil Control): this computer's audio to Dante and back.\n";
   o += "# Edited by Virgil Control's Desktop audio window; see README.md.\n\n";
   o += "[desktop-audio]\n";
   o += std::string("enabled = ") + (s.enabled ? "true" : "false") + "\n";

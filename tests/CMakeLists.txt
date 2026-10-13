@@ -8,6 +8,22 @@ target_include_directories(virgil_unit_tests PRIVATE ${CMAKE_SOURCE_DIR}/src/dae
 target_link_libraries(virgil_unit_tests PRIVATE virgil_net)
 add_test(NAME unit COMMAND virgil_unit_tests)
 
+# Desktop audio engine (Linux / macOS engine; built everywhere) against a fake
+# sound system and an in-process Virgil engine.
+add_executable(virgil_desktop_audio_test desktop_audio_test.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/desktop_audio_engine.cpp
+               ${CMAKE_SOURCE_DIR}/tools/control_common/desktop_audio_settings.cpp)
+target_include_directories(virgil_desktop_audio_test PRIVATE ${CMAKE_SOURCE_DIR}/tools/control_common)
+target_link_libraries(virgil_desktop_audio_test PRIVATE virgil_net)
+add_test(NAME desktop_audio COMMAND virgil_desktop_audio_test)
+
+# Linux: desktop audio with a real PulseAudio / PipeWire server
+# (tests/desktop_audio_e2e.sh; needs a sound server, so not run by ctest).
+if(TARGET virgil_desktop_audio AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  add_executable(virgil_desktop_audio_e2e desktop_audio_e2e.cpp)
+  target_link_libraries(virgil_desktop_audio_e2e PRIVATE virgil_desktop_audio virgil_net)
+endif()
+
 add_executable(virgil_loopback_test loopback_test.cpp)
 target_link_libraries(virgil_loopback_test PRIVATE virgil_net)
 add_test(NAME loopback COMMAND virgil_loopback_test)

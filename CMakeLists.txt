@@ -87,6 +87,21 @@ target_link_libraries(virgild PRIVATE virgil_net)
 add_executable(virgil-latency-probe tools/virgil_latency_probe.cpp)
 target_link_libraries(virgil-latency-probe PRIVATE virgil_client)
 
+# Desktop audio for Virgil Control on Linux and macOS (Windows has its own,
+# tools/control_win/desktop_audio.cpp): the shared engine, plus the platform
+# backend. Linux: PulseAudio / PipeWire, loaded at run time (no build or
+# package dependency).
+if(NOT WIN32)
+  set(VIRGIL_DESKTOP_AUDIO_SOURCES tools/control_common/desktop_audio_engine.cpp
+                                   tools/control_common/desktop_audio_settings.cpp)
+  if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    list(APPEND VIRGIL_DESKTOP_AUDIO_SOURCES tools/control_linux/desktop_audio_pulse.cpp)
+  endif()
+  add_library(virgil_desktop_audio STATIC ${VIRGIL_DESKTOP_AUDIO_SOURCES})
+  target_include_directories(virgil_desktop_audio PUBLIC tools/control_common)
+  target_link_libraries(virgil_desktop_audio PUBLIC virgil_client ${CMAKE_DL_LIBS})
+endif()
+
 # Virgil Control: opens the control panel (starts a portable virgild if needed).
 if(APPLE)
   # Native menu bar app (AppKit) with the same window as on Windows/Linux.
@@ -135,11 +150,12 @@ else()
     pkg_check_modules(GTK3 IMPORTED_TARGET gtk+-3.0)
   endif()
   if(GTK3_FOUND)
-    add_executable(virgil-control tools/control_linux/main.cpp tools/control_common/api.cpp
-                   tools/control_common/settings_model.cpp tools/control_common/view.cpp)
-    target_include_directories(virgil-control PRIVATE tools/control_common)
+    add_executable(virgil-control tools/control_linux/main.cpp tools/control_linux/desktop_audio_gtk.cpp
+                   tools/control_common/api.cpp tools/control_common/settings_model.cpp
+                   tools/control_common/view.cpp)
+    target_include_directories(virgil-control PRIVATE tools/control_common tools/control_linux)
     target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
-    target_link_libraries(virgil-control PRIVATE PkgConfig::GTK3 ${CMAKE_DL_LIBS})
+    target_link_libraries(virgil-control PRIVATE PkgConfig::GTK3 virgil_desktop_audio ${CMAKE_DL_LIBS})
   else()
     message(STATUS "GTK 3 not found: virgil-control opens the browser control panel")
     add_executable(virgil-control tools/virgil_control.cpp)

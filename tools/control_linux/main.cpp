@@ -4,6 +4,7 @@
 //
 //   virgil-control          open the window (and the tray icon)
 //   virgil-control --tray   start in the tray only (used at login)
+//   virgil-control --desktop-audio   open the Desktop audio window
 //
 // The tray icon uses AppIndicator (StatusNotifierItem, loaded at run time, so
 // the package needs no extra dependency) and falls back to the classic
@@ -34,6 +35,8 @@
 #include <vector>
 
 #include "api.h"
+#include "desktop_audio_engine.h"
+#include "desktop_audio_gtk.h"
 #include "settings_model.h"
 #include "view.h"
 
@@ -60,6 +63,7 @@ std::atomic<bool> g_quit{false};
 bool g_started = false;
 bool g_have_tray = false;
 bool g_start_hidden = false;
+bool g_open_desktop = false;  // --desktop-audio
 GdkPixbuf* g_logo;
 GtkWidget* g_autostart_item;
 GtkWidget* g_settings_item;
@@ -67,6 +71,8 @@ GtkWidget* g_restart_item;
 GtkWidget* g_run_item;  // Stop Virgil / Start Virgil
 GtkWidget* g_context_menu;
 int g_busy = 0;  // service requests in flight (controls are disabled meanwhile)
+// Desktop audio (this computer's apps <-> Dante), running for as long as this app.
+std::unique_ptr<desk::Engine> g_desktop;
 
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -327,6 +333,7 @@ void open_diagnostics();
 void stop_virgil();
 void start_virgil();
 void show_log();
+void show_desktop_audio();
 
 gboolean on_motion(GtkWidget*, GdkEventMotion* e, gpointer) {
   if (g_view.hover(float(e->x), float(e->y))) {
@@ -361,6 +368,7 @@ gboolean on_release(GtkWidget*, GdkEventButton* e, gpointer) {
   if (a == vc::Action::Diagnostics) open_diagnostics();
   if (a == vc::Action::Stop) stop_virgil();
   if (a == vc::Action::Start) start_virgil();
+  if (a == vc::Action::DesktopAudio) show_desktop_audio();
   return TRUE;
 }
 
@@ -635,6 +643,22 @@ void open_browser() { open_page(""); }
 void open_diagnostics() { open_page("#diagnostics"); }
 void open_channel_names() { open_page("#channels"); }
 
+// Virgil's channels as the service reports them, for the Desktop audio window.
+dagtk::ChannelInfo desktop_channels() {
+  std::lock_guard<std::mutex> l(g_mutex);
+  dagtk::ChannelInfo c;
+  if (!g_latest.reachable) return c;
+  c.tx = g_latest.tx;
+  c.rx = g_latest.rx;
+  c.tx_names = g_latest.tx_names;
+  c.rx_names = g_latest.rx_names;
+  return c;
+}
+
+void show_desktop_audio() {
+  if (g_desktop) dagtk::show(parent_window(), g_logo, *g_desktop, desktop_channels);
+}
+
 void show_about() {
   GtkWidget* d = gtk_about_dialog_new();
   GtkAboutDialog* a = GTK_ABOUT_DIALOG(d);
@@ -906,6 +930,7 @@ void build_menu() {
   g_menu = gtk_menu_new();
   menu_item("Open Virgil", show_window);
   g_settings_item = menu_item("Settings…", show_settings);
+  menu_item("Desktop audio…", show_desktop_audio);
   g_restart_item = menu_item("Restart audio engine", restart_engine);
   g_run_item = gtk_menu_item_new_with_label("Stop Virgil");
   g_signal_connect(g_run_item, "activate", G_CALLBACK(+[](GtkMenuItem*, gpointer) { toggle_running(); }), nullptr);
@@ -1012,6 +1037,11 @@ void on_activate(GtkApplication*, gpointer) {
   g_started = true;
   g_object_set(gtk_settings_get_default(), "gtk-application-prefer-dark-theme", TRUE, nullptr);
   g_logo = load_logo();
+  // Desktop audio runs in this app (it starts at login, in the user's
+  // session, where the sound server is).
+  g_desktop.reset(new desk::Engine(desk::make_system_backend()));
+  g_desktop->start(desk::load_settings(desk::settings_path(), nullptr));
+  g_view.set_desktop_audio(true);
   build_window();
   build_menu();
   g_have_tray = try_appindicator() || try_status_icon();
@@ -1027,14 +1057,16 @@ void on_activate(GtkApplication*, gpointer) {
                    });
   }
   if (!(g_start_hidden && g_have_tray)) show_window();
+  if (g_open_desktop) show_desktop_audio();
 }
 
 int on_command_line(GApplication* app, GApplicationCommandLine* cl, gpointer) {
   int argc = 0;
   gchar** argv = g_application_command_line_get_arguments(cl, &argc);
-  bool tray = false;
+  bool tray = false, desktop = false;
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "--tray")) tray = true;
+    if (!std::strcmp(argv[i], "--desktop-audio")) desktop = true;
     // The poll thread reads the port: only the first launch sets it.
     if (!std::strcmp(argv[i], "--port") && i + 1 < argc) {
       const unsigned p = unsigned(std::atoi(argv[++i]));
@@ -1043,6 +1075,11 @@ int on_command_line(GApplication* app, GApplicationCommandLine* cl, gpointer) {
   }
   g_strfreev(argv);
   if (!g_started) g_start_hidden = tray;
+  if (desktop) {
+    if (g_started) show_desktop_audio();  // already running: just the window
+    else g_open_desktop = true;
+    if (g_started) return 0;
+  }
   if (g_started && tray) return 0;  // already running; --tray from login: nothing to do
   g_application_activate(app);
   return 0;
@@ -1053,8 +1090,10 @@ int on_command_line(GApplication* app, GApplicationCommandLine* cl, gpointer) {
 int main(int argc, char** argv) {
   for (int i = 1; i < argc; ++i) {
     if (!std::strcmp(argv[i], "-h") || !std::strcmp(argv[i], "--help")) {
-      std::printf("usage: virgil-control [--tray] [--port N]\n"
-                  "Status window, level meters and settings for the Virgil virtual soundcard.\n");
+      std::printf("usage: virgil-control [--tray] [--desktop-audio] [--port N]\n"
+                  "Status window, level meters and settings for the Virgil virtual soundcard.\n"
+                  "  --tray            start in the tray only (used at login)\n"
+                  "  --desktop-audio   open the Desktop audio window\n");
       return 0;
     }
     if (!std::strcmp(argv[i], "--version")) {
@@ -1066,6 +1105,7 @@ int main(int argc, char** argv) {
   g_signal_connect(g_app, "activate", G_CALLBACK(on_activate), nullptr);
   g_signal_connect(g_app, "command-line", G_CALLBACK(on_command_line), nullptr);
   const int rc = g_application_run(G_APPLICATION(g_app), argc, argv);
+  if (g_desktop) g_desktop->shutdown();  // releases its Virgil playback slot
   // The poll thread (and any request worker) may still be running: leave
   // without static destructors, as the macOS app does.
   g_quit = true;

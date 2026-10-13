@@ -1,14 +1,18 @@
-// Desktop audio settings (Virgil Control for Windows): which Windows audio
+// Desktop audio settings (Virgil Control): which of the computer's audio
 // goes to which Virgil transmit channels, and which receive channels play on
-// a Windows output device. Stored per user in an INI file in the style of
-// virgil.conf (%APPDATA%\Virgil\desktop-audio.conf):
+// an output device. Stored per user in an INI file in the style of
+// virgil.conf (Windows %APPDATA%\Virgil\desktop-audio.conf, Linux
+// ~/.config/virgil/desktop-audio.conf, macOS ~/Library/Application
+// Support/Virgil/desktop-audio.conf). The same format everywhere; only what
+// identifies a device or an app differs (Windows: endpoint ids and exe
+// names; Linux: PulseAudio / PipeWire sink names and app names):
 //
 //   [desktop-audio]
 //   enabled = true
 //
 //   [source]                 # one section per source
 //   type = device            # device: everything an output device plays
-//   device = default         #   default (follows Windows) or an endpoint id
+//   device = default         #   default (follows the system) or a device id
 //   name = "Speakers"        #   the device's name when it was chosen
 //   channel = 1              # first Virgil transmit channel (1-based)
 //   mono = false             # true: one channel, left and right mixed
@@ -16,14 +20,14 @@
 //   mute = false
 //
 //   [source]
-//   type = app               # app: one program (and its child processes)
-//   app = chrome.exe         #   by executable name
+//   type = app               # app: one program (Windows: and its child processes)
+//   app = chrome.exe         #   Windows: executable name; Linux: app name ("Firefox") or program
 //   channel = 3
 //
 //   [source]
 //   type = all-apps          # every program except Virgil Control itself
 //
-//   [output]                 # Dante receive channels -> a Windows device
+//   [output]                 # Dante receive channels -> an output device
 //   enabled = false
 //   device = default
 //   channel = 1              # first receive channel (a pair unless mono)
@@ -44,9 +48,9 @@ constexpr double kMinGainDb = -60, kMaxGainDb = 12;
 struct DesktopAudioSource {
   enum Type { kDevice, kApp, kAllApps };
   Type type = kDevice;
-  std::string device = "default";  // kDevice: "default" or an endpoint id (UTF-8)
+  std::string device = "default";  // kDevice: "default" or a device id (UTF-8)
   std::string name;                // kDevice: friendly name, for display while unplugged
-  std::string app;                 // kApp: executable name, e.g. chrome.exe
+  std::string app;                 // kApp: chrome.exe (Windows), Firefox (Linux)
   unsigned channel = 1;            // first Virgil transmit channel, 1-based
   bool mono = false;
   double gain_db = 0;
