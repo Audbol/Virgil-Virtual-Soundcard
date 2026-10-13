@@ -256,7 +256,10 @@ struct Virgil {
       while (sim_run) {
         wait_ms(1);
         const uint64_t media = e->header()->now_frames.load();
-        if (!done) done = media;
+        if (!media) continue;  // no tick yet: 0 is not a media time
+        // Start at the media clock, and never fall more than a ring behind
+        // (from 0, or after a stall, this would loop over billions of frames).
+        if (done + c.ring_frames / 2 < media) done = media;
         for (; done < media + 2400; ++done)
           for (uint32_t ch = 0; ch < 4; ++ch)
             rx[size_t(done & dmask) * 4 + ch] = int32_t(std::lround(double(rx_dc[ch]) * 2147483647.0));
@@ -298,10 +301,12 @@ std::string test_shm(const char* tag) {
 #endif
 }
 
-// Waits up to ms for cond.
+// Waits for cond, up to 4x the `ms` it normally needs: a loaded CI machine
+// (macOS runners especially) can delay the fake sound system's threads, and
+// the bridges then take longer to settle. Returns as soon as cond holds.
 template <class F>
 bool eventually(int ms, F&& cond) {
-  for (int64_t until = virgil::mono_ns() + int64_t(ms) * 1000000; virgil::mono_ns() < until; wait_ms(20))
+  for (int64_t until = virgil::mono_ns() + int64_t(ms) * 4 * 1000000; virgil::mono_ns() < until; wait_ms(20))
     if (cond()) return true;
   return cond();
 }

@@ -62,6 +62,7 @@ static void loopback(uint32_t C) {
     while (sim_run) {
       wait_ms(1);
       const uint64_t media = e.header()->now_frames.load();
+      if (!media) continue;  // no tick yet: 0 is not a media time
       if (done == 0) done = media - 64;
       // Inferno sends a frame L after its media time; the simulator forwards
       // as soon as the mixer is surely done with it (two ticks) so a slow CI

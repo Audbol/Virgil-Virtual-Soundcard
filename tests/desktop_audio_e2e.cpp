@@ -322,6 +322,7 @@ int loop_mode(const Args& a) {
     while (sim_run) {
       wait_ms(1);
       const uint64_t media = ve.header()->now_frames.load();
+      if (!media) continue;  // no tick yet: 0 is not a media time
       if (done == 0) done = media - 64;
       const uint64_t lag = std::min<uint64_t>(L, 2 * c.period_frames());
       const uint64_t sent_until = media > lag ? media - lag : 0;
