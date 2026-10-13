@@ -1,5 +1,6 @@
-// Virgil Control for Windows: tray icon, status window with level meters, and
-// a settings dialog. It talks to virgild over its local control API
+// Virgil Control for Windows: tray icon, status window with level meters, a
+// settings dialog, and the Dropouts and diagnostics, Channel names and Edit
+// configuration windows. It talks to virgild over its local control API
 // (127.0.0.1:8480) and starts a portable virgild next to it if no service runs.
 //
 //   virgil-control.exe          open the window (and the tray icon)
@@ -15,6 +16,7 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
+#include <commdlg.h>
 #include <d2d1.h>
 #include <dwmapi.h>
 #include <dwrite.h>
@@ -28,6 +30,7 @@
 #include <atomic>
 #include <cstdarg>
 #include <cmath>
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -36,8 +39,10 @@
 #include <vector>
 
 #include "api.h"
+#include "config_model.h"
 #include "desktop_audio.h"
 #include "desktop_audio_ui.h"
+#include "diagnostics_model.h"
 #include "resource.h"
 #include "settings_model.h"
 
@@ -96,11 +101,15 @@ const unsigned kBg = 0x15171A, kPanel = 0x1B1E22, kLine = 0x2A2E34, kText = 0xE9
 const wchar_t* kWindowClass = L"VirgilControlWindow";
 const UINT WM_APP_STATUS = WM_APP + 1, WM_APP_TRAY = WM_APP + 2, WM_APP_SHOW = WM_APP + 3,
            WM_APP_DONE = WM_APP + 4,   // a worker's request finished (lParam: Job*)
-           WM_APP_SAVED = WM_APP + 5;  // to the settings dialog: its POST finished (lParam: Job*)
+           WM_APP_SAVED = WM_APP + 5,  // to the settings dialog: its POST finished (lParam: Job*)
+           // Results of the panels' requests (lParam: the result, owned by the receiver).
+           WM_APP_DIAG = WM_APP + 20, WM_APP_REPORT = WM_APP + 21, WM_APP_CLEARED = WM_APP + 22,
+           WM_APP_NAMES = WM_APP + 23, WM_APP_NAMES_SAVED = WM_APP + 24, WM_APP_CONF = WM_APP + 25,
+           WM_APP_CONF_SAVED = WM_APP + 26;
 const UINT kTrayId = 1;
 enum {
   ID_OPEN = 100, ID_SETTINGS, ID_RESTART, ID_LOG, ID_AUTOSTART, ID_QUIT, ID_ABOUT, ID_DIAG, ID_STOP, ID_START,
-  ID_BROWSER, ID_DESKTOP
+  ID_DESKTOP, ID_NAMES, ID_EDITCONF
 };
 
 HINSTANCE g_inst;
@@ -117,6 +126,13 @@ HWND g_settings_dlg;         // the open settings dialog, if any (UI thread only
 int g_pending = 0;           // command id whose request is in flight, 0 = none (UI thread only)
 // Desktop audio (Windows apps <-> Dante), running for as long as this app.
 std::unique_ptr<da::Engine> g_desktop;
+// The modeless windows, one each (UI thread only); the message loop hands
+// them their keyboard input (IsDialogMessage).
+HWND g_diag_dlg, g_names_dlg, g_conf_dlg;
+void show_diagnostics();
+void show_channel_names();
+void show_config_editor();
+UINT dpi_for(HWND h);
 
 // Meter display state (UI thread only).
 struct MeterState {
@@ -592,14 +608,14 @@ enum class JobKind { Stop, Start, Restart, LoadSettings, SaveSettings };
 struct Job {
   JobKind kind;
   std::string body;      // SaveSettings: the configuration to POST
-  vc::HttpResult r, r2;  // LoadSettings: /api/config and /api/interfaces
+  vc::HttpResult r, r2, r3;  // LoadSettings: /api/config, /api/interfaces and /api/status
 };
 
 bool run_job(int id, JobKind kind, std::string body = std::string()) {
   if (busy()) return false;
   g_pending = id;
   InvalidateRect(g_hwnd, nullptr, FALSE);
-  Job* job = new Job{kind, std::move(body), {}, {}};
+  Job* job = new Job{kind, std::move(body), {}, {}, {}};
   const HWND target = g_hwnd;
   const unsigned port = g_port;
   std::thread([job, target, port] {
@@ -610,6 +626,7 @@ bool run_job(int id, JobKind kind, std::string body = std::string()) {
       case JobKind::LoadSettings:
         job->r = vc::http(port, "GET", "/api/config");
         if (job->r.status == 200) job->r2 = vc::http(port, "GET", "/api/interfaces");
+        if (job->r.status == 200) job->r3 = vc::http(port, "GET", "/api/status");  // remote access URLs
         break;
       case JobKind::SaveSettings: job->r = vc::http(port, "POST", "/api/config", job->body); break;
     }
@@ -750,12 +767,6 @@ void hide_window() {
   }
 }
 
-// Dropout details and the channel name editor live in the control panel.
-void open_page(const wchar_t* anchor) {
-  const std::wstring url = L"http://127.0.0.1:" + std::to_wstring(g_port) + L"/" + anchor;
-  ShellExecuteW(g_hwnd, L"open", url.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
-}
-
 void tray_menu() {
   vc::Status s;
   {
@@ -779,7 +790,7 @@ void tray_menu() {
     AppendMenuW(m, MF_STRING | req, stopped ? ID_START : ID_STOP, stopped ? L"Start Virgil" : L"Stop Virgil");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_DIAG, L"Dropouts and diagnostics\u2026");
-  AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_BROWSER, L"Open control panel in browser");
+  AppendMenuW(m, MF_STRING | (s.reachable ? 0 : MF_GRAYED), ID_EDITCONF, L"Edit configuration\u2026");
   AppendMenuW(m, MF_STRING, ID_LOG, L"Open log");
   AppendMenuW(m, MF_SEPARATOR, 0, nullptr);
   AppendMenuW(m, MF_STRING | (autostart_enabled() ? MF_CHECKED : 0), ID_AUTOSTART, L"Start with Windows");
@@ -815,13 +826,14 @@ void command(int id) {
   switch (id) {
     case ID_OPEN: show_window(); break;
     case ID_SETTINGS: run_job(ID_SETTINGS, JobKind::LoadSettings); break;  // the dialog opens when loaded
-    case ID_DIAG: open_page(L"#diagnostics"); break;
+    case ID_DIAG: show_diagnostics(); break;
+    case ID_NAMES: show_channel_names(); break;
+    case ID_EDITCONF: show_config_editor(); break;
     case ID_DESKTOP:
       // Modal; a second request brings the open window up.
       if (g_desktop) da::show_dialog(g_inst, IsWindowVisible(g_hwnd) ? g_hwnd : nullptr, g_icon_small, *g_desktop,
                                      desktop_channels);
       break;
-    case ID_BROWSER: open_page(L""); break;
     case ID_RESTART: restart_engine(); break;
     case ID_STOP: {
       static bool asking = false;  // the tray menu stays usable while the question is up
@@ -937,6 +949,9 @@ struct SettingsData {
   std::string conf;     // /api/config as loaded; the form is applied onto it
   vc::SettingsForm form;
   bool saving = false;  // POST in flight
+  // From /api/status "remote": the web panel listens for other computers, at these URLs.
+  bool remote_listening = false;
+  std::vector<std::string> remote_urls;
 };
 
 SettingsData* settings_data(HWND d) { return reinterpret_cast<SettingsData*>(GetWindowLongPtrW(d, DWLP_USER)); }
@@ -976,6 +991,22 @@ bool read_ms(HWND d, int id, std::string* out) {
 
 void settings_error(HWND d, const std::wstring& msg) { SetDlgItemTextW(d, IDC_ERR, msg.c_str()); }
 
+// The password field follows the checkbox; below them, where other computers
+// find the panel while it listens, and the warning that goes with it.
+void settings_remote_update(HWND d, const SettingsData& data) {
+  const bool on = IsDlgButtonChecked(d, IDC_REMOTE) == BST_CHECKED;
+  EnableWindow(GetDlgItem(d, IDC_REMOTE_PW), on);
+  std::wstring info;
+  if (data.remote_listening) {
+    std::wstring urls;
+    for (const std::string& u : data.remote_urls) urls += (urls.empty() ? L"" : L"   ") + widen(u);
+    info = urls.empty() ? L"Listening for other computers." : L"Open " + urls;
+  }
+  if (data.remote_listening || on)
+    info += (info.empty() ? L"" : L"\n") + std::wstring(L"Plain HTTP: the password crosses the network unencrypted.");
+  SetDlgItemTextW(d, IDC_REMOTE_INFO, info.c_str());
+}
+
 INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
   switch (msg) {
     case WM_INITDIALOG: {
@@ -1004,6 +1035,10 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       combo_add(d, IDC_CLOCK, L"Local clock only (testing)");
       SendDlgItemMessageW(d, IDC_CLOCK, CB_SETCURSEL, f.local_clock ? 1 : 0, 0);
       CheckDlgButton(d, IDC_MASTER, f.master_capable ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(d, IDC_REMOTE, f.remote_access ? BST_CHECKED : BST_UNCHECKED);
+      SendDlgItemMessageW(d, IDC_REMOTE_PW, EM_LIMITTEXT, 128, 0);
+      SetDlgItemTextW(d, IDC_REMOTE_PW, widen(f.remote_password).c_str());
+      settings_remote_update(d, data);
       std::string path;
       {
         std::lock_guard<std::mutex> l(g_mutex);
@@ -1038,14 +1073,15 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_COMMAND: {
       SettingsData* data = settings_data(d);
       if (!data) break;
-      if (LOWORD(wp) == IDC_NAMES) {  // the editor lives in the control panel
-        open_page(L"#channels");
-        EndDialog(d, 0);
+      // These windows save the configuration file themselves: the dialog
+      // closes first, so it never applies its (then stale) copy over theirs.
+      // show_settings opens the window the returned command names.
+      if (LOWORD(wp) == IDC_NAMES || LOWORD(wp) == IDC_DIAGBTN || LOWORD(wp) == IDC_EDITCONF) {
+        EndDialog(d, LOWORD(wp) == IDC_NAMES ? ID_NAMES : LOWORD(wp) == IDC_DIAGBTN ? ID_DIAG : ID_EDITCONF);
         return TRUE;
       }
-      if (LOWORD(wp) == IDC_DIAGBTN) {
-        open_page(L"#diagnostics");
-        EndDialog(d, 0);
+      if (LOWORD(wp) == IDC_REMOTE) {
+        settings_remote_update(d, *data);
         return TRUE;
       }
       if (LOWORD(wp) == IDCANCEL) {  // a POST in flight still completes; its result is dropped
@@ -1068,6 +1104,15 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         }
         f.local_clock = SendDlgItemMessageW(d, IDC_CLOCK, CB_GETCURSEL, 0, 0) == 1;
         f.master_capable = IsDlgButtonChecked(d, IDC_MASTER) == BST_CHECKED;
+        f.remote_access = IsDlgButtonChecked(d, IDC_REMOTE) == BST_CHECKED;
+        f.remote_password = narrow(get_text(d, IDC_REMOTE_PW));
+        const std::string remote_problem = vc::remote_access_problem(f);
+        if (!remote_problem.empty()) {
+          settings_error(d, widen(remote_problem));
+          EnableWindow(GetDlgItem(d, IDC_REMOTE_PW), TRUE);  // even with remote access off: let it be fixed
+          SetFocus(GetDlgItem(d, IDC_REMOTE_PW));
+          return TRUE;
+        }
         if (!run_job(ID_SETTINGS, JobKind::SaveSettings, vc::apply_settings(data->conf, f))) {
           settings_error(d, L"Virgil is busy with another request. Try again in a moment.");
           return TRUE;
@@ -1084,7 +1129,7 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // Opens the (modal) dialog with what LoadSettings fetched.
-void show_settings(const std::string& conf, const std::vector<vc::Interface>& ifaces) {
+void show_settings(const std::string& conf, const std::vector<vc::Interface>& ifaces, const std::string& status) {
   if (g_settings_dlg) {
     SetForegroundWindow(g_settings_dlg);
     return;
@@ -1095,9 +1140,1320 @@ void show_settings(const std::string& conf, const std::vector<vc::Interface>& if
   // An explicit 0 (direction off) is a valid setting; show it as such.
   if (vc::conf_get(conf, "device", "tx_channels") == "0") data.form.tx_channels = 0;
   if (vc::conf_get(conf, "device", "rx_channels") == "0") data.form.rx_channels = 0;
-  DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS), IsWindowVisible(g_hwnd) ? g_hwnd : nullptr,
-                  settings_proc, reinterpret_cast<LPARAM>(&data));
+  // vc::Status leaves out the "remote" block; read it here.
+  vc::Json j;
+  if (vc::parse_json(status, &j)) {
+    const vc::Json& remote = j["remote"];
+    data.remote_listening = remote["listening"].boolean();
+    const vc::Json& urls = remote["urls"];
+    for (size_t i = 0; i < urls.size(); ++i)
+      if (!urls[i].str().empty()) data.remote_urls.push_back(urls[i].str());
+  }
+  const INT_PTR r = DialogBoxParamW(g_inst, MAKEINTRESOURCEW(IDD_SETTINGS),
+                                    IsWindowVisible(g_hwnd) ? g_hwnd : nullptr, settings_proc,
+                                    reinterpret_cast<LPARAM>(&data));
   g_settings_dlg = nullptr;
+  if (r == ID_NAMES || r == ID_DIAG || r == ID_EDITCONF) command(int(r));
+}
+
+// ---- panels: shared helpers --------------------------------------------------------------
+//
+// Dropouts and diagnostics, Channel names and Edit configuration: modeless
+// dialogs in the style of the Settings and Desktop audio windows, one
+// instance each. Their requests run on worker threads (run_async) and come
+// back as messages, so a slow service never freezes them.
+
+const COLORREF kErrText = RGB(190, 40, 30), kOkText = RGB(30, 120, 50);
+enum StatusKind { kStatusPlain, kStatusError, kStatusOk };
+
+// Runs work(port, result) on a worker thread and posts the result to
+// `target` as `msg` (lParam: T*, which the receiver deletes). Dropped if the
+// window is gone by then.
+template <class T, class F>
+void run_async(HWND target, UINT msg, F work) {
+  const unsigned port = g_port;
+  std::thread([target, msg, port, work] {
+    std::unique_ptr<T> r(new T());
+    work(port, *r);
+    if (PostMessageW(target, msg, 0, reinterpret_cast<LPARAM>(r.get()))) r.release();
+  }).detach();
+}
+
+bool bring_up(HWND d) {
+  if (!d) return false;
+  ShowWindow(d, IsIconic(d) ? SW_RESTORE : SW_SHOW);
+  SetForegroundWindow(d);
+  return true;
+}
+
+// Keyboard input for the modeless windows (Tab, Enter, Esc).
+bool panel_dialog_message(MSG* m) {
+  for (HWND d : {g_diag_dlg, g_names_dlg, g_conf_dlg})
+    if (d && IsDialogMessageW(d, m)) return true;
+  return false;
+}
+
+int dlu_x(HWND d, int v) {
+  RECT r{0, 0, v, 0};
+  MapDialogRect(d, &r);
+  return r.right;
+}
+int dlu_y(HWND d, int v) {
+  RECT r{0, 0, 0, v};
+  MapDialogRect(d, &r);
+  return r.bottom;
+}
+void place(HDWP& dwp, HWND d, int id, int x, int y, int w, int h) {
+  HWND c = GetDlgItem(d, id);
+  if (c && dwp) dwp = DeferWindowPos(dwp, c, nullptr, x, y, std::max(0, w), std::max(0, h), SWP_NOZORDER | SWP_NOACTIVATE);
+}
+
+std::wstring window_text(HWND h) {
+  const int n = GetWindowTextLengthW(h);
+  if (n <= 0) return {};
+  std::wstring s(size_t(n) + 1, L'\0');
+  const int got = GetWindowTextW(h, &s[0], n + 1);
+  s.resize(size_t(std::max(0, got)));
+  return s;
+}
+// "\r\n" -> "\n" (edit controls use CRLF; virgil.conf and the API use LF).
+std::string to_lf(const std::string& s) {
+  std::string o;
+  o.reserve(s.size());
+  for (size_t i = 0; i < s.size(); ++i)
+    if (!(s[i] == '\r' && i + 1 < s.size() && s[i + 1] == '\n')) o += s[i];
+  return o;
+}
+template <class S>
+S to_crlf(const S& s) {
+  S o;
+  o.reserve(s.size() + s.size() / 16);
+  for (size_t i = 0; i < s.size(); ++i) {
+    if (s[i] == '\n' && (i == 0 || s[i - 1] != '\r')) o += '\r';
+    o += s[i];
+  }
+  return o;
+}
+
+// A GDI font like the dialog's, in another face / weight.
+HFONT font_like(HWND d, const wchar_t* face, int weight) {
+  LOGFONTW lf{};
+  HFONT base = reinterpret_cast<HFONT>(SendMessageW(d, WM_GETFONT, 0, 0));
+  if (!base || !GetObjectW(base, sizeof lf, &lf)) {
+    lf.lfHeight = -MulDiv(9, int(dpi_for(d)), 72);
+    wcsncpy(lf.lfFaceName, L"Segoe UI", LF_FACESIZE - 1);
+  }
+  if (face) {
+    wcsncpy(lf.lfFaceName, face, LF_FACESIZE - 1);
+    lf.lfFaceName[LF_FACESIZE - 1] = 0;
+    lf.lfPitchAndFamily = FIXED_PITCH | FF_MODERN;
+  }
+  lf.lfWeight = weight;
+  lf.lfQuality = CLEARTYPE_QUALITY;
+  return CreateFontIndirectW(&lf);
+}
+
+void set_icon(HWND d) {
+  if (g_icon_small) SendMessageW(d, WM_SETICON, ICON_SMALL, reinterpret_cast<LPARAM>(g_icon_small));
+  if (HICON big = LoadIconW(g_inst, MAKEINTRESOURCEW(IDI_VIRGIL)))
+    SendMessageW(d, WM_SETICON, ICON_BIG, reinterpret_cast<LPARAM>(big));
+}
+
+// The window's size when it opened (its template) is its smallest size.
+void min_track(HWND d, LPARAM lp, const SIZE& min) {
+  if (min.cx <= 0) return;
+  auto* mm = reinterpret_cast<MINMAXINFO*>(lp);
+  mm->ptMinTrackSize.x = min.cx;
+  mm->ptMinTrackSize.y = min.cy;
+  (void)d;
+}
+SIZE window_size(HWND d) {
+  RECT r;
+  GetWindowRect(d, &r);
+  return SIZE{r.right - r.left, r.bottom - r.top};
+}
+
+// Status line colours (WM_CTLCOLORSTATIC), as in the Desktop audio window.
+INT_PTR status_color(WPARAM wp, int kind) {
+  SetTextColor(reinterpret_cast<HDC>(wp), kind == kStatusError ? kErrText
+                                          : kind == kStatusOk  ? kOkText
+                                                               : GetSysColor(COLOR_WINDOWTEXT));
+  SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
+  return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE));
+}
+
+// Save As (comdlg32 is loaded when needed, so the link line stays as it is).
+bool ask_save_path(HWND owner, const std::wstring& suggested, std::wstring* out) {
+  using Fn = BOOL(WINAPI*)(LPOPENFILENAMEW);
+  static Fn fn = [] {
+    HMODULE m = LoadLibraryW(L"comdlg32.dll");
+    return m ? reinterpret_cast<Fn>(reinterpret_cast<void*>(GetProcAddress(m, "GetSaveFileNameW"))) : Fn(nullptr);
+  }();
+  if (!fn) return false;
+  std::vector<wchar_t> buf(32768, L'\0');
+  wcsncpy(buf.data(), suggested.c_str(), buf.size() - 1);
+  OPENFILENAMEW ofn{};
+  ofn.lStructSize = sizeof ofn;
+  ofn.hwndOwner = owner;
+  ofn.lpstrFilter = L"Text files (*.txt)\0*.txt\0All files (*.*)\0*.*\0";
+  ofn.lpstrFile = buf.data();
+  ofn.nMaxFile = DWORD(buf.size());
+  ofn.lpstrDefExt = L"txt";
+  ofn.lpstrTitle = L"Save diagnostics report";
+  ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST | OFN_NOCHANGEDIR | OFN_EXPLORER | OFN_HIDEREADONLY;
+  if (!fn(&ofn)) return false;
+  *out = buf.data();
+  return true;
+}
+bool write_file(const std::wstring& path, const std::string& bytes) {
+  HANDLE f = CreateFileW(path.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+  if (f == INVALID_HANDLE_VALUE) return false;
+  DWORD n = 0;
+  const bool ok = WriteFile(f, bytes.data(), DWORD(bytes.size()), &n, nullptr) && n == bytes.size();
+  return CloseHandle(f) && ok;
+}
+
+D2D1_COLOR_F sys_color(int idx) {
+  const COLORREF c = GetSysColor(idx);
+  return D2D1::ColorF(GetRValue(c) / 255.f, GetGValue(c) / 255.f, GetBValue(c) / 255.f, 1.f);
+}
+
+// ---- Dropouts and diagnostics ------------------------------------------------------------
+
+const wchar_t* kDiagSummaryClass = L"VirgilDiagSummary";
+const float kPillH = 24, kChartH = 64, kChartPad = 6;
+
+struct DiagRow {
+  std::wstring time, text;
+  int image = 2;  // dot: 0 amber (Warn), 1 red (Error), 2 grey (Info)
+};
+
+struct DiagState {
+  vc::Diagnostics d;
+  bool have = false;      // d holds a reply
+  std::string error;      // the last refresh failed with this
+  bool fetching = false, again = false, saving = false, clearing = false;
+  std::vector<DiagRow> rows;
+  std::wstring status;
+  int status_kind = kStatusPlain;
+  bool status_is_fetch = false;  // the status line shows a failed refresh
+  SIZE min{};
+  int summary_h = -1;     // pixels, as laid out
+  HFONT mono = nullptr, normal = nullptr;
+  // The summary (headline, chart, legend, hints), drawn with Direct2D.
+  ID2D1DCRenderTarget* rt = nullptr;
+  ID2D1SolidColorBrush* brush = nullptr;
+  IDWriteTextFormat *f_head = nullptr, *f_text = nullptr, *f_small = nullptr;
+  D2D1_RECT_F chart{};    // chart area in the summary, DIPs
+  int hover = -1;         // minute under the mouse
+  HWND tip = nullptr;
+  bool tracking = false;
+};
+DiagState* g_dg;
+
+void diag_release_d2d(DiagState& st) {
+  release(st.brush);
+  release(st.rt);
+}
+
+IDWriteTextFormat* diag_wrap_format(float size) {
+  IDWriteTextFormat* f = make_format(L"ui", size, DWRITE_FONT_WEIGHT_NORMAL);
+  if (f) {
+    f->SetWordWrapping(DWRITE_WORD_WRAPPING_WRAP);
+    f->SetParagraphAlignment(DWRITE_PARAGRAPH_ALIGNMENT_NEAR);
+  }
+  return f;
+}
+IDWriteTextLayout* text_layout(const std::wstring& s, IDWriteTextFormat* f, float w) {
+  IDWriteTextLayout* l = nullptr;
+  if (f) g_dw->CreateTextLayout(s.c_str(), UINT32(s.size()), f, std::max(1.f, w), 10000.f, &l);
+  return l;
+}
+
+// Lays out the summary `W` DIPs wide and returns its height; draws it too
+// when `rt` is set.
+float diag_summary(DiagState& st, ID2D1RenderTarget* rt, float W) {
+  if (!st.f_head) {
+    st.f_head = make_format(L"ui", 12.5f, DWRITE_FONT_WEIGHT_SEMI_BOLD, DWRITE_TEXT_ALIGNMENT_CENTER);
+    st.f_text = diag_wrap_format(12.f);
+    st.f_small = make_format(L"ui", 11.5f, DWRITE_FONT_WEIGHT_NORMAL);
+  }
+  ID2D1SolidColorBrush* b = st.brush;
+  const D2D1_COLOR_F text_c = sys_color(COLOR_WINDOWTEXT), muted_c = sys_color(COLOR_GRAYTEXT);
+  auto draw_text = [&](const std::wstring& s, IDWriteTextFormat* f, const D2D1_RECT_F& r, const D2D1_COLOR_F& c) {
+    if (!rt || !f || s.empty()) return;
+    b->SetColor(c);
+    rt->DrawText(s.c_str(), UINT32(s.size()), f, r, b, D2D1_DRAW_TEXT_OPTIONS_CLIP);
+  };
+  const vc::Diagnostics& d = st.d;
+
+  // Headline pill, and "since ..." beside it.
+  std::wstring head;
+  unsigned pill = kMuted;
+  if (st.have) {
+    head = widen(d.headline);
+    pill = d.headline_severity == vc::Severity::Ok      ? kOk
+           : d.headline_severity == vc::Severity::Error ? kBad
+                                                        : kWarn;
+  } else {
+    head = st.error.empty() ? L"Loading…" : L"No answer from the Virgil service";
+    pill = st.error.empty() ? kMuted : kBad;
+  }
+  const float pw = text_width(head, st.f_head) + 26;
+  if (rt) {
+    b->SetColor(rgb(pill));
+    rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(0, 0, pw, kPillH), kPillH / 2, kPillH / 2), b);
+    draw_text(head, st.f_head, D2D1::RectF(0, 0, pw, kPillH), rgb(pill == kBad ? 0xFFFFFF : 0x15171A));
+    if (st.have) draw_text(widen(d.since_text), st.f_small, D2D1::RectF(pw + 10, 0, W, kPillH), muted_c);
+  }
+  float y = kPillH + 10;
+
+  // The last hour, per minute: stacked bars on a panel in the app's colours.
+  const D2D1_RECT_F panel = D2D1::RectF(0, y, W, y + kChartH + 2 * kChartPad);
+  st.chart = D2D1::RectF(panel.left + kChartPad, panel.top + kChartPad, panel.right - kChartPad, panel.bottom - kChartPad);
+  const float cw = st.chart.right - st.chart.left, ch = st.chart.bottom - st.chart.top;
+  if (rt) {
+    b->SetColor(rgb(kBg));
+    rt->FillRoundedRectangle(D2D1::RoundedRect(panel, 4, 4), b);
+    if (st.hover >= 0 && st.hover < int(d.minutes.size())) {
+      const float mw = cw / float(vc::kDiagMinutes);
+      b->SetColor(rgb(kLine));
+      rt->FillRectangle(D2D1::RectF(st.chart.left + float(st.hover) * mw, st.chart.top,
+                                    st.chart.left + float(st.hover + 1) * mw, st.chart.bottom), b);
+    }
+    b->SetColor(rgb(kSegOff));
+    rt->FillRectangle(D2D1::RectF(st.chart.left, st.chart.bottom - 1, st.chart.right, st.chart.bottom), b);
+    for (const vc::DiagBar& bar : vc::diag_chart_layout(d, cw, ch, 2)) {
+      b->SetColor(rgb(vc::diag_category_color(bar.category)));
+      rt->FillRectangle(D2D1::RectF(st.chart.left + bar.x, st.chart.top + bar.y, st.chart.left + bar.x + bar.w,
+                                    st.chart.top + bar.y + bar.h), b);
+    }
+  }
+  y = panel.bottom + 6;
+
+  // Legend.
+  const float lh = 16;
+  if (rt) {
+    const std::wstring lead = L"last 60 minutes, per minute:";
+    float x = 0;
+    draw_text(lead, st.f_small, D2D1::RectF(x, y, W, y + lh), muted_c);
+    x += text_width(lead, st.f_small) + 10;
+    for (int c = 0; c < vc::kDiagCategories; ++c) {
+      const vc::DiagCategory cat = vc::DiagCategory(c);
+      b->SetColor(rgb(vc::diag_category_color(cat)));
+      rt->FillRoundedRectangle(D2D1::RoundedRect(D2D1::RectF(x, y + lh / 2 - 4, x + 8, y + lh / 2 + 4), 1.5f, 1.5f), b);
+      x += 12;
+      const std::wstring label = widen(vc::diag_category_label(cat));
+      draw_text(label, st.f_small, D2D1::RectF(x, y, W, y + lh), text_c);
+      x += text_width(label, st.f_small) + 14;
+    }
+  }
+  y += lh + 8;
+
+  // Hints, as bullets.
+  for (const std::string& h : st.have ? d.hints : std::vector<std::string>()) {
+    IDWriteTextLayout* l = text_layout(widen(h), st.f_text, W - 16);
+    if (!l) continue;
+    DWRITE_TEXT_METRICS m{};
+    l->GetMetrics(&m);
+    if (rt) {
+      b->SetColor(text_c);
+      rt->DrawText(L"•", 1, st.f_text, D2D1::RectF(2, y, 14, y + m.height), b);
+      rt->DrawTextLayout(D2D1::Point2F(16, y), l, b);
+    }
+    release(l);
+    y += m.height + 4;
+  }
+  return y;
+}
+
+float px_scale(HWND h) { return float(dpi_for(h)) / 96.f; }
+
+void diag_paint(HWND h, HDC dc) {
+  RECT rc;
+  GetClientRect(h, &rc);
+  DiagState* st = g_dg;
+  if (!st) {
+    FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+    return;
+  }
+  const float dpi = float(dpi_for(h));
+  if (!st->rt) {
+    const D2D1_RENDER_TARGET_PROPERTIES p = D2D1::RenderTargetProperties(
+        D2D1_RENDER_TARGET_TYPE_DEFAULT, D2D1::PixelFormat(DXGI_FORMAT_B8G8R8A8_UNORM, D2D1_ALPHA_MODE_IGNORE), dpi, dpi);
+    if (FAILED(g_d2d->CreateDCRenderTarget(&p, &st->rt)) ||
+        FAILED(st->rt->CreateSolidColorBrush(sys_color(COLOR_WINDOWTEXT), &st->brush))) {
+      diag_release_d2d(*st);
+      FillRect(dc, &rc, GetSysColorBrush(COLOR_BTNFACE));
+      return;
+    }
+  }
+  st->rt->SetDpi(dpi, dpi);
+  if (FAILED(st->rt->BindDC(dc, &rc))) return;
+  st->rt->BeginDraw();
+  st->rt->Clear(sys_color(COLOR_BTNFACE));
+  diag_summary(*st, st->rt, float(rc.right) * 96.f / dpi);
+  if (st->rt->EndDraw() == HRESULT(D2DERR_RECREATE_TARGET)) diag_release_d2d(*st);
+}
+
+void diag_tip_set(HWND h, DiagState& st, int minute, POINT screen) {
+  if (!st.tip) {
+    st.tip = CreateWindowExW(WS_EX_TOPMOST, TOOLTIPS_CLASSW, nullptr, WS_POPUP | TTS_NOPREFIX | TTS_ALWAYSTIP,
+                             CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, CW_USEDEFAULT, h, nullptr, g_inst, nullptr);
+    if (!st.tip) return;
+    TTTOOLINFOW ti{};
+    ti.cbSize = sizeof ti;
+    ti.uFlags = TTF_TRACK | TTF_ABSOLUTE | TTF_IDISHWND;
+    ti.hwnd = h;
+    ti.uId = reinterpret_cast<UINT_PTR>(h);
+    ti.lpszText = const_cast<wchar_t*>(L"");
+    SendMessageW(st.tip, TTM_ADDTOOLW, 0, reinterpret_cast<LPARAM>(&ti));
+  }
+  TTTOOLINFOW ti{};
+  ti.cbSize = sizeof ti;
+  ti.hwnd = h;
+  ti.uId = reinterpret_cast<UINT_PTR>(h);
+  if (minute < 0 || minute >= int(st.d.minutes.size())) {
+    SendMessageW(st.tip, TTM_TRACKACTIVATE, FALSE, reinterpret_cast<LPARAM>(&ti));
+    return;
+  }
+  std::wstring t = widen(st.d.minutes[size_t(minute)].tooltip);
+  ti.lpszText = &t[0];
+  SendMessageW(st.tip, TTM_UPDATETIPTEXTW, 0, reinterpret_cast<LPARAM>(&ti));
+  if (screen.x != LONG_MIN) SendMessageW(st.tip, TTM_TRACKPOSITION, 0, MAKELPARAM(screen.x + 14, screen.y + 20));
+  SendMessageW(st.tip, TTM_TRACKACTIVATE, TRUE, reinterpret_cast<LPARAM>(&ti));
+}
+
+// Mouse at (x, y) client pixels over the summary, or (-1, -1): gone.
+void diag_hover(HWND h, int x, int y) {
+  DiagState* st = g_dg;
+  if (!st) return;
+  int minute = -1;
+  if (x >= 0 && st->have) {
+    const float s = px_scale(h), xd = float(x) / s, yd = float(y) / s;
+    if (yd >= st->chart.top && yd < st->chart.bottom)
+      minute = vc::diag_chart_minute_at(xd - st->chart.left, st->chart.right - st->chart.left);
+    if (minute >= int(st->d.minutes.size())) minute = -1;
+  }
+  if (x >= 0 && !st->tracking) {
+    TRACKMOUSEEVENT t{sizeof t, TME_LEAVE, h, 0};
+    st->tracking = TrackMouseEvent(&t) != FALSE;
+  }
+  if (x < 0) st->tracking = false;
+  if (minute != st->hover) InvalidateRect(h, nullptr, FALSE);
+  st->hover = minute;
+  POINT p{x, y};
+  ClientToScreen(h, &p);
+  diag_tip_set(h, *st, minute, p);
+}
+
+LRESULT CALLBACK diag_summary_proc(HWND h, UINT msg, WPARAM wp, LPARAM lp) {
+  switch (msg) {
+    case WM_PAINT: {
+      PAINTSTRUCT ps;
+      HDC dc = BeginPaint(h, &ps);
+      diag_paint(h, dc);
+      EndPaint(h, &ps);
+      return 0;
+    }
+    case WM_ERASEBKGND:
+      return 1;
+    case WM_MOUSEMOVE:
+      diag_hover(h, GET_X_LPARAM(lp), GET_Y_LPARAM(lp));
+      return 0;
+    case WM_MOUSELEAVE:
+      diag_hover(h, -1, -1);
+      return 0;
+  }
+  return DefWindowProcW(h, msg, wp, lp);
+}
+
+void diag_status(HWND d, const std::wstring& text, int kind, bool fetch = false) {
+  if (!g_dg) return;
+  g_dg->status = text;
+  g_dg->status_kind = kind;
+  g_dg->status_is_fetch = fetch;
+  SetDlgItemTextW(d, IDC_DG_STATUS, text.c_str());
+}
+
+void diag_layout(HWND d) {
+  DiagState* st = g_dg;
+  if (!st) return;
+  RECT rc;
+  GetClientRect(d, &rc);
+  const int W = rc.right, H = rc.bottom, m = dlu_x(d, 7), mv = dlu_y(d, 7);
+  const int bh = dlu_y(d, 15), bw = dlu_x(d, 46), sw = dlu_x(d, 62), gap = dlu_x(d, 4);
+  const float s = px_scale(d);
+  const int sum_h = int(std::ceil(diag_summary(*st, nullptr, float(W - 2 * m) / s) * s));
+  st->summary_h = sum_h;
+  const int row_y = H - mv - bh;
+  const int ev_label_y = mv + sum_h + dlu_y(d, 5), ev_y = ev_label_y + dlu_y(d, 11);
+  HDWP dwp = BeginDeferWindowPos(7);
+  place(dwp, d, IDC_DG_SUMMARY, m, mv, W - 2 * m, sum_h);
+  place(dwp, d, IDC_DG_EVLABEL, m, ev_label_y, W - 2 * m, dlu_y(d, 9));
+  place(dwp, d, IDC_DG_EVENTS, m, ev_y, W - 2 * m, std::max(dlu_y(d, 30), row_y - dlu_y(d, 6) - ev_y));
+  int x = W - m - bw;
+  place(dwp, d, IDCANCEL, x, row_y, bw, bh);
+  x -= gap + bw;
+  place(dwp, d, IDC_DG_CLEAR, x, row_y, bw, bh);
+  x -= gap + sw;
+  place(dwp, d, IDC_DG_SAVE, x, row_y, sw, bh);
+  place(dwp, d, IDC_DG_STATUS, m, row_y, x - gap - m, bh);
+  if (dwp) EndDeferWindowPos(dwp);
+  InvalidateRect(GetDlgItem(d, IDC_DG_SUMMARY), nullptr, FALSE);
+  ListView_SetColumnWidth(GetDlgItem(d, IDC_DG_EVENTS), 1, LVSCW_AUTOSIZE_USEHEADER);
+}
+
+// Small round severity dots for the events list (32-bit, premultiplied alpha).
+HIMAGELIST diag_dots(int size) {
+  HIMAGELIST il = ImageList_Create(size, size, ILC_COLOR32, 3, 0);
+  if (!il) return nullptr;
+  for (unsigned c : {kWarn, kBad, kMuted}) {
+    BITMAPINFO bi{};
+    bi.bmiHeader.biSize = sizeof bi.bmiHeader;
+    bi.bmiHeader.biWidth = size;
+    bi.bmiHeader.biHeight = -size;
+    bi.bmiHeader.biPlanes = 1;
+    bi.bmiHeader.biBitCount = 32;
+    bi.bmiHeader.biCompression = BI_RGB;
+    void* bits = nullptr;
+    HBITMAP hb = CreateDIBSection(nullptr, &bi, DIB_RGB_COLORS, &bits, nullptr, 0);
+    if (!hb || !bits) continue;
+    auto* px = static_cast<uint32_t*>(bits);
+    const float r = float(size) * 0.22f, cx = float(size) / 2.f, cy = float(size) / 2.f;
+    for (int y = 0; y < size; ++y)
+      for (int x = 0; x < size; ++x) {
+        const float dist = std::hypot(float(x) + 0.5f - cx, float(y) + 0.5f - cy);
+        const float a = std::max(0.f, std::min(1.f, r + 0.5f - dist));
+        const uint32_t A = uint32_t(a * 255.f + 0.5f), R = uint32_t(((c >> 16) & 0xFF) * a + 0.5f),
+                       G = uint32_t(((c >> 8) & 0xFF) * a + 0.5f), B = uint32_t((c & 0xFF) * a + 0.5f);
+        px[y * size + x] = (A << 24) | (R << 16) | (G << 8) | B;
+      }
+    ImageList_Add(il, hb, nullptr);
+    DeleteObject(hb);
+  }
+  return il;
+}
+
+void diag_rows(HWND d) {
+  DiagState* st = g_dg;
+  if (!st) return;
+  st->rows.clear();
+  for (const vc::DiagEvent& e : st->d.events) {
+    if (st->rows.size() >= vc::kDiagShownEvents) break;
+    DiagRow r;
+    r.time = widen(e.time_text);
+    r.text = widen(e.text) + (e.duration_text.empty() ? L"" : L" (" + widen(e.duration_text) + L")");
+    r.image = e.severity == vc::Severity::Warn ? 0 : e.severity == vc::Severity::Error ? 1 : 2;
+    st->rows.push_back(std::move(r));
+  }
+  HWND lv = GetDlgItem(d, IDC_DG_EVENTS);
+  ListView_SetItemCountEx(lv, int(st->rows.size()), LVSICF_NOSCROLL);
+  InvalidateRect(lv, nullptr, FALSE);
+}
+
+struct DiagReport {
+  bool ok = false;
+  std::string text, error;
+};
+struct DiagCleared {
+  bool ok = false;
+  std::string error;
+};
+struct DiagFetched {
+  bool ok = false;
+  vc::Diagnostics d;
+  std::string error;
+};
+
+void diag_fetch(HWND d) {
+  DiagState* st = g_dg;
+  if (!st) return;
+  if (st->fetching) {
+    st->again = true;  // e.g. right after Clear: fetch once more when this one is back
+    return;
+  }
+  st->fetching = true;
+  run_async<DiagFetched>(d, WM_APP_DIAG, [](unsigned port, DiagFetched& r) {
+    r.ok = vc::fetch_diagnostics(port, &r.d, &r.error);
+  });
+}
+
+INT_PTR CALLBACK diag_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
+  DiagState* st = g_dg;
+  switch (msg) {
+    case WM_INITDIALOG: {
+      st = g_dg = new DiagState();
+      g_diag_dlg = d;
+      set_icon(d);
+      st->min = window_size(d);
+      st->mono = font_like(d, g_mono_font.c_str(), FW_NORMAL);
+      st->normal = reinterpret_cast<HFONT>(SendMessageW(d, WM_GETFONT, 0, 0));
+      HWND lv = GetDlgItem(d, IDC_DG_EVENTS);
+      ListView_SetExtendedListViewStyle(lv, LVS_EX_FULLROWSELECT | LVS_EX_LABELTIP | LVS_EX_DOUBLEBUFFER);
+      ListView_SetImageList(lv, diag_dots(MulDiv(16, int(dpi_for(d)), 96)), LVSIL_SMALL);
+      // Wide enough for "2026-10-12 14:05:12" in the monospace font, and the dot.
+      int time_w = dlu_x(d, 90);
+      if (HDC dc = GetDC(lv)) {
+        HGDIOBJ old = SelectObject(dc, st->mono);
+        SIZE sz{};
+        if (GetTextExtentPoint32W(dc, L"2026-10-12 14:05:12", 19, &sz))
+          time_w = sz.cx + MulDiv(16 + 22, int(dpi_for(d)), 96);
+        SelectObject(dc, old);
+        ReleaseDC(lv, dc);
+      }
+      LVCOLUMNW c{};
+      c.mask = LVCF_TEXT | LVCF_WIDTH;
+      c.cx = time_w;
+      c.pszText = const_cast<wchar_t*>(L"Time");
+      ListView_InsertColumn(lv, 0, &c);
+      c.cx = dlu_x(d, 200);
+      c.pszText = const_cast<wchar_t*>(L"What happened");
+      ListView_InsertColumn(lv, 1, &c);
+      diag_layout(d);
+      diag_fetch(d);
+      SetTimer(d, 1, 2000, nullptr);  // refresh while the window is up
+      return TRUE;
+    }
+    case WM_DESTROY:
+      KillTimer(d, 1);
+      if (st) {
+        diag_release_d2d(*st);
+        release(st->f_head);
+        release(st->f_text);
+        release(st->f_small);
+        if (st->mono) DeleteObject(st->mono);
+        delete st;
+      }
+      g_dg = nullptr;
+      if (g_diag_dlg == d) g_diag_dlg = nullptr;
+      break;
+    case WM_GETMINMAXINFO:
+      if (st) min_track(d, lp, st->min);
+      return TRUE;
+    case WM_SIZE:
+      diag_layout(d);
+      return TRUE;
+    case WM_TIMER:
+      if (st && IsWindowVisible(d) && !IsIconic(d)) diag_fetch(d);
+      return TRUE;
+    case WM_APP_DIAG: {
+      std::unique_ptr<DiagFetched> r(reinterpret_cast<DiagFetched*>(lp));
+      if (!st || !r) return TRUE;
+      st->fetching = false;
+      if (r->ok) {
+        st->d = std::move(r->d);
+        st->have = true;
+        st->error.clear();
+        if (st->status_is_fetch) diag_status(d, L"", kStatusPlain);
+        diag_rows(d);
+      } else {
+        st->error = r->error.empty() ? "Could not reach the Virgil service." : r->error;
+        diag_status(d, L"Not up to date: " + widen(st->error), kStatusError, true);
+      }
+      const float s = px_scale(d);
+      RECT rc;
+      GetClientRect(d, &rc);
+      const int h = int(std::ceil(diag_summary(*st, nullptr, float(rc.right - 2 * dlu_x(d, 7)) / s) * s));
+      if (h != st->summary_h) diag_layout(d);  // hints came or went
+      InvalidateRect(GetDlgItem(d, IDC_DG_SUMMARY), nullptr, FALSE);
+      if (st->hover >= 0) {
+        POINT none{LONG_MIN, 0};
+        diag_tip_set(GetDlgItem(d, IDC_DG_SUMMARY), *st, st->hover, none);
+      }
+      if (st->again) {
+        st->again = false;
+        diag_fetch(d);
+      }
+      return TRUE;
+    }
+    case WM_APP_REPORT: {
+      std::unique_ptr<DiagReport> r(reinterpret_cast<DiagReport*>(lp));
+      if (!st || !r) return TRUE;
+      st->saving = false;
+      EnableWindow(GetDlgItem(d, IDC_DG_SAVE), TRUE);
+      if (!r->ok) {
+        diag_status(d, L"Could not get the report: " + widen(r->error), kStatusError);
+        return TRUE;
+      }
+      diag_status(d, L"", kStatusPlain);
+      std::wstring path;
+      if (!ask_save_path(d, widen(vc::default_report_file_name()), &path)) return TRUE;
+      if (write_file(path, to_crlf(r->text))) diag_status(d, L"Report saved to " + path, kStatusOk);
+      else diag_status(d, L"Could not write " + path, kStatusError);
+      return TRUE;
+    }
+    case WM_APP_CLEARED: {
+      std::unique_ptr<DiagCleared> r(reinterpret_cast<DiagCleared*>(lp));
+      if (!st || !r) return TRUE;
+      st->clearing = false;
+      EnableWindow(GetDlgItem(d, IDC_DG_CLEAR), TRUE);
+      if (r->ok) diag_status(d, L"Cleared.", kStatusPlain);
+      else diag_status(d, L"Could not clear: " + widen(r->error), kStatusError);
+      diag_fetch(d);
+      return TRUE;
+    }
+    case WM_CTLCOLORSTATIC:
+      if (st && GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == IDC_DG_STATUS) return status_color(wp, st->status_kind);
+      break;
+    case WM_NOTIFY: {
+      const NMHDR* n = reinterpret_cast<const NMHDR*>(lp);
+      if (!st || n->idFrom != IDC_DG_EVENTS) break;
+      if (n->code == LVN_GETDISPINFOW) {
+        auto* di = reinterpret_cast<NMLVDISPINFOW*>(lp);
+        const int i = di->item.iItem;
+        if (i < 0 || size_t(i) >= st->rows.size()) return TRUE;
+        const DiagRow& row = st->rows[size_t(i)];
+        if ((di->item.mask & LVIF_TEXT) && di->item.pszText && di->item.cchTextMax > 0) {
+          const std::wstring& t = di->item.iSubItem == 0 ? row.time : row.text;
+          wcsncpy(di->item.pszText, t.c_str(), size_t(di->item.cchTextMax) - 1);
+          di->item.pszText[di->item.cchTextMax - 1] = 0;
+        }
+        if (di->item.mask & LVIF_IMAGE) di->item.iImage = row.image;
+        return TRUE;
+      }
+      if (n->code == LVN_GETEMPTYMARKUP) {
+        auto* em = reinterpret_cast<NMLVEMPTYMARKUP*>(lp);
+        em->dwFlags = EMF_CENTERED;
+        wcsncpy(em->szMarkup, st->have ? L"Nothing yet." : L"Loading…", L_MAX_URL_LENGTH - 1);
+        SetWindowLongPtrW(d, DWLP_MSGRESULT, TRUE);
+        return TRUE;
+      }
+      if (n->code == NM_CUSTOMDRAW) {  // times in the monospace font
+        auto* cd = reinterpret_cast<NMLVCUSTOMDRAW*>(lp);
+        LRESULT r = CDRF_DODEFAULT;
+        switch (cd->nmcd.dwDrawStage) {
+          case CDDS_PREPAINT: r = CDRF_NOTIFYITEMDRAW; break;
+          case CDDS_ITEMPREPAINT: r = CDRF_NOTIFYSUBITEMDRAW; break;
+          case CDDS_ITEMPREPAINT | CDDS_SUBITEM:
+            SelectObject(cd->nmcd.hdc, cd->iSubItem == 0 && st->mono ? st->mono : st->normal);
+            r = CDRF_NEWFONT;
+            break;
+          default: break;
+        }
+        SetWindowLongPtrW(d, DWLP_MSGRESULT, r);
+        return TRUE;
+      }
+      break;
+    }
+    case WM_COMMAND:
+      if (!st) break;
+      switch (LOWORD(wp)) {
+        case IDCANCEL:
+          DestroyWindow(d);
+          return TRUE;
+        case IDC_DG_SAVE:
+          if (st->saving) return TRUE;
+          st->saving = true;
+          EnableWindow(GetDlgItem(d, IDC_DG_SAVE), FALSE);
+          diag_status(d, L"Getting the report…", kStatusPlain);
+          run_async<DiagReport>(d, WM_APP_REPORT, [](unsigned port, DiagReport& r) {
+            r.ok = vc::fetch_report(port, &r.text, &r.error);
+          });
+          return TRUE;
+        case IDC_DG_CLEAR:
+          if (st->clearing) return TRUE;
+          st->clearing = true;
+          EnableWindow(GetDlgItem(d, IDC_DG_CLEAR), FALSE);
+          run_async<DiagCleared>(d, WM_APP_CLEARED, [](unsigned port, DiagCleared& r) {
+            r.ok = vc::reset_diagnostics(port, &r.error);
+          });
+          return TRUE;
+      }
+      break;
+  }
+  return FALSE;
+}
+
+void show_diagnostics() {
+  if (bring_up(g_diag_dlg)) return;
+  HWND d = CreateDialogParamW(g_inst, MAKEINTRESOURCEW(IDD_DIAG), nullptr, diag_proc, 0);
+  if (d) bring_up(d);
+}
+
+// ---- Channel names ------------------------------------------------------------------------
+
+// A scrolling column of numbered name fields (one per channel); its edits
+// report to the dialog through it.
+const wchar_t* kNameGridClass = L"VirgilNameGrid";
+const int kTxEditBase = 3000, kRxEditBase = 3200;  // control ids: base + channel index
+
+struct NameGrid {
+  int base = kTxEditBase;
+  std::vector<HWND> nums, edits;
+  std::vector<char> bad;  // the field's name cannot be saved: drawn red
+  int scroll = 0;         // pixels
+};
+NameGrid* grid_of(HWND g) { return g ? reinterpret_cast<NameGrid*>(GetWindowLongPtrW(g, GWLP_USERDATA)) : nullptr; }
+
+int grid_row_h(HWND g) { return dlu_y(GetParent(g), 16); }
+
+void grid_layout(HWND g) {
+  NameGrid* ng = grid_of(g);
+  if (!ng) return;
+  HWND d = GetParent(g);
+  RECT rc;
+  GetClientRect(g, &rc);
+  const int row = grid_row_h(g), m = dlu_x(d, 4), num_w = dlu_x(d, 16), eh = dlu_y(d, 13);
+  const int content = int(ng->edits.size()) * row + 2 * dlu_y(d, 3);
+  ng->scroll = std::max(0, std::min(ng->scroll, content - int(rc.bottom)));
+  SCROLLINFO si{sizeof si, SIF_RANGE | SIF_PAGE | SIF_POS, 0, std::max(0, content - 1), UINT(std::max(0L, rc.bottom)),
+                ng->scroll, 0};
+  SetScrollInfo(g, SB_VERT, &si, TRUE);
+  GetClientRect(g, &rc);  // the scroll bar may have come or gone
+  HDWP dwp = BeginDeferWindowPos(int(ng->edits.size() * 2));
+  for (size_t i = 0; i < ng->edits.size() && dwp; ++i) {
+    const int y = dlu_y(d, 3) + int(i) * row - ng->scroll;
+    dwp = DeferWindowPos(dwp, ng->nums[i], nullptr, m, y, num_w, row, SWP_NOZORDER | SWP_NOACTIVATE);
+    if (dwp)
+      dwp = DeferWindowPos(dwp, ng->edits[i], nullptr, m + num_w + dlu_x(d, 4), y + (row - eh) / 2,
+                           std::max(10, int(rc.right) - (2 * m + num_w + dlu_x(d, 4))), eh,
+                           SWP_NOZORDER | SWP_NOACTIVATE);
+  }
+  if (dwp) EndDeferWindowPos(dwp);
+}
+
+void grid_scroll_to(HWND g, int pos) {
+  NameGrid* ng = grid_of(g);
+  if (!ng || pos == ng->scroll) return;
+  ng->scroll = pos;
+  grid_layout(g);
+  InvalidateRect(g, nullptr, TRUE);
+}
+
+// Fields for `n` channels, filled with `names` and the placeholders.
+void grid_fill(HWND g, unsigned n, const std::vector<std::string>& names, bool tx,
+               const std::vector<std::string>& live) {
+  NameGrid* ng = grid_of(g);
+  if (!ng) return;
+  for (HWND h : ng->nums) DestroyWindow(h);
+  for (HWND h : ng->edits) DestroyWindow(h);
+  ng->nums.clear();
+  ng->edits.clear();
+  ng->bad.assign(n, 0);
+  ng->scroll = 0;
+  HFONT font = reinterpret_cast<HFONT>(SendMessageW(GetParent(g), WM_GETFONT, 0, 0));
+  for (unsigned i = 0; i < n; ++i) {
+    HWND num = CreateWindowExW(0, L"STATIC", std::to_wstring(i + 1).c_str(),
+                               WS_CHILD | WS_VISIBLE | SS_RIGHT | SS_CENTERIMAGE | SS_NOPREFIX, 0, 0, 0, 0, g, nullptr,
+                               g_inst, nullptr);
+    HWND e = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", widen(i < names.size() ? names[i] : std::string()).c_str(),
+                             WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL, 0, 0, 0, 0, g,
+                             reinterpret_cast<HMENU>(INT_PTR(ng->base + int(i))), g_inst, nullptr);
+    SendMessageW(num, WM_SETFONT, WPARAM(font), FALSE);
+    SendMessageW(e, WM_SETFONT, WPARAM(font), FALSE);
+    SendMessageW(e, EM_LIMITTEXT, vc::kMaxNameLength, 0);
+    const std::wstring cue = widen(vc::channel_name_placeholder(live, tx, i));
+    SendMessageW(e, EM_SETCUEBANNER, FALSE, reinterpret_cast<LPARAM>(cue.c_str()));
+    ng->nums.push_back(num);
+    ng->edits.push_back(e);
+  }
+  grid_layout(g);
+  InvalidateRect(g, nullptr, TRUE);
+}
+
+LRESULT CALLBACK name_grid_proc(HWND g, UINT msg, WPARAM wp, LPARAM lp) {
+  NameGrid* ng = grid_of(g);
+  switch (msg) {
+    case WM_NCCREATE: {
+      auto* n = new NameGrid();
+      n->base = GetDlgCtrlID(g) == IDC_NM_RXGRID ? kRxEditBase : kTxEditBase;
+      SetWindowLongPtrW(g, GWLP_USERDATA, reinterpret_cast<LONG_PTR>(n));
+      break;
+    }
+    case WM_NCDESTROY:
+      delete ng;
+      SetWindowLongPtrW(g, GWLP_USERDATA, 0);
+      break;
+    case WM_SIZE:
+      grid_layout(g);
+      return 0;
+    case WM_VSCROLL: {
+      if (!ng) return 0;
+      SCROLLINFO si{};
+      si.cbSize = sizeof si;
+      si.fMask = SIF_ALL;
+      GetScrollInfo(g, SB_VERT, &si);
+      const int row = grid_row_h(g);
+      int pos = ng->scroll;
+      switch (LOWORD(wp)) {
+        case SB_LINEUP: pos -= row; break;
+        case SB_LINEDOWN: pos += row; break;
+        case SB_PAGEUP: pos -= int(si.nPage); break;
+        case SB_PAGEDOWN: pos += int(si.nPage); break;
+        case SB_THUMBTRACK:
+        case SB_THUMBPOSITION: pos = si.nTrackPos; break;
+        case SB_TOP: pos = 0; break;
+        case SB_BOTTOM: pos = si.nMax; break;
+        default: return 0;
+      }
+      grid_scroll_to(g, std::max(0, pos));
+      return 0;
+    }
+    case WM_MOUSEWHEEL:
+      if (ng) grid_scroll_to(g, std::max(0, ng->scroll - GET_WHEEL_DELTA_WPARAM(wp) * 3 * grid_row_h(g) / WHEEL_DELTA));
+      return 0;
+    case WM_COMMAND:
+      if (ng && HIWORD(wp) == EN_SETFOCUS) {  // keep the field being edited in view
+        const int i = LOWORD(wp) - ng->base;
+        RECT rc;
+        GetClientRect(g, &rc);
+        const int row = grid_row_h(g), top = dlu_y(GetParent(g), 3) + i * row;
+        if (top < ng->scroll) grid_scroll_to(g, std::max(0, top - dlu_y(GetParent(g), 3)));
+        else if (top + row > ng->scroll + rc.bottom) grid_scroll_to(g, top + row + dlu_y(GetParent(g), 3) - rc.bottom);
+      }
+      return SendMessageW(GetParent(g), WM_COMMAND, wp, lp);
+    case WM_CTLCOLOREDIT: {
+      const int i = ng ? GetDlgCtrlID(reinterpret_cast<HWND>(lp)) - ng->base : -1;
+      if (i >= 0 && size_t(i) < ng->bad.size() && ng->bad[size_t(i)]) {
+        static HBRUSH pink = CreateSolidBrush(RGB(253, 228, 225));
+        SetTextColor(reinterpret_cast<HDC>(wp), RGB(150, 20, 10));
+        SetBkColor(reinterpret_cast<HDC>(wp), RGB(253, 228, 225));
+        return reinterpret_cast<LRESULT>(pink);
+      }
+      break;
+    }
+    case WM_CTLCOLORSTATIC:  // channel numbers
+      SetTextColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_GRAYTEXT));
+      SetBkColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_WINDOW));
+      return reinterpret_cast<LRESULT>(GetSysColorBrush(COLOR_WINDOW));
+  }
+  return DefWindowProcW(g, msg, wp, lp);
+}
+
+struct NamesState {
+  bool loaded = false, loading = false, saving = false;
+  vc::ChannelNames base;  // as loaded (or last saved): saving writes only what changed since
+  std::wstring status;
+  int status_kind = kStatusPlain;
+  bool tx_err = false, rx_err = false;
+  SIZE min{};
+};
+NamesState* g_nm;
+
+struct NamesLoaded {
+  bool ok = false;
+  vc::ChannelNames names;
+  std::string error;
+};
+struct NamesSaved {
+  bool ok = false;
+  std::string error;
+};
+
+void names_status(HWND d, const std::wstring& text, int kind) {
+  if (!g_nm) return;
+  g_nm->status = text;
+  g_nm->status_kind = kind;
+  SetDlgItemTextW(d, IDC_NM_STATUS, text.c_str());
+}
+
+vc::ChannelNames names_edited(HWND d) {
+  vc::ChannelNames e = g_nm->base;
+  for (int dir = 0; dir < 2; ++dir) {
+    const bool tx = dir == 0;
+    NameGrid* ng = grid_of(GetDlgItem(d, tx ? IDC_NM_TXGRID : IDC_NM_RXGRID));
+    std::vector<std::string>& v = e.names(tx);
+    v.assign(tx ? e.tx : e.rx, std::string());
+    for (size_t i = 0; ng && i < ng->edits.size() && i < v.size(); ++i) v[i] = narrow(window_text(ng->edits[i]));
+  }
+  return e;
+}
+
+bool names_changed(HWND d) {
+  const vc::ChannelNames e = names_edited(d);
+  for (int dir = 0; dir < 2; ++dir) {
+    const bool tx = dir == 0;
+    const auto &a = e.names(tx), &b = g_nm->base.names(tx);
+    for (size_t i = 0; i < a.size(); ++i)
+      if (vc::trim_name(a[i]) != vc::trim_name(i < b.size() ? b[i] : std::string())) return true;
+  }
+  return false;
+}
+
+// Marks the fields whose names cannot be saved, says why under each column
+// (the focused field's problem, else the first), and enables Save.
+void names_validate(HWND d) {
+  NamesState* st = g_nm;
+  if (!st) return;
+  const std::vector<vc::NameError> errors = st->loaded ? vc::validate_channel_names(names_edited(d)) : std::vector<vc::NameError>();
+  HWND focus = GetFocus();
+  for (int dir = 0; dir < 2; ++dir) {
+    const bool tx = dir == 0;
+    NameGrid* ng = grid_of(GetDlgItem(d, tx ? IDC_NM_TXGRID : IDC_NM_RXGRID));
+    if (!ng) continue;
+    std::wstring first, focused;
+    unsigned count = 0;
+    for (size_t i = 0; i < ng->edits.size(); ++i) {
+      const std::string err = vc::name_error(errors, tx, unsigned(i));
+      const char bad = err.empty() ? 0 : 1;
+      if (bad) {
+        const std::wstring line = fmt(L"Channel %u: ", unsigned(i + 1)) + widen(err);
+        if (first.empty()) first = line;
+        if (ng->edits[i] == focus) focused = line;
+        ++count;
+      }
+      if (ng->bad[i] != bad) {
+        ng->bad[i] = bad;
+        InvalidateRect(ng->edits[i], nullptr, TRUE);
+      }
+    }
+    std::wstring msg = focused.empty() ? first : focused;
+    if (count > 1) msg += fmt(L" (%u fields to fix)", count);
+    SetDlgItemTextW(d, tx ? IDC_NM_TXERR : IDC_NM_RXERR, msg.c_str());
+    (tx ? st->tx_err : st->rx_err) = count > 0;
+  }
+  EnableWindow(GetDlgItem(d, IDOK), st->loaded && !st->saving && errors.empty());
+}
+
+void names_layout(HWND d) {
+  RECT rc;
+  GetClientRect(d, &rc);
+  const int W = rc.right, H = rc.bottom, m = dlu_x(d, 7), mv = dlu_y(d, 7), gap = dlu_x(d, 4);
+  const int bh = dlu_y(d, 15), bw = dlu_x(d, 50);
+  const int col = (W - 3 * m) / 2, row_y = H - mv - bh;
+  const int help_h = dlu_y(d, 26), help_y = row_y - dlu_y(d, 5) - help_h;
+  const int err_h = dlu_y(d, 17), err_y = help_y - dlu_y(d, 3) - err_h;
+  const int grid_y = mv + dlu_y(d, 11), grid_h = err_y - dlu_y(d, 2) - grid_y;
+  HDWP dwp = BeginDeferWindowPos(10);
+  for (int dir = 0; dir < 2; ++dir) {
+    const int x = m + dir * (col + m);
+    place(dwp, d, dir ? IDC_NM_RXLABEL : IDC_NM_TXLABEL, x, mv, col, dlu_y(d, 9));
+    place(dwp, d, dir ? IDC_NM_RXGRID : IDC_NM_TXGRID, x, grid_y, col, grid_h);
+    place(dwp, d, dir ? IDC_NM_RXERR : IDC_NM_TXERR, x, err_y, col, err_h);
+  }
+  place(dwp, d, IDC_NM_HELP, m, help_y, W - 2 * m, help_h);
+  place(dwp, d, IDCANCEL, W - m - bw, row_y, bw, bh);
+  place(dwp, d, IDOK, W - m - 2 * bw - gap, row_y, bw, bh);
+  place(dwp, d, IDC_NM_STATUS, m, row_y, W - 2 * m - 2 * bw - 2 * gap, bh);
+  if (dwp) EndDeferWindowPos(dwp);
+}
+
+void names_load(HWND d) {
+  NamesState* st = g_nm;
+  if (!st || st->loading) return;
+  st->loading = true;
+  names_status(d, L"Loading…", kStatusPlain);
+  run_async<NamesLoaded>(d, WM_APP_NAMES, [](unsigned port, NamesLoaded& r) {
+    vc::ConfigText c;
+    r.ok = vc::fetch_config(port, &c, &r.error);
+    if (r.ok) r.names = vc::load_channel_names(c.text);
+  });
+}
+
+INT_PTR CALLBACK names_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
+  NamesState* st = g_nm;
+  switch (msg) {
+    case WM_INITDIALOG:
+      st = g_nm = new NamesState();
+      g_names_dlg = d;
+      set_icon(d);
+      st->min = window_size(d);
+      SetDlgItemTextW(d, IDC_NM_TXLABEL, L"Transmit (playback → network)");
+      SetDlgItemTextW(d, IDC_NM_RXLABEL, L"Receive (network → capture)");
+      SetDlgItemTextW(d, IDC_NM_HELP,
+                      L"Leave a field empty for the default (TX 1, RX 1, …). Names changed in Dante Controller "
+                      L"appear here too. Up to 31 characters, unique per direction, without = . @ or \".");
+      EnableWindow(GetDlgItem(d, IDOK), FALSE);
+      names_layout(d);
+      names_load(d);
+      return TRUE;
+    case WM_DESTROY:
+      delete st;
+      g_nm = nullptr;
+      if (g_names_dlg == d) g_names_dlg = nullptr;
+      break;
+    case WM_GETMINMAXINFO:
+      if (st) min_track(d, lp, st->min);
+      return TRUE;
+    case WM_SIZE:
+      names_layout(d);
+      return TRUE;
+    case WM_APP_NAMES: {
+      std::unique_ptr<NamesLoaded> r(reinterpret_cast<NamesLoaded*>(lp));
+      if (!st || !r) return TRUE;
+      st->loading = false;
+      if (!r->ok) {
+        names_status(d, L"Could not load the channel names: " + widen(r->error), kStatusError);
+        return TRUE;
+      }
+      st->base = r->names;
+      st->base.tx_names.resize(st->base.tx);
+      st->base.rx_names.resize(st->base.rx);
+      std::vector<std::string> live_tx, live_rx;
+      {
+        std::lock_guard<std::mutex> l(g_mutex);
+        live_tx = g_status.tx_names;
+        live_rx = g_status.rx_names;
+      }
+      grid_fill(GetDlgItem(d, IDC_NM_TXGRID), st->base.tx, st->base.tx_names, true, live_tx);
+      grid_fill(GetDlgItem(d, IDC_NM_RXGRID), st->base.rx, st->base.rx_names, false, live_rx);
+      auto label = [](const wchar_t* what, unsigned n) {
+        return std::wstring(what) + (n ? fmt(L"  —  %u channel%s", n, n == 1 ? L"" : L"s") : std::wstring(L"  —  off"));
+      };
+      SetDlgItemTextW(d, IDC_NM_TXLABEL, label(L"Transmit (playback → network)", st->base.tx).c_str());
+      SetDlgItemTextW(d, IDC_NM_RXLABEL, label(L"Receive (network → capture)", st->base.rx).c_str());
+      st->loaded = true;
+      names_status(d, L"", kStatusPlain);
+      names_validate(d);
+      return TRUE;
+    }
+    case WM_APP_NAMES_SAVED: {
+      std::unique_ptr<NamesSaved> r(reinterpret_cast<NamesSaved*>(lp));
+      if (!st || !r) return TRUE;
+      st->saving = false;
+      if (r->ok) {
+        // What was saved is the new base (as the daemon has it: trimmed).
+        st->base = names_edited(d);
+        for (auto* v : {&st->base.tx_names, &st->base.rx_names})
+          for (std::string& n : *v) n = vc::trim_name(n);
+        names_status(d, L"Saved. The audio engine restarts to use the new names.", kStatusOk);
+      } else {
+        names_status(d, widen(r->error), kStatusError);
+      }
+      names_validate(d);
+      return TRUE;
+    }
+    case WM_CTLCOLORSTATIC: {
+      const int id = GetDlgCtrlID(reinterpret_cast<HWND>(lp));
+      if (st && id == IDC_NM_STATUS) return status_color(wp, st->status_kind);
+      if (id == IDC_NM_TXERR || id == IDC_NM_RXERR) return status_color(wp, kStatusError);
+      if (id == IDC_NM_HELP) {
+        SetTextColor(reinterpret_cast<HDC>(wp), GetSysColor(COLOR_GRAYTEXT));
+        SetBkMode(reinterpret_cast<HDC>(wp), TRANSPARENT);
+        return reinterpret_cast<INT_PTR>(GetSysColorBrush(COLOR_BTNFACE));
+      }
+      break;
+    }
+    case WM_COMMAND: {
+      if (!st) break;
+      const int id = LOWORD(wp);
+      if (id >= kTxEditBase && id < kRxEditBase + 128) {
+        if (HIWORD(wp) == EN_CHANGE || HIWORD(wp) == EN_SETFOCUS) names_validate(d);
+        return TRUE;
+      }
+      if (id == IDOK) {
+        if (!st->loaded || st->saving) return TRUE;
+        const vc::ChannelNames edited = names_edited(d), base = st->base;
+        if (!vc::validate_channel_names(edited).empty()) return TRUE;
+        st->saving = true;
+        EnableWindow(GetDlgItem(d, IDOK), FALSE);
+        names_status(d, L"Saving…", kStatusPlain);
+        run_async<NamesSaved>(d, WM_APP_NAMES_SAVED, [base, edited](unsigned port, NamesSaved& r) {
+          r.ok = vc::save_channel_names(port, base, edited, &r.error);
+        });
+        return TRUE;
+      }
+      if (id == IDCANCEL) {
+        if (st->loaded && !st->saving && names_changed(d) &&
+            MessageBoxW(d, L"Close without saving the changed names?", L"Channel names",
+                        MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK)
+          return TRUE;
+        DestroyWindow(d);
+        return TRUE;
+      }
+      break;
+    }
+  }
+  return FALSE;
+}
+
+void show_channel_names() {
+  if (bring_up(g_names_dlg)) return;
+  HWND d = CreateDialogParamW(g_inst, MAKEINTRESOURCEW(IDD_NAMES), nullptr, names_proc, 0);
+  if (d) bring_up(d);
+}
+
+// ---- Edit configuration -------------------------------------------------------------------
+
+struct ConfState {
+  bool loading = false, saving = false, keep_status = false;
+  std::string version;  // of the text in the editor (X-Virgil-Config-Version)
+  HFONT mono = nullptr;
+  std::wstring status;
+  int status_kind = kStatusPlain;
+  SIZE min{};
+};
+ConfState* g_cf;
+
+struct ConfLoaded {
+  bool ok = false;
+  vc::ConfigText c;
+  std::string error;
+};
+struct ConfSaved {
+  vc::SaveResult r;
+};
+
+void conf_status(HWND d, const std::wstring& text, int kind) {
+  if (!g_cf) return;
+  g_cf->status = text;
+  g_cf->status_kind = kind;
+  SetDlgItemTextW(d, IDC_CF_STATUS, text.c_str());
+}
+
+void conf_buttons(HWND d) {
+  const bool idle = g_cf && !g_cf->loading && !g_cf->saving;
+  EnableWindow(GetDlgItem(d, IDOK), idle);
+  EnableWindow(GetDlgItem(d, IDC_CF_RELOAD), idle);
+}
+
+void conf_layout(HWND d) {
+  RECT rc;
+  GetClientRect(d, &rc);
+  const int W = rc.right, H = rc.bottom, m = dlu_x(d, 7), mv = dlu_y(d, 7), gap = dlu_x(d, 4);
+  const int bh = dlu_y(d, 15), bw = dlu_x(d, 52), aw = dlu_x(d, 72), row_y = H - mv - bh;
+  const int text_y = mv + dlu_y(d, 12);
+  HDWP dwp = BeginDeferWindowPos(6);
+  place(dwp, d, IDC_CF_NOTE, m, mv, W - 2 * m, dlu_y(d, 9));
+  place(dwp, d, IDC_CF_TEXT, m, text_y, W - 2 * m, row_y - dlu_y(d, 6) - text_y);
+  int x = W - m - bw;
+  place(dwp, d, IDCANCEL, x, row_y, bw, bh);
+  x -= gap + bw;
+  place(dwp, d, IDC_CF_RELOAD, x, row_y, bw, bh);
+  x -= gap + aw;
+  place(dwp, d, IDOK, x, row_y, aw, bh);
+  place(dwp, d, IDC_CF_STATUS, m, row_y, x - gap - m, bh);
+  if (dwp) EndDeferWindowPos(dwp);
+}
+
+// `keep_status`: after a save, its message stays up while the text reloads.
+void conf_load(HWND d, bool keep_status) {
+  ConfState* st = g_cf;
+  if (!st || st->loading || st->saving) return;
+  st->loading = true;
+  st->keep_status = keep_status;
+  if (!keep_status) conf_status(d, L"Loading…", kStatusPlain);
+  conf_buttons(d);
+  run_async<ConfLoaded>(d, WM_APP_CONF, [](unsigned port, ConfLoaded& r) { r.ok = vc::fetch_config(port, &r.c, &r.error); });
+}
+
+bool conf_modified(HWND d) { return SendDlgItemMessageW(d, IDC_CF_TEXT, EM_GETMODIFY, 0, 0) != 0; }
+
+INT_PTR CALLBACK conf_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
+  ConfState* st = g_cf;
+  switch (msg) {
+    case WM_INITDIALOG:
+      st = g_cf = new ConfState();
+      g_conf_dlg = d;
+      set_icon(d);
+      st->min = window_size(d);
+      st->mono = font_like(d, g_mono_font.c_str(), FW_NORMAL);
+      if (st->mono) SendDlgItemMessageW(d, IDC_CF_TEXT, WM_SETFONT, WPARAM(st->mono), FALSE);
+      SendDlgItemMessageW(d, IDC_CF_TEXT, EM_SETLIMITTEXT, 0, 0);  // no 32 K limit
+      conf_layout(d);
+      conf_load(d, false);
+      return TRUE;
+    case WM_DESTROY:
+      if (st) {
+        if (st->mono) DeleteObject(st->mono);
+        delete st;
+      }
+      g_cf = nullptr;
+      if (g_conf_dlg == d) g_conf_dlg = nullptr;
+      break;
+    case WM_GETMINMAXINFO:
+      if (st) min_track(d, lp, st->min);
+      return TRUE;
+    case WM_SIZE:
+      conf_layout(d);
+      return TRUE;
+    case WM_APP_CONF: {
+      std::unique_ptr<ConfLoaded> r(reinterpret_cast<ConfLoaded*>(lp));
+      if (!st || !r) return TRUE;
+      st->loading = false;
+      conf_buttons(d);
+      if (!r->ok) {
+        conf_status(d, L"Could not load the configuration: " + widen(r->error), kStatusError);
+        return TRUE;
+      }
+      st->version = r->c.version;
+      SetDlgItemTextW(d, IDC_CF_TEXT, to_crlf(widen(to_lf(r->c.text))).c_str());
+      SendDlgItemMessageW(d, IDC_CF_TEXT, EM_SETMODIFY, FALSE, 0);
+      if (!st->keep_status) conf_status(d, L"", kStatusPlain);
+      return TRUE;
+    }
+    case WM_APP_CONF_SAVED: {
+      std::unique_ptr<ConfSaved> s(reinterpret_cast<ConfSaved*>(lp));
+      if (!st || !s) return TRUE;
+      st->saving = false;
+      conf_buttons(d);
+      const vc::SaveResult& r = s->r;
+      if (r.ok) {
+        conf_status(d, widen(vc::saved_message(r)), kStatusOk);
+        conf_load(d, true);  // the file as virgild now has it, with its new version
+      } else if (r.conflict) {
+        conf_status(d, L"Not saved: the configuration was changed elsewhere since it was loaded.", kStatusError);
+        if (MessageBoxW(d,
+                        L"The configuration was changed elsewhere (for example a rename in Dante Controller, or "
+                        L"another editor) since it was loaded here, so it was not saved.\n\n"
+                        L"Reload it? Your edits here are replaced.",
+                        L"Edit configuration", MB_YESNO | MB_ICONWARNING) == IDYES)
+          conf_load(d, false);
+      } else {
+        conf_status(d, widen(r.error.empty() ? std::string("Could not save the configuration.") : r.error),
+                    kStatusError);
+      }
+      return TRUE;
+    }
+    case WM_CTLCOLORSTATIC:
+      if (st && GetDlgCtrlID(reinterpret_cast<HWND>(lp)) == IDC_CF_STATUS) return status_color(wp, st->status_kind);
+      break;
+    case WM_COMMAND: {
+      if (!st) break;
+      switch (LOWORD(wp)) {
+        case IDOK: {
+          if (st->loading || st->saving) return TRUE;
+          const std::string text = to_lf(narrow(window_text(GetDlgItem(d, IDC_CF_TEXT))));
+          const std::string version = st->version;
+          st->saving = true;
+          conf_buttons(d);
+          conf_status(d, L"Saving…", kStatusPlain);
+          run_async<ConfSaved>(d, WM_APP_CONF_SAVED, [text, version](unsigned port, ConfSaved& r) {
+            r.r = vc::save_config_text(port, text, version);
+          });
+          return TRUE;
+        }
+        case IDC_CF_RELOAD:
+          if (conf_modified(d) &&
+              MessageBoxW(d, L"Replace your edits with the configuration as Virgil has it now?", L"Edit configuration",
+                          MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK)
+            return TRUE;
+          conf_load(d, false);
+          return TRUE;
+        case IDCANCEL:
+          if (conf_modified(d) && !st->saving &&
+              MessageBoxW(d, L"Close without applying your edits?", L"Edit configuration",
+                          MB_OKCANCEL | MB_ICONQUESTION | MB_DEFBUTTON2) != IDOK)
+            return TRUE;
+          DestroyWindow(d);
+          return TRUE;
+      }
+      break;
+    }
+  }
+  return FALSE;
+}
+
+void show_config_editor() {
+  if (bring_up(g_conf_dlg)) return;
+  HWND d = CreateDialogParamW(g_inst, MAKEINTRESOURCEW(IDD_CONF), nullptr, conf_proc, 0);
+  if (d) bring_up(d);
+}
+
+void register_panel_classes() {
+  WNDCLASSEXW wc{};
+  wc.cbSize = sizeof wc;
+  wc.hInstance = g_inst;
+  wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+  wc.lpfnWndProc = diag_summary_proc;
+  wc.hbrBackground = GetSysColorBrush(COLOR_BTNFACE);
+  wc.lpszClassName = kDiagSummaryClass;
+  RegisterClassExW(&wc);
+  wc.lpfnWndProc = name_grid_proc;
+  wc.hbrBackground = reinterpret_cast<HBRUSH>(COLOR_WINDOW + 1);
+  wc.lpszClassName = kNameGridClass;
+  RegisterClassExW(&wc);
 }
 
 // ---- window --------------------------------------------------------------------------------
@@ -1165,7 +2521,7 @@ void job_done(std::unique_ptr<Job> job) {
         break;
       }
       // Modal: runs its own message loop until the dialog closes.
-      show_settings(job->r.body, vc::parse_interfaces(job->r2.body));
+      show_settings(job->r.body, vc::parse_interfaces(job->r2.body), job->r3.body);
       break;
     case JobKind::SaveSettings:
       if (g_settings_dlg) SendMessageW(g_settings_dlg, WM_APP_SAVED, 0, reinterpret_cast<LPARAM>(job.get()));
@@ -1312,9 +2668,11 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
   }
 
   CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED);
-  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES | ICC_PROGRESS_CLASS};
+  INITCOMMONCONTROLSEX icc{sizeof icc, ICC_STANDARD_CLASSES | ICC_UPDOWN_CLASS | ICC_LISTVIEW_CLASSES |
+                                            ICC_PROGRESS_CLASS | ICC_BAR_CLASSES};
   InitCommonControlsEx(&icc);
   create_device_independent();
+  register_panel_classes();
   first_run_defaults();
 
   // Portable download: start virgild from this folder if nothing answers.
@@ -1355,6 +2713,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE, LPWSTR cmdline, int) {
 
   MSG m;
   while (GetMessageW(&m, nullptr, 0, 0) > 0) {
+    if (panel_dialog_message(&m)) continue;
     TranslateMessage(&m);
     DispatchMessageW(&m);
   }

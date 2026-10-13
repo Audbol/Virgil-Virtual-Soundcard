@@ -16,6 +16,34 @@
 #define IDC_DIAGBTN 1019
 #define IDC_TXSPIN 1013
 #define IDC_RXSPIN 1014
+#define IDC_REMOTE 1015
+#define IDC_REMOTE_PW 1016
+#define IDC_REMOTE_INFO 1017
+#define IDC_EDITCONF 1018
+
+// Dropouts and diagnostics, channel names and configuration editor windows
+// (main.cpp).
+#define IDD_DIAG 120
+#define IDD_NAMES 121
+#define IDD_CONF 122
+#define IDC_DG_SUMMARY 1301
+#define IDC_DG_EVLABEL 1302
+#define IDC_DG_EVENTS 1303
+#define IDC_DG_STATUS 1304
+#define IDC_DG_SAVE 1305
+#define IDC_DG_CLEAR 1306
+#define IDC_NM_TXLABEL 1401
+#define IDC_NM_TXGRID 1402
+#define IDC_NM_TXERR 1403
+#define IDC_NM_RXLABEL 1404
+#define IDC_NM_RXGRID 1405
+#define IDC_NM_RXERR 1406
+#define IDC_NM_HELP 1407
+#define IDC_NM_STATUS 1408
+#define IDC_CF_NOTE 1501
+#define IDC_CF_TEXT 1502
+#define IDC_CF_STATUS 1503
+#define IDC_CF_RELOAD 1504
 
 // Desktop audio window (desktop_audio_ui.cpp).
 #define IDD_DESKTOP 110
