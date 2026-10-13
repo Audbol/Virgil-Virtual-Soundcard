@@ -239,9 +239,20 @@ counts are unchanged. If those change, ALSA apps reconnect by themselves
 and ASIO hosts get a driver reset request. On macOS the Virgil device
 changes to the new format by itself (apps may briefly stop and restart it).
 
-The panel only listens on 127.0.0.1. It refuses requests addressed to other
-host names (DNS rebinding) and cross-site form posts. Set `control_port = 0`
-in `[device]` to turn it off.
+The panel only listens on 127.0.0.1 unless remote access is on. It refuses
+requests addressed to other host names (DNS rebinding) and cross-site form
+posts. Set `control_port = 0` in `[device]` to turn it off.
+
+**Remote access** (off by default): tick *Allow remote access* in the panel's
+Settings (on the Virgil computer) and set a password of 8 or more characters,
+or set `remote_access = true` and `remote_password = …` in `[device]`. Other
+computers then open `http://<Virgil computer>:8480/` and log in with that
+password (any user name). Five wrong passwords lock that address out for
+10 seconds. Other computers never see the password and cannot change the two
+remote access settings; this computer needs no password. The panel is plain
+HTTP: the password crosses the network unencrypted (HTTP Basic auth), so use
+it on a trusted network, such as a production network that is not shared with
+the public.
 
 Configuration file and log locations, if you prefer editing by hand:
 

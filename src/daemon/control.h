@@ -10,6 +10,7 @@
 #include "virgil/config.h"
 #include "diagnostics.h"
 #include "http_server.h"
+#include "remote_auth.h"
 
 namespace virgil {
 
@@ -41,22 +42,28 @@ struct DaemonContext {
 class ControlServer {
  public:
   explicit ControlServer(DaemonContext* ctx) : ctx_(ctx) {}
-  bool start(uint16_t port);
+  // Listens on 127.0.0.1, or on every IPv4 address when `remote` (remote
+  // access on; other computers must log in with remote_password).
+  bool start(uint16_t port, bool remote);
+  // After a reload: listen again if remote access was turned on or off.
+  void set_remote(bool remote);
   void stop() { http_.stop(); }
 
  private:
   HttpResponse handle(const HttpRequest& r);
-  HttpResponse status_json();
+  HttpResponse status_json(bool local);
   HttpResponse interfaces_json();
-  HttpResponse get_config();
+  HttpResponse get_config(bool local);
   std::string current_config_text();
-  HttpResponse save_config(const HttpRequest& r);
+  HttpResponse save_config(const HttpRequest& r, bool local);
   HttpResponse diagnostics_report();
   HttpResponse set_running(bool on);
 
   DaemonContext* ctx_;
   HttpServer http_;
   uint16_t port_ = 0;
+  bool remote_ = false;  // listening on every IPv4 address
+  RemoteAuth auth_;
   // Name of the adapter Virgil runs on, for the "no clock leader" notice
   // (looked up once per address; guarded by ctx_->mutex).
   uint32_t adapter_addr_ = 0;

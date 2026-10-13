@@ -129,7 +129,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);
   bool panel_up = false;
   if (control_port) {
-    if ((panel_up = control.start(control_port)))
+    if ((panel_up = control.start(control_port, ctx.cfg.remote_access)))
       VIRGIL_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
     else
       VIRGIL_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
@@ -327,6 +327,12 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
         ctx.status = ctx.cfg.enabled ? "starting" : "stopping";
         ctx.error.clear();
       }
+      bool remote;
+      {
+        std::lock_guard<std::mutex> l(ctx.mutex);
+        remote = ctx.cfg.remote_access;
+      }
+      if (panel_up) control.set_remote(remote);
     }
   }
   control.stop();

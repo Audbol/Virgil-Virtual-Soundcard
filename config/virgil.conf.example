@@ -43,8 +43,15 @@ clock = ptp
 # Virtual Soundcard) already uses them, then 24440-24443; standard; or the
 # first of four ports to use. Dante Controller finds them either way.
 ports = auto
-# Local web control panel port (127.0.0.1 only; 0 = off).
+# Web control panel port (0 = off). Only this computer can reach it unless
+# remote_access is on.
 control_port = 8480
+# Remote access: other computers open http://<this computer>:8480/ and log
+# in with remote_password (8+ characters, required). Plain HTTP, so the
+# password crosses the network unencrypted: use it on a trusted network.
+# Only this computer can change these two settings.
+remote_access = false
+#remote_password = choose-a-password
 # false = stopped: Virgil leaves the Dante network (no Dante device, no
 # network ports in use) until started again; the service keeps running.
 # Stop / Start in Virgil Control set this.

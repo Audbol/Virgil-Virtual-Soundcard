@@ -203,6 +203,12 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
         <option value="ptp">PTP (follow the Dante clock leader)</option><option value="free">Local clock only (testing)</option></select></label>
       <label class="check"><input id="f-master" type="checkbox" data-key="master_capable" data-section="ptp" data-conv="bool">
         Become clock leader when no Dante device provides one</label>
+      <label class="check"><input id="f-remote" type="checkbox" data-key="remote_access" data-conv="bool">
+        Allow remote access: open this page from other computers (needs a password)</label>
+      <label>Remote access password (8 or more characters)<input id="f-rpw" data-key="remote_password" type="password" autocomplete="new-password"></label>
+      <p class="sub" id="remote-note" style="color:var(--muted);font-size:12.5px;margin:0;grid-column:1/-1">Other computers open
+        <code>http://&lt;this computer&gt;:8480/</code> and log in with the password. Plain HTTP: the password crosses the
+        network unencrypted, so use it on a trusted network. Only this computer can change these two settings.</p>
     </div>
     <details id="channels"><summary>Channel names</summary>
       <p style="color:var(--muted);font-size:12.5px;margin:8px 0 12px">Shown in Dante Controller and, as channel names, in ASIO and Core Audio apps. Leave a field empty for the default (TX 1, RX 1, …). Names changed in Dante Controller appear here too. Up to 31 characters, unique per direction, without = . @ or ".</p>
@@ -366,6 +372,7 @@ function clockNotice(st) {
 }
 
 function render(st) {
+  remoteFields(st);
   const d = st.device, c = st.clock, k = st.counters || {};
   $("devname").textContent = d.name || "Virgil";
   document.title = (d.name || "Virgil") + " · Virgil Control";
@@ -429,8 +436,18 @@ function render(st) {
 }
 
 // ---------- settings form <-> config text ----------
-const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock", "f-master"];
-const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", master_capable: "false" };
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock", "f-master", "f-remote", "f-rpw"];
+const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", master_capable: "false",
+                   remote_access: "false", remote_password: "" };
+// Remote access settings can only be changed on the Virgil computer itself.
+function remoteFields(st) {
+  const r = st && st.remote; if (!r) return;
+  $("f-remote").disabled = $("f-rpw").disabled = !!r.this_client_remote;
+  if (r.listening && r.urls && r.urls.length)
+    $("remote-note").innerHTML = "Reachable at " + r.urls.map(u => "<code>" + esc(u) + "</code>").join(", ") +
+      ". Plain HTTP: the password crosses the network unencrypted, so use it on a trusted network." +
+      (r.this_client_remote ? " Only the Virgil computer can change these two settings." : "");
+}
 const truthy = v => ["1", "true", "yes", "on"].includes(String(v).trim().toLowerCase());
 // Latency is edited in ms (as in Virgil Control) and kept in µs.
 function toField(el, v) {

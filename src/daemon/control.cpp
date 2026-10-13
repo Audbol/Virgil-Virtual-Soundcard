@@ -85,17 +85,64 @@ bool make_parent_dirs(const std::string& path) {
 
 }  // namespace
 
-bool ControlServer::start(uint16_t port) {
+bool ControlServer::start(uint16_t port, bool remote) {
   port_ = port;
-  return http_.start(0x7F000001, port, [this](const HttpRequest& r) { return handle(r); });
+  auto handler = [this](const HttpRequest& r) { return handle(r); };
+  if (remote) {
+    if (http_.start(0, port, handler)) {
+      remote_ = true;
+      std::string urls;
+      for (const auto& i : list_interfaces())
+        if (!i.loopback) urls += " http://" + ipv4_to_string(i.addr) + ":" + std::to_string(port) + "/";
+      VIRGIL_LOG_INFO("control panel: remote access on (password required):%s", urls.c_str());
+      return true;
+    }
+    VIRGIL_LOG_WARN("control panel: cannot listen on the network on port %u; this computer only", port);
+  }
+  remote_ = false;
+  return http_.start(0x7F000001, port, handler);
+}
+
+void ControlServer::set_remote(bool remote) {
+  if (remote == remote_ || !port_) return;
+  http_.stop();
+  if (!start(port_, remote)) VIRGIL_LOG_WARN("control panel: port %u is in use; panel disabled", port_);
+  else if (!remote) VIRGIL_LOG_INFO("control panel: remote access off; http://127.0.0.1:%u/ only", port_);
 }
 
 HttpResponse ControlServer::handle(const HttpRequest& r) {
-  // DNS-rebinding guard: only answer requests addressed to the loopback name.
   const std::string host = r.header("host");
-  const std::string p = std::to_string(port_);
-  if (host != "127.0.0.1:" + p && host != "localhost:" + p)
-    return json_error(403, "requests must be addressed to 127.0.0.1 or localhost");
+  const bool local = is_loopback(r.peer);
+  if (local) {
+    // DNS-rebinding guard: only answer requests addressed to the loopback name.
+    const std::string p = std::to_string(port_);
+    if (host != "127.0.0.1:" + p && host != "localhost:" + p)
+      return json_error(403, "requests must be addressed to 127.0.0.1 or localhost");
+  } else {
+    // Another computer (remote access): it must log in with remote_password.
+    bool enabled;
+    std::string password;
+    {
+      std::lock_guard<std::mutex> l(ctx_->mutex);
+      enabled = ctx_->cfg.remote_access;
+      password = ctx_->cfg.remote_password;
+    }
+    const int64_t now = mono_ns() / 1000000;
+    switch (auth_.check(r.peer, enabled, password, r.header("authorization"), now)) {
+      case RemoteAuth::Result::Allowed: break;
+      case RemoteAuth::Result::NeedLogin: {
+        HttpResponse resp = json_error(401, "log in with the remote access password");
+        resp.extra_headers = "WWW-Authenticate: Basic realm=\"Virgil\", charset=\"UTF-8\"\r\n";
+        return resp;
+      }
+      case RemoteAuth::Result::LockedOut: {
+        HttpResponse resp = json_error(429, "too many wrong passwords; try again shortly");
+        resp.extra_headers = "Retry-After: " + std::to_string(auth_.retry_after_s(r.peer, now)) + "\r\n";
+        return resp;
+      }
+      case RemoteAuth::Result::Refused: return json_error(403, "remote access is off");
+    }
+  }
 
   if (r.method == "GET" || r.method == "HEAD") {
     if (r.path == "/" || r.path == "/index.html") {
@@ -108,9 +155,9 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
           "frame-ancestors 'none'\r\n";
       return resp;
     }
-    if (r.path == "/api/status") return status_json();
+    if (r.path == "/api/status") return status_json(local);
     if (r.path == "/api/interfaces") return interfaces_json();
-    if (r.path == "/api/config") return get_config();
+    if (r.path == "/api/config") return get_config(local);
     if (r.path == "/api/diagnostics")
       return {200, "application/json", ctx_->diag.json(wall_ms()), ""};
     if (r.path == "/api/diagnostics/report") return diagnostics_report();
@@ -125,7 +172,7 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
     const std::string origin = r.header("origin");
     if (!origin.empty() && origin != "http://" + host)
       return json_error(403, "cross-origin request refused");
-    if (r.path == "/api/config") return save_config(r);
+    if (r.path == "/api/config") return save_config(r, local);
     if (r.path == "/api/diagnostics/reset") {
       ctx_->diag.reset(wall_ms());
       Json j;
@@ -149,7 +196,7 @@ HttpResponse ControlServer::handle(const HttpRequest& r) {
   return json_error(405, "method not allowed");
 }
 
-HttpResponse ControlServer::status_json() {
+HttpResponse ControlServer::status_json(bool local) {
   std::lock_guard<std::mutex> l(ctx_->mutex);
   const Config& c = ctx_->cfg;
   Engine* e = ctx_->engine;
@@ -190,6 +237,18 @@ HttpResponse ControlServer::status_json() {
     j.end_arr();
   }
   j.kv("dropouts_last_hour", (unsigned long long)ctx_->diag.recent_dropouts(wall_ms()));
+
+  // Remote access to this panel from other computers.
+  j.key("remote").begin_obj();
+  j.kvb("enabled", c.remote_access);
+  j.kvb("listening", remote_);
+  j.kvb("this_client_remote", !local);
+  j.key("urls").begin_arr();
+  if (remote_)
+    for (const auto& i : list_interfaces())
+      if (!i.loopback) j.v("http://" + ipv4_to_string(i.addr) + ":" + std::to_string(port_) + "/");
+  j.end_arr();
+  j.end_obj();
 
   j.key("clock").begin_obj();
   j.kv("state", h ? state_name(h->state.load()) : "stopped");
@@ -417,21 +476,28 @@ std::string config_version(const std::string& text) {
   return b;
 }
 
-HttpResponse ControlServer::get_config() {
+HttpResponse ControlServer::get_config(bool local) {
   std::string text;
   {
     std::lock_guard<std::mutex> lock(config_file_mutex());
     text = current_config_text();
   }
-  HttpResponse resp{200, "text/plain; charset=utf-8", text, ""};
+  // Other computers never see the password; the version is of the real text.
+  HttpResponse resp{200, "text/plain; charset=utf-8", local ? text : mask_remote_password(text), ""};
   resp.extra_headers = "X-Virgil-Config-Version: " + config_version(text) + "\r\n";
   return resp;
 }
 
-HttpResponse ControlServer::save_config(const HttpRequest& r) {
+HttpResponse ControlServer::save_config(const HttpRequest& r, bool local) {
+  // A password sent back masked keeps the current one; other computers may
+  // not change the remote access settings.
+  std::string body, err;
+  {
+    std::lock_guard<std::mutex> lock(config_file_mutex());
+    if (!resolve_posted_config(r.body, current_config_text(), local, &body, &err)) return json_error(403, err);
+  }
   Config parsed;
-  std::string err;
-  if (!parse_config(r.body, &parsed, &err)) return json_error(400, err);
+  if (!parse_config(body, &parsed, &err)) return json_error(400, err);
   Config check = parsed;
   if (!validate_config(&check, &err)) return json_error(400, err);
 
@@ -459,7 +525,7 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
     if (!check.interface.empty() && check.interface != old_iface && !resolve_interface(check.interface, &addr))
       return json_error(400, "network interface '" + check.interface + "' not found");
     std::string werr;
-    if (!write_config_file(path, r.body, &werr))
+    if (!write_config_file(path, body, &werr))
       return json_error(500, werr + " (permission denied? the service needs write access to " + path + ")");
   }
   const bool enabled = check.enabled;
@@ -473,7 +539,7 @@ HttpResponse ControlServer::save_config(const HttpRequest& r) {
   ctx_->reload = true;
   Json j;
   j.begin_obj().kvb("ok", true).kv("path", path).kvb("enabled", enabled);
-  j.kv("version", config_version(r.body)).end_obj();
+  j.kv("version", config_version(body)).end_obj();
   return {200, "application/json", j.take(), ""};
 }
 
