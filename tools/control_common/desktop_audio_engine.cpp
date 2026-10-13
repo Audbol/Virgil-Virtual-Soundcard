@@ -384,6 +384,8 @@ class Session : AudioSource {
   }
 
   std::string lane_text(const Capture& c) const {
+    const std::string note = c.st->note();
+    if (!note.empty()) return note;
     const virgil::AdaptiveBridge& b = lanes_[c.lane].bridge;
     const std::string rate = rate_text(c.st->rate());
     if (b.state() != virgil::AdaptiveBridge::kRunning) return "Waiting for sound (" + rate + ")";
@@ -434,8 +436,10 @@ class Session : AudioSource {
         if (now >= next_text) {
           next_text = now + 250000000;
           const virgil::AdaptiveBridge& b = lanes_[cap.lane].bridge;
+          const std::string note = cap.st->note();
           set_text(sh,
-                   b.frames_in() == 0 || b.state() != virgil::AdaptiveBridge::kRunning
+                   !note.empty() ? note
+                   : b.frames_in() == 0 || b.state() != virgil::AdaptiveBridge::kRunning
                        ? "Nothing playing (" + rate_text(cap.st->rate()) + ")"
                        : lane_text(cap),
                    false);

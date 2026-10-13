@@ -5,7 +5,8 @@
 // ~/.config/virgil/desktop-audio.conf, macOS ~/Library/Application
 // Support/Virgil/desktop-audio.conf). The same format everywhere; only what
 // identifies a device or an app differs (Windows: endpoint ids and exe
-// names; Linux: PulseAudio / PipeWire sink names and app names):
+// names; Linux: PulseAudio / PipeWire sink names and app names; macOS: Core
+// Audio device UIDs and app bundle IDs or names):
 //
 //   [desktop-audio]
 //   enabled = true
@@ -50,7 +51,7 @@ struct DesktopAudioSource {
   Type type = kDevice;
   std::string device = "default";  // kDevice: "default" or a device id (UTF-8)
   std::string name;                // kDevice: friendly name, for display while unplugged
-  std::string app;                 // kApp: chrome.exe (Windows), Firefox (Linux)
+  std::string app;                 // kApp: chrome.exe (Windows), Firefox (Linux), com.spotify.client (macOS)
   unsigned channel = 1;            // first Virgil transmit channel, 1-based
   bool mono = false;
   double gain_db = 0;

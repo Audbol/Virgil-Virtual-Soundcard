@@ -5,7 +5,8 @@
 // The same engine as the Windows app (tools/control_win/desktop_audio.cpp),
 // in portable C++ (std::thread, UTF-8 std::string). Everything the operating
 // system does sits behind Backend below: PulseAudio / PipeWire on Linux
-// (tools/control_linux/desktop_audio_pulse.cpp), CoreAudio on macOS.
+// (tools/control_linux/desktop_audio_pulse.cpp), Core Audio on macOS
+// (tools/control_mac/desktop_audio_coreaudio.mm).
 //
 // Each captured stream goes through an AdaptiveBridge (src/common/resampler.cpp)
 // that converts the device's rate to Virgil's and follows the drift between
@@ -108,6 +109,10 @@ class Stream {
   // sound it records; render: the device it plays on), resolved: never
   // "default". Used to warn about feedback loops.
   virtual std::string device() const = 0;
+  // Optional: a sentence for people that replaces the engine's own status
+  // text while it is not empty (e.g. macOS: "Silent: allow recording…").
+  // Called from the engine's threads, a few times a second.
+  virtual std::string note() const { return std::string(); }
 };
 
 class Backend {
@@ -136,7 +141,8 @@ class Backend {
                                               AudioSource* source, std::string* error) = 0;
 };
 
-// The platform's backend (Linux: PulseAudio / PipeWire, loaded at run time).
+// The platform's backend (Linux: PulseAudio / PipeWire, loaded at run time;
+// macOS: Core Audio process taps, tools/control_mac/desktop_audio_coreaudio.mm).
 // Defined by the platform's backend file, not by the engine.
 std::unique_ptr<Backend> make_system_backend();
 

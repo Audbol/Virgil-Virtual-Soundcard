@@ -4,6 +4,7 @@
 //
 //   Virgil Control.app                  open the window (and the menu bar icon)
 //   .../MacOS/Virgil Control --tray     menu bar icon only (used at login)
+//   .../MacOS/Virgil Control --desktop-audio   also open the Desktop audio window
 #import <AppKit/AppKit.h>
 #import <UserNotifications/UserNotifications.h>
 #include <sys/stat.h>
@@ -14,12 +15,15 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <memory>
 #include <mutex>
 #include <string>
 #include <thread>
 #include <vector>
 
 #include "api.h"
+#include "desktop_audio_engine.h"
+#include "desktop_audio_mac.h"
 #include "settings_model.h"
 #include "view.h"
 
@@ -38,6 +42,21 @@ std::atomic<bool> g_quitting{false};
 // Posted by a second launch so the running copy shows its window instead.
 NSString* const kShowNotification = @"org.virgil.control.show";
 NSImage* g_logo = nil;
+// Desktop audio (this Mac's apps <-> Dante), running for as long as this app.
+std::unique_ptr<desk::Engine> g_desktop;
+bool g_open_desktop = false;  // --desktop-audio
+
+// Virgil's channels as the service reports them, for the Desktop audio window.
+damac::ChannelInfo desktop_channels() {
+  std::lock_guard<std::mutex> l(g_mutex);
+  damac::ChannelInfo c;
+  if (!g_latest.reachable) return c;
+  c.tx = g_latest.tx;
+  c.rx = g_latest.rx;
+  c.tx_names = g_latest.tx_names;
+  c.rx_names = g_latest.rx_names;
+  return c;
+}
 
 uint64_t now_ms() {
   using namespace std::chrono;
@@ -308,6 +327,7 @@ void set_autostart(bool on) {
   if (a == vc::Action::Start) [app performSelector:@selector(startVirgil:) withObject:nil];
   if (a == vc::Action::StartService) [app performSelector:@selector(startService:) withObject:nil];
   if (a == vc::Action::Diagnostics) [app performSelector:@selector(openDiagnostics:) withObject:nil];
+  if (a == vc::Action::DesktopAudio) [app performSelector:@selector(showDesktopAudio:) withObject:nil];
 }
 @end
 
@@ -351,6 +371,12 @@ void set_autostart(bool on) {
                                                           name:kShowNotification
                                                         object:nil];
 
+  // Desktop audio runs in this app (it starts at login, in the user's
+  // session, where the apps and the sound devices are).
+  g_desktop.reset(new desk::Engine(desk::make_system_backend()));
+  g_desktop->start(desk::load_settings(desk::settings_path(), nullptr));
+  g_view.set_desktop_audio(true);
+
   [NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
   NSApp.mainMenu = [self buildMainMenu];
   NSString* png = [[NSBundle mainBundle] pathForResource:@"virgil-256" ofType:@"png"];
@@ -390,6 +416,7 @@ void set_autostart(bool on) {
   std::thread([self] { [self pollLoop]; }).detach();
   if (portable() && vc::http(g_port, "GET", "/api/status").status != 200) [self startService:nil];
   if (!self.startHidden) [self showWindow:nil];
+  if (g_open_desktop) [self showDesktopAudio:nil];
 }
 
 // The app menu bar while the window is open: Quit (Cmd-Q), Settings (Cmd-,),
@@ -434,6 +461,7 @@ void set_autostart(bool on) {
   };
   add(@"Open Virgil", @selector(showWindow:));
   add(@"Settings…", @selector(showSettings:));
+  add(@"Desktop audio…", @selector(showDesktopAudio:));
   add(@"Restart audio engine", @selector(restartEngine:));
   self.runItem = add(@"Stop Virgil", @selector(toggleRunning:));
   [m addItem:[NSMenuItem separatorItem]];
@@ -586,8 +614,9 @@ void set_autostart(bool on) {
   return NSTerminateNow;
 }
 - (void)applicationWillTerminate:(NSNotification*)n {
-  // The poll thread is still running: leave without static destructors.
   g_quitting = true;
+  if (g_desktop) g_desktop->shutdown();  // releases its Virgil playback slot, closes its taps
+  // The poll thread is still running: leave without static destructors.
   _exit(0);
 }
 - (BOOL)applicationShouldTerminateAfterLastWindowClosed:(NSApplication*)a {
@@ -687,6 +716,10 @@ void set_autostart(bool on) {
   } else {
     [[NSWorkspace sharedWorkspace] openURL:[NSURL fileURLWithPath:p]];
   }
+}
+
+- (void)showDesktopAudio:(id)sender {
+  if (g_desktop) damac::show(*g_desktop, desktop_channels);
 }
 
 - (void)toggleAutostart:(id)sender {
@@ -870,6 +903,7 @@ int main(int argc, const char** argv) {
     bool tray = false;
     for (int i = 1; i < argc; ++i) {
       if (!std::strcmp(argv[i], "--tray")) tray = true;
+      if (!std::strcmp(argv[i], "--desktop-audio")) g_open_desktop = true;
       if (!std::strcmp(argv[i], "--port") && i + 1 < argc) g_port = unsigned(std::atoi(argv[++i]));
     }
     NSApplication* app = [NSApplication sharedApplication];

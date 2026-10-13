@@ -90,16 +90,25 @@ target_link_libraries(virgil-latency-probe PRIVATE virgil_client)
 # Desktop audio for Virgil Control on Linux and macOS (Windows has its own,
 # tools/control_win/desktop_audio.cpp): the shared engine, plus the platform
 # backend. Linux: PulseAudio / PipeWire, loaded at run time (no build or
-# package dependency).
+# package dependency). macOS: Core Audio process taps (macOS 14.2 or later
+# for capture; weakly linked, so the app still runs on macOS 11).
 if(NOT WIN32)
   set(VIRGIL_DESKTOP_AUDIO_SOURCES tools/control_common/desktop_audio_engine.cpp
                                    tools/control_common/desktop_audio_settings.cpp)
   if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
     list(APPEND VIRGIL_DESKTOP_AUDIO_SOURCES tools/control_linux/desktop_audio_pulse.cpp)
+  elseif(APPLE)
+    enable_language(OBJCXX)
+    list(APPEND VIRGIL_DESKTOP_AUDIO_SOURCES tools/control_mac/desktop_audio_coreaudio.mm)
   endif()
   add_library(virgil_desktop_audio STATIC ${VIRGIL_DESKTOP_AUDIO_SOURCES})
   target_include_directories(virgil_desktop_audio PUBLIC tools/control_common)
   target_link_libraries(virgil_desktop_audio PUBLIC virgil_client ${CMAKE_DL_LIBS})
+  if(APPLE)
+    target_compile_options(virgil_desktop_audio PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
+    target_link_libraries(virgil_desktop_audio PUBLIC "-framework CoreAudio" "-framework AppKit"
+                          "-framework Foundation")
+  endif()
 endif()
 
 # Virgil Control: opens the control panel (starts a portable virgild if needed).
@@ -108,14 +117,18 @@ if(APPLE)
   enable_language(OBJCXX)
   set_source_files_properties(branding/virgil.icns branding/virgil-256.png PROPERTIES
                               MACOSX_PACKAGE_LOCATION Resources)
-  add_executable(virgil-control MACOSX_BUNDLE tools/control_mac/main.mm tools/control_common/api.cpp
-                 tools/control_common/settings_model.cpp tools/control_common/view.cpp
-                 branding/virgil.icns branding/virgil-256.png)
-  target_include_directories(virgil-control PRIVATE tools/control_common)
+  add_executable(virgil-control MACOSX_BUNDLE tools/control_mac/main.mm tools/control_mac/desktop_audio_mac.mm
+                 tools/control_common/api.cpp tools/control_common/settings_model.cpp
+                 tools/control_common/view.cpp branding/virgil.icns branding/virgil-256.png)
+  target_include_directories(virgil-control PRIVATE tools/control_common tools/control_mac)
   target_compile_definitions(virgil-control PRIVATE VIRGIL_VERSION="${PROJECT_VERSION}")
   target_compile_options(virgil-control PRIVATE $<$<COMPILE_LANGUAGE:OBJCXX>:-fobjc-arc>)
-  target_link_libraries(virgil-control PRIVATE "-framework AppKit" "-framework UserNotifications")
+  target_link_libraries(virgil-control PRIVATE virgil_desktop_audio "-framework AppKit"
+                        "-framework UserNotifications" "-framework CoreAudio")
+  # CMake's default bundle Info.plist plus NSAudioCaptureUsageDescription
+  # (desktop audio's process taps).
   set_target_properties(virgil-control PROPERTIES
+    MACOSX_BUNDLE_INFO_PLIST ${CMAKE_SOURCE_DIR}/tools/control_mac/Info.plist.in
     MACOSX_BUNDLE_ICON_FILE virgil.icns
     OUTPUT_NAME "Virgil Control"
     MACOSX_BUNDLE_BUNDLE_NAME "Virgil Control"

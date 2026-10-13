@@ -183,7 +183,8 @@ how many dropouts the last hour had, and *Dropouts…*, *Settings…* and
   audio…* brings Windows programs' sound to Dante (see below).
 - **macOS:** lives in the menu bar (*Virgil Control* in Applications).
   The menu has the same entries plus *Start at login*; the log opens in
-  Console.
+  Console. *Desktop audio…* (window footer and menu) brings the Mac's apps'
+  sound to Dante (see below, macOS 14.2 or later for capture).
 - **Linux and Raspberry Pi:** a GTK app with a tray icon (AppIndicator /
   StatusNotifier, or the classic system tray) that starts at login on desktop
   systems; *Show log* displays the service journal. Without a tray, closing
@@ -379,6 +380,43 @@ on Windows, with sink names as device ids and app names for `app`.
 `VIRGIL_DA_DEBUG=1` in Virgil Control's environment adds the resampler
 bridges' fill level and counters to the status texts.
 
+### Desktop audio (macOS)
+
+The same feature in Virgil Control for macOS (*Desktop audio…* in the window
+footer and the menu bar menu; `"Virgil Control.app/Contents/MacOS/Virgil
+Control" --desktop-audio` opens the window directly): sound from apps to
+Virgil's transmit channels, and receive channels to an output device, with no
+driver and no virtual cable. Capture uses Core Audio *process taps*, which
+need **macOS 14.2 or later**; on older macOS only the receive channels →
+output device part works, and the window says why.
+
+- **Output device:** everything a device plays (all apps on it). *Default
+  output device* follows the output chosen in System Settings › Sound.
+- **App:** one app by name (`Safari`, `Spotify`) or bundle ID
+  (`com.spotify.client`), with its helper processes (a browser's audio
+  process counts as the browser). The list shows the apps playing sound now;
+  the app is picked up again when it restarts or opens new audio processes.
+- **All apps except Virgil:** every app, without Virgil Control itself and
+  without apps that play on Virgil's own device (so nothing echoes back into
+  Dante).
+
+The first time a source captures, macOS asks whether Virgil Control may
+record this computer's audio. If that was refused, captured audio is silent
+(macOS gives no error): the source's status then says so while its app plays.
+Allow Virgil Control in System Settings › Privacy & Security › *Screen &
+System Audio Recording* (on macOS 15 and later under *System Audio Recording
+Only*) and turn the source off and on. Captured audio keeps playing on its
+device as usual (taps do not mute it).
+
+The rest is as on Windows and Linux: gain, mute, mono, a level meter and status
+per source; receive channels to a device (its first two channels), with a
+warning when that device is also captured; one playback slot named *Desktop
+audio*; roughly 60 ms of latency per direction; drift between the Mac's audio
+clock and the Dante clock followed by the adaptive resampler. Settings are per
+user in `~/Library/Application Support/Virgil/desktop-audio.conf`, the same
+format as on Windows, with Core Audio device UIDs as device ids and bundle IDs
+(or names) for `app`.
+
 ## Building
 
 Requirements: CMake ≥ 3.16, a C++17 compiler and a Rust toolchain (stable,
@@ -467,6 +505,7 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 | CoreAudio driver, macOS `.pkg`, Virgil Control for macOS | Built by CI on macOS; **not yet run on a real Mac** |
 | Virgil Control (Linux / Pi) | Run under X11 with a live daemon: meters, settings dialog and apply |
 | Desktop audio (Linux) | `tests/desktop_audio_e2e.sh`: a private PulseAudio with null sinks and a free-running `virgild`; a tone from the default device, from one named app and from all apps arrives on the mapped transmit channels only; a round trip device → Virgil → receive channels → another device measures the latency (about 117 ms both ways); with Virgil's clock 150 ppm off, both bridges follow it. The engine itself: `ctest` (`desktop_audio`, against a fake sound system) |
+| Desktop audio (macOS) | `ctest` (`desktop_audio_coreaudio`, macOS only): the Core Audio backend lists output devices and playing apps, reports app capture exactly when macOS is 14.2 or later, refuses unknown devices and opens, runs and closes a render stream on the default output (skipped without one). Process taps themselves need the recording permission, so they are tested by hand |
 
 Known limitations:
 

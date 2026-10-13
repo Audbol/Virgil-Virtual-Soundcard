@@ -24,6 +24,15 @@ if(TARGET virgil_desktop_audio AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
   target_link_libraries(virgil_desktop_audio_e2e PRIVATE virgil_desktop_audio virgil_net)
 endif()
 
+# macOS: the Core Audio backend lists devices and apps, reports what the OS
+# version allows and opens / closes a render stream (skipped without a
+# device). Creates no process tap (that would need the recording permission).
+if(TARGET virgil_desktop_audio AND APPLE)
+  add_executable(virgil_desktop_audio_coreaudio_test desktop_audio_coreaudio_test.cpp)
+  target_link_libraries(virgil_desktop_audio_coreaudio_test PRIVATE virgil_desktop_audio)
+  add_test(NAME desktop_audio_coreaudio COMMAND virgil_desktop_audio_coreaudio_test)
+endif()
+
 add_executable(virgil_loopback_test loopback_test.cpp)
 target_link_libraries(virgil_loopback_test PRIVATE virgil_net)
 add_test(NAME loopback COMMAND virgil_loopback_test)
