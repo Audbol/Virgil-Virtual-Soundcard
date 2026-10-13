@@ -28,10 +28,12 @@ float strip_w(unsigned n) {
   const unsigned total = std::max(1u, n);
   if (total <= 16) return 20;
   if (total <= 32) return 12;
-  return 7;
+  if (total <= 64) return 7;
+  return 4;  // up to 128: keeps the window under about 850 points wide
 }
+float strip_gap(float w) { return w >= 12 ? 6 : w >= 7 ? 3 : 2; }
 float group_w(unsigned n) {
-  const float w = strip_w(n), gap = w >= 12 ? 6 : 3;
+  const float w = strip_w(n), gap = strip_gap(w);
   return 34 + float(std::max(1u, n)) * (w + gap) - gap;
 }
 float lin_to_pos(float lin) {
@@ -95,7 +97,7 @@ void StatusView::update_meters(std::vector<Meter>& m, const std::vector<float>& 
 
 void StatusView::draw_group(Canvas& c, float x, float y, const std::string& caption, unsigned n,
                             const std::vector<Meter>& m, float meter_h) {
-  const float sw = strip_w(n), gap = sw >= 12 ? 6 : 3, scale_w = 34;
+  const float sw = strip_w(n), gap = strip_gap(sw), scale_w = 34;
   c.text(caption, Font::Label, Rect{x, y - 26, x + 400, y - 8}, kMuted, Align::Left);
   if (n == 0) {  // no channels this way: no placeholder meter
     c.text("None", Font::Sub, Rect{x, y, x + 400, y + 20}, kDim, Align::Left);
@@ -128,7 +130,7 @@ void StatusView::draw_group(Canvas& c, float x, float y, const std::string& capt
     }
     const bool clip = st.clip_t && now_ - st.clip_t < 2000;
     c.fill(Rect{sx, top - 7, sx + sw, top - 3}, clip ? kBad : kSegOff);
-    if (n <= 32 || ch % 4 == 0)
+    if (n <= 32 || ch % (n <= 64 ? 4 : 8) == 0)
       c.text(std::to_string(ch + 1), Font::Small, Rect{sx - 6, top + h + 4, sx + sw + 6, top + h + 18}, kMuted,
              Align::Center);
   }

@@ -195,8 +195,8 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
       <label>Network interface<select id="f-interface" data-key="interface"></select></label>
       <label>Sample rate<select id="f-rate" data-key="sample_rate">
         <option>44100</option><option>48000</option><option>88200</option><option>96000</option></select></label>
-      <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="64"></label>
-      <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="64"></label>
+      <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="128"></label>
+      <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="128"></label>
       <label>Receive latency (ms)<input id="f-lat" data-key="latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
       <label>Transmit latency (ms)<input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
       <label>Clock<select id="f-clock" data-key="clock">
@@ -549,8 +549,8 @@ function namesDom(el, dir, n) {
 }
 function fillNames() {
   const tx = +(getKey(S.cfg, "device", "tx_channels") ?? 8), rx = +(getKey(S.cfg, "device", "rx_channels") ?? 8);
-  namesDom($("n-tx"), "tx", Math.max(0, Math.min(64, tx || 0)));
-  namesDom($("n-rx"), "rx", Math.max(0, Math.min(64, rx || 0)));
+  namesDom($("n-tx"), "tx", Math.max(0, Math.min(128, tx || 0)));
+  namesDom($("n-rx"), "rx", Math.max(0, Math.min(128, rx || 0)));
   document.querySelectorAll(".namegrid input").forEach(inp => {
     if (document.activeElement === inp) return;
     inp.value = getKey(S.cfg, "channel_names", inp.dataset.dir + inp.dataset.i) ?? "";

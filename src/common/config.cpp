@@ -1,4 +1,5 @@
 #include "virgil/config.h"
+#include "virgil/shm_layout.h"
 
 #include <algorithm>
 #include <cctype>
@@ -185,7 +186,8 @@ bool validate_config(Config* c, std::string* error) {
   static const uint32_t rates[] = {44100, 48000, 88200, 96000};
   if (std::find(std::begin(rates), std::end(rates), c->sample_rate) == std::end(rates))
     return fail("sample_rate must be 44100, 48000, 88200 or 96000");
-  if (c->tx_channels > 64 || c->rx_channels > 64) return fail("at most 64 channels per direction");
+  if (c->tx_channels > kMaxChannels || c->rx_channels > kMaxChannels)
+    return fail("at most " + std::to_string(kMaxChannels) + " channels per direction");
   if (c->tx_channels + c->rx_channels == 0) return fail("needs at least one channel");
   if (c->device_name.empty() || c->device_name.size() > 31)
     return fail("name must be 1 to 31 characters");

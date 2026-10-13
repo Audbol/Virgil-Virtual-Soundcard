@@ -21,20 +21,21 @@ using namespace virgil;
 
 static void wait_ms(int ms) { sleep_until_ns(mono_ns() + int64_t(ms) * 1000000); }
 
-TEST(soundcard_loopback_through_dante_rings) {
+// `C` channels each way (the shared memory layout has room for kMaxChannels).
+static void loopback(uint32_t C) {
   g_log_level = kLogWarn;
   Config c;
   c.device_name = "Loop Test";
   c.interface = "127.0.0.1";
 #if defined(_WIN32)
-  c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id());
+  c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C);
 #else
-  c.shm_name = std::string(kDefaultShmName) + "-test-" + std::to_string(process_id());
+  c.shm_name = std::string(kDefaultShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C);
 #endif
   c.clock = "free";
   c.lock_memory = false;
-  c.tx_channels = 4;
-  c.rx_channels = 4;
+  c.tx_channels = C;
+  c.rx_channels = C;
   // Generous receive latency: the simulator below is an ordinary thread that
   // a loaded CI machine may delay by several milliseconds.
   c.latency_us = 20000;
@@ -68,8 +69,8 @@ TEST(soundcard_loopback_through_dante_rings) {
       const uint64_t lag = std::min<uint64_t>(L, 2 * c.period_frames());
       const uint64_t sent_until = media > lag ? media - lag : 0;
       for (; done < sent_until; ++done)
-        for (uint32_t ch = 0; ch < 4; ++ch)
-          rx[size_t((done + D) & dmask) * 4 + ch] = tx[size_t(done & dmask) * 4 + ch];
+        for (uint32_t ch = 0; ch < C; ++ch)
+          rx[size_t((done + D) & dmask) * C + ch] = tx[size_t(done & dmask) * C + ch];
     }
   });
 
@@ -95,20 +96,20 @@ TEST(soundcard_loopback_through_dante_rings) {
   CHECK(a.frame_now(&now));
   const uint64_t start = uint64_t(now) + 480;  // 10 ms ahead
   const uint32_t n = 2400;
-  std::vector<float> sa(n * 4), sb(n * 2);
+  std::vector<float> sa(n * C), sb(n * 2);
   for (uint32_t f = 0; f < n; ++f) {
-    for (uint32_t ch = 0; ch < 4; ++ch)
-      sa[f * 4 + ch] = 0.25f * std::sin(0.01f * float(f) * float(ch + 1));
+    for (uint32_t ch = 0; ch < C; ++ch)
+      sa[f * C + ch] = 0.25f * std::sin(0.01f * float(f) * float(ch + 1));
     sb[f * 2 + 0] = 0.125f;  // DC on ch 1 from client b
     sb[f * 2 + 1] = 0.f;
   }
-  CHECK(a.write_tx(start, sa.data(), n, 4) == 0);
+  CHECK(a.write_tx(start, sa.data(), n, C) == 0);
   CHECK(b.write_tx(start, sb.data(), n, 2) == 0);
 
   // The block comes back D frames later. Collect it as it becomes readable:
   // the capture ring only keeps half a ring (~170 ms) of history, and a busy
   // CI machine can oversleep a single long wait.
-  std::vector<float> got(n * 4);
+  std::vector<float> got(n * C);
   // Readiness follows the engine's last finished tick, not the interpolated
   // clock, so a late tick cannot make us read a slot before it is filled.
   const int64_t give_up = mono_ns() + 5000000000LL;
@@ -117,19 +118,19 @@ TEST(soundcard_loopback_through_dante_rings) {
     const uint64_t ready = done - 2 * a.period_frames();
     if (ready > start + D + have) {
       const uint32_t k = uint32_t(std::min<uint64_t>(ready - (start + D + have), n - have));
-      a.read_rx(start + D + have, got.data() + size_t(have) * 4, k, 4);
+      a.read_rx(start + D + have, got.data() + size_t(have) * C, k, C);
       have += k;
     }
     wait_ms(2);
   }
   double max_err = 0;
   for (uint32_t f = 0; f < n; ++f)
-    for (uint32_t ch = 0; ch < 4; ++ch) {
-      const float want = sa[f * 4 + ch] + (ch == 0 ? 0.125f : 0.f);
-      const double err = std::fabs(got[f * 4 + ch] - want);
+    for (uint32_t ch = 0; ch < C; ++ch) {
+      const float want = sa[f * C + ch] + (ch == 0 ? 0.125f : 0.f);
+      const double err = std::fabs(got[f * C + ch] - want);
       if (err > 1e-6 && max_err <= 1e-6)
         std::printf("  first mismatch at frame %u ch %u: got %g want %g\n", f, ch,
-                    double(got[f * 4 + ch]), double(want));
+                    double(got[f * C + ch]), double(want));
       max_err = std::max(max_err, err);
     }
   std::printf("  loopback max error %.3g over %u frames (round trip %llu frames), %s\n", max_err,
@@ -139,14 +140,14 @@ TEST(soundcard_loopback_through_dante_rings) {
   CHECK(max_err < 1e-6);
 
   // Nothing before the block (it was consumed, not replayed).
-  std::vector<float> pre(48 * 4);
-  a.read_rx(start + D - 48, pre.data(), 48, 4);
+  std::vector<float> pre(48 * C);
+  a.read_rx(start + D - 48, pre.data(), 48, C);
   for (float v : pre) CHECK(v == 0.f);
 
   // Meters saw the signal in both directions.
   std::vector<float> tx_peak, rx_peak;
   e.take_peaks(&tx_peak, &rx_peak);
-  CHECK(tx_peak.size() == 4 && rx_peak.size() == 4);
+  CHECK(tx_peak.size() == C && rx_peak.size() == C);
   CHECK_NEAR(tx_peak[0], 0.375, 0.01);
   CHECK_NEAR(rx_peak[0], 0.375, 0.01);
 
@@ -157,5 +158,8 @@ TEST(soundcard_loopback_through_dante_rings) {
   e.stop();
   CHECK(!a.daemon_alive());
 }
+
+TEST(soundcard_loopback_through_dante_rings) { loopback(4); }
+TEST(soundcard_loopback_128_channels) { loopback(kMaxChannels); }
 
 TEST_MAIN()

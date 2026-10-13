@@ -20,10 +20,11 @@ namespace virgil {
 
 constexpr uint32_t kShmMagic = 0x314C4756;  // "VGL1"
 // 2: channel names, per-client delivery counters, 8 KiB header.
-constexpr uint32_t kShmVersion = 2;
-constexpr uint32_t kMaxChannels = 64;
+// 3: 128 channels per direction (was 64), 16 KiB header.
+constexpr uint32_t kShmVersion = 3;
+constexpr uint32_t kMaxChannels = 128;
 constexpr uint32_t kMaxTxClients = 8;
-constexpr size_t kShmHeaderBytes = 8192;
+constexpr size_t kShmHeaderBytes = 16384;
 constexpr size_t kChannelNameBytes = 32;  // ASIO's limit, NUL included
 
 #if defined(_WIN32)

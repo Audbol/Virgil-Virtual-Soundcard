@@ -334,6 +334,13 @@ TEST(config_parse) {
   Config lat;
   parse_config("[device]\ntx_latency_us = 1000\ntick_us = 1000\n", &lat, &err);
   CHECK(!validate_config(&lat, &err));  // below two ticks
+  Config big;
+  parse_config("[device]\ntx_channels = 128\nrx_channels = 128\n", &big, &err);
+  CHECK(validate_config(&big, &err));
+  CHECK(shm_total_bytes(big.ring_frames, 128, 128) > kShmHeaderBytes);
+  Config too_big;
+  parse_config("[device]\ntx_channels = 129\n", &too_big, &err);
+  CHECK(!validate_config(&too_big, &err));
 }
 
 TEST(config_stock_name_becomes_unique) {
@@ -1341,7 +1348,7 @@ TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
   CHECK(m.enabled);
   CHECK(m.sources.size() == 1);  // the bad type and the empty app are skipped
   CHECK(m.sources[0].app == "Spotify.exe");
-  CHECK(m.sources[0].channel == 64);  // clamped
+  CHECK(m.sources[0].channel == 128);  // clamped
   CHECK(m.sources[0].gain_db == 0);
   CHECK(m.output.enabled && m.output.channel == 1 && m.output.mono);
   DesktopAudioSettings e;

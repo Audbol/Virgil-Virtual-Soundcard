@@ -19,7 +19,7 @@ route it like any other device, and your audio apps see an ordinary soundcard:
 
 **What you get**
 
-- Up to 64 channels each way at 44.1–96 kHz, routed in Dante Controller like
+- Up to 128 channels each way at 44.1–96 kHz, routed in Dante Controller like
   any other device, with receive and transmit latency down to a few
   milliseconds.
 - **Virgil Control**, a native app on every platform (tray / menu bar icon,

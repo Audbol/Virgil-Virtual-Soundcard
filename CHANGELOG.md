@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- **Up to 128 channels each way** (was 64), in the settings of every Virgil Control app and the control panel. Virgil now accepts up to 64 transmit and 64 receive flows (was 32), so 128 channels work with devices that send few channels per flow (an RME Digiface uses 4). The meters get narrower above 64 channels so the window stays under about 850 points wide. The drivers and the service must be the same version (the shared-memory layout changed); install both from this release. Each channel costs memory: 128×128 at the default latencies uses about 38 MB of shared memory.
 - **Follows network address changes.** When the computer's address changes or goes away while Virgil runs (DHCP renewal, Wi-Fi joining another network or a phone hotspot, an adapter unplugged), Virgil restarts its audio engine on the new address, or waits until the network is back, within a few seconds. It used to stay on the old address, and every send failed with "Can't assign requested address" until it was restarted by hand. The diagnostics event log records it.
 - Fixed a crash of the Dante engine when a device re-requested its flows while Virgil was removing timed-out ones (seen with an RME Digiface Dante on macOS): receiving stopped on some channels, and every later subscription change failed until Virgil was restarted.
 

@@ -202,8 +202,8 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
         cur.app = v;
       } else if (key == "channel") {
         if (parse_uint(v, &n)) {
-          if (n < 1 || n > 64) warn(line_no, "channel " + v + " out of range 1-64: clamped");
-          (src ? cur.channel : out->output.channel) = unsigned(std::max(1L, std::min(64L, n)));
+          if (n < 1 || n > 128) warn(line_no, "channel " + v + " out of range 1-128: clamped");
+          (src ? cur.channel : out->output.channel) = unsigned(std::max(1L, std::min(128L, n)));
         } else {
           bad();
         }

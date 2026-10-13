@@ -32,7 +32,9 @@ use crate::{common::*, device_info::DeviceInfo};
 pub const FPP_MIN: u16 = 2;
 pub const FPP_MAX: u16 = 256;
 pub const FPP_MAX_ADVERTISED: u16 = 32;
-pub const MAX_FLOWS: u32 = 32;
+// Virgil patch: 64 (was 32), for 128 transmit channels to receivers that ask
+// for few channels per flow, with room for flows being re-requested.
+pub const MAX_FLOWS: u32 = 64;
 pub const MAX_CHANNELS_IN_FLOW: u16 = 8;
 pub const KEEPALIVE_TIMEOUT_SECONDS: Clock = 4;
 pub const DISCONTINUITY_THRESHOLD_SAMPLES: usize = 192000;

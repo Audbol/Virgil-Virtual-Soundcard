@@ -295,10 +295,12 @@ float strip_w(unsigned n) {
   const unsigned total = std::max(1u, n);
   if (total <= 16) return 20;
   if (total <= 32) return 12;
-  return 7;
+  if (total <= 64) return 7;
+  return 4;  // up to 128: keeps the window under about 850 pixels wide
 }
+float strip_gap(float w) { return w >= 12 ? 6 : w >= 7 ? 3 : 2; }
 float group_w(unsigned n) {
-  const float w = strip_w(n), gap = w >= 12 ? 6 : 3;
+  const float w = strip_w(n), gap = strip_gap(w);
   return 34 + float(std::max(1u, n)) * (w + gap) - gap;
 }
 float window_w(const vc::Status& s) {
@@ -336,7 +338,7 @@ void update_meters(std::vector<MeterState>& m, const std::vector<float>& vals, u
 
 void draw_meter_group(float x, float y, const wchar_t* caption, unsigned n, const std::vector<MeterState>& m,
                       DWORD now, float meter_h) {
-  const float sw = strip_w(n), gap = sw >= 12 ? 6 : 3, scale_w = 34;
+  const float sw = strip_w(n), gap = strip_gap(sw), scale_w = 34;
   text(caption, g_f_label, D2D1::RectF(x, y - 26, x + 400, y - 8), kMuted);
   const float top = y, h = meter_h, x0 = x + scale_w;
   // dB scale.
@@ -368,7 +370,7 @@ void draw_meter_group(float x, float y, const wchar_t* caption, unsigned n, cons
     // Clip lamp.
     const bool clip = st.clip_t && now - st.clip_t < 2000;
     fill(D2D1::RectF(sx, top - 7, sx + sw, top - 3), clip ? kBad : kSegOff);
-    if (n <= 32 || c % 4 == 0)
+    if (n <= 32 || c % (n <= 64 ? 4 : 8) == 0)
       text(std::to_wstring(c + 1), g_f_small, D2D1::RectF(sx - 6, top + h + 4, sx + sw + 6, top + h + 18), kMuted);
   }
 }
@@ -948,12 +950,12 @@ std::wstring get_text(HWND d, int id) {
   return buf;
 }
 
-// Channel count field: 0..64 (0 = that direction off). False if not a number.
+// Channel count field: 0..128 (0 = that direction off). False if not a number.
 bool read_channels(HWND d, int id, unsigned* out) {
   const std::wstring t = get_text(d, id);
   wchar_t* end = nullptr;
   const unsigned long n = std::wcstoul(t.c_str(), &end, 10);
-  if (t.empty() || end == t.c_str() || *end || n > 64) return false;
+  if (t.empty() || end == t.c_str() || *end || n > 128) return false;
   *out = unsigned(n);
   return true;
 }
@@ -990,8 +992,8 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       SendDlgItemMessageW(d, IDC_IFACE, CB_SETCURSEL, WPARAM(f.iface_index), 0);
       for (const char* l : vc::kRateLabels) combo_add(d, IDC_RATE, widen(l));
       SendDlgItemMessageW(d, IDC_RATE, CB_SETCURSEL, WPARAM(f.rate_index), 0);
-      SendDlgItemMessageW(d, IDC_TXSPIN, UDM_SETRANGE32, 0, 64);
-      SendDlgItemMessageW(d, IDC_RXSPIN, UDM_SETRANGE32, 0, 64);
+      SendDlgItemMessageW(d, IDC_TXSPIN, UDM_SETRANGE32, 0, 128);
+      SendDlgItemMessageW(d, IDC_RXSPIN, UDM_SETRANGE32, 0, 128);
       SetDlgItemTextW(d, IDC_TXCH, std::to_wstring(f.tx_channels).c_str());
       SetDlgItemTextW(d, IDC_RXCH, std::to_wstring(f.rx_channels).c_str());
       for (const char* v : vc::kRxLatencies) combo_add(d, IDC_RXLAT, widen(v));
@@ -1057,7 +1059,7 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         f.iface_index = std::max(0, int(SendDlgItemMessageW(d, IDC_IFACE, CB_GETCURSEL, 0, 0)));
         f.rate_index = int(SendDlgItemMessageW(d, IDC_RATE, CB_GETCURSEL, 0, 0));
         if (!read_channels(d, IDC_TXCH, &f.tx_channels) || !read_channels(d, IDC_RXCH, &f.rx_channels)) {
-          settings_error(d, L"Enter a channel count from 0 to 64 for each direction.");
+          settings_error(d, L"Enter a channel count from 0 to 128 for each direction.");
           return TRUE;
         }
         if (!read_ms(d, IDC_RXLAT, &f.rx_latency_ms) || !read_ms(d, IDC_TXLAT, &f.tx_latency_ms)) {

@@ -16,7 +16,7 @@ interface =
 # 44100, 48000, 88200 or 96000. Must match the other Dante devices.
 sample_rate = 48000
 # Channels apps play into the network (Dante transmit) and record from it
-# (Dante receive). Up to 64 each.
+# (Dante receive). Up to 128 each.
 tx_channels = 8
 rx_channels = 8
 # Receive latency, like Dante's device latency setting: how long received

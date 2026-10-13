@@ -129,7 +129,7 @@ std::wstring channels_short(unsigned first, bool mono) {
 void fill_channels(HWND combo, unsigned count, const std::vector<std::string>& names, unsigned first, bool mono) {
   SendMessageW(combo, CB_RESETCONTENT, 0, 0);
   const bool known = count > 0;
-  if (!known) count = 64;  // Virgil not reachable: anything goes
+  if (!known) count = 128;  // Virgil not reachable: anything goes
   auto name = [&](unsigned ch) -> std::wstring {
     return ch >= 1 && ch <= names.size() ? widen(names[ch - 1]) : std::wstring();
   };
@@ -440,7 +440,7 @@ void edit_source(HWND d, Main& m, int index) {
   } else {
     index = -1;
     // A new source: the first odd stereo pair no other source uses.
-    const unsigned count = m.ch.tx ? m.ch.tx : 64;
+    const unsigned count = m.ch.tx ? m.ch.tx : 128;
     s.src.channel = 1;
     for (unsigned first = 1; first + 1 <= count; first += 2) {
       bool clash = false;

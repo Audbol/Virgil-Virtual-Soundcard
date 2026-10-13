@@ -22,7 +22,9 @@ use tokio::sync::mpsc;
 use tokio::sync::mpsc::error::TryRecvError;
 use usrvclock::ClockOverlay;
 
-pub const MAX_FLOWS: usize = 32;
+// Virgil patch: 64 (was 32), for 128 receive channels from devices that send
+// few channels per flow (an RME Digiface uses 4), with room for re-requests.
+pub const MAX_FLOWS: usize = 64;
 const WAKE_TOKEN: mio::Token = mio::Token(MAX_FLOWS);
 pub const KEEPALIVE_INTERVAL: Duration = Duration::from_millis(250);
 pub const CLOSING_SAMPLES_INTERVAL: Duration = Duration::from_millis(1);

@@ -804,8 +804,8 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
 
   // 0 is allowed in one direction (the service insists on at least one channel).
   GtkWidget* chbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 6);
-  GtkWidget* txch = ui->txch = gtk_spin_button_new_with_range(0, 64, 1);
-  GtkWidget* rxch = ui->rxch = gtk_spin_button_new_with_range(0, 64, 1);
+  GtkWidget* txch = ui->txch = gtk_spin_button_new_with_range(0, 128, 1);
+  GtkWidget* rxch = ui->rxch = gtk_spin_button_new_with_range(0, 128, 1);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(txch), f.tx_channels);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(rxch), f.rx_channels);
   gtk_box_pack_start(GTK_BOX(chbox), txch, FALSE, FALSE, 0);
