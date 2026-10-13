@@ -14,6 +14,6 @@ if [ ! -e /etc/virgil/virgil.conf ]; then
 		if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
 	fi
 	if [ -d /run/systemd/system ] && systemctl is-active --quiet virgild.service 2>/dev/null; then
-		systemctl restart virgild.service >/dev/null 2>&1 || :
+		systemctl --no-block restart virgild.service >/dev/null 2>&1 || :
 	fi
 fi

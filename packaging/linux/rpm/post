@@ -15,15 +15,18 @@ if getent passwd virgil >/dev/null 2>&1; then
 	chown virgil:virgil /etc/virgil
 	if [ -f /etc/virgil/virgil.conf ]; then chown virgil:virgil /etc/virgil/virgil.conf; fi
 fi
+# --no-block: the service starts after network-online.target, and waiting
+# for that (NetworkManager-wait-online, no connection yet) can hold the
+# package manager for minutes. Start it in the background instead.
 if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload >/dev/null 2>&1 || :
 	if [ "$1" -eq 1 ]; then
 		# Fresh install: start now and at every boot.
 		systemctl enable virgild.service >/dev/null 2>&1 || :
-		systemctl restart virgild.service >/dev/null 2>&1 || :
+		systemctl --no-block restart virgild.service >/dev/null 2>&1 || :
 	elif systemctl is-enabled --quiet virgild.service 2>/dev/null || \
 		systemctl is-active --quiet virgild.service 2>/dev/null; then
 		# Upgrade: a service the admin disabled (and stopped) stays so.
-		systemctl restart virgild.service >/dev/null 2>&1 || :
+		systemctl --no-block restart virgild.service >/dev/null 2>&1 || :
 	fi
 fi

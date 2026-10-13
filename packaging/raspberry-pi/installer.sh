@@ -264,13 +264,17 @@ if [ -d /run/systemd/system ]; then
 	systemctl daemon-reload
 	systemctl enable --now virgil-cpu-performance.service >/dev/null 2>&1 || true
 	systemctl enable virgild.service >/dev/null 2>&1 || true
-	systemctl restart virgild.service || true
-	sleep 3
-	if systemctl is-active --quiet virgild.service; then
-		started=1
-	else
-		started=0
-	fi
+	# --no-block: the service starts after network-online.target, which can
+	# take a while (or never come) without a connection; poll for up to 20 s.
+	systemctl --no-block restart virgild.service || true
+	started=0
+	for _ in 1 2 3 4 5 6 7 8 9 10; do
+		sleep 2
+		if systemctl is-active --quiet virgild.service; then
+			started=1
+			break
+		fi
+	done
 else
 	started=0
 	say "     (no systemd here: start it with 'sudo virgild -c $CONF')"
