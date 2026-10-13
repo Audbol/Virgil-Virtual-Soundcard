@@ -10,6 +10,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <cmath>
@@ -26,6 +27,7 @@
 #include "desktop_audio_mac.h"
 #include "settings_model.h"
 #include "view.h"
+#include "windows_mac.h"
 
 #ifndef VIRGIL_VERSION
 #define VIRGIL_VERSION "dev"
@@ -273,6 +275,25 @@ void set_autostart(bool on) {
   [plist writeToFile:ns(p) atomically:YES];
 }
 
+// Remote access as /api/status reports it ("remote"; vc::Status leaves it out).
+struct RemoteInfo {
+  bool listening = false;
+  std::vector<std::string> urls;
+};
+RemoteInfo parse_remote(const std::string& status_body) {
+  RemoteInfo ri;
+  vc::Json j;
+  if (!vc::parse_json(status_body, &j)) return ri;
+  const vc::Json& r = j["remote"];
+  ri.listening = r["listening"].boolean();
+  const vc::Json& u = r["urls"];
+  for (size_t i = 0; i < u.size(); ++i) {
+    const std::string url = vc::valid_utf8(u[i].str());
+    if (!url.empty()) ri.urls.push_back(url);
+  }
+  return ri;
+}
+
 }  // namespace
 
 // ---- status view ---------------------------------------------------------------------------
@@ -347,6 +368,7 @@ void set_autostart(bool on) {
 @property(strong) NSAlert* settingsAlert;
 @property(strong) NSTextField* settingsError;
 @property(copy) std::string (^settingsCollect)(void);  // the form's fields as virgil.conf text
+@property(copy) std::string (^settingsProblem)(void);  // why the form cannot be saved, or ""
 @end
 
 @implementation VCApp
@@ -466,7 +488,8 @@ void set_autostart(bool on) {
   self.runItem = add(@"Stop Virgil", @selector(toggleRunning:));
   [m addItem:[NSMenuItem separatorItem]];
   add(@"Dropouts and diagnostics…", @selector(openDiagnostics:));
-  add(@"Open control panel in browser", @selector(openBrowser:));
+  add(@"Channel names…", @selector(showChannelNames:));
+  add(@"Edit configuration…", @selector(showConfigEditor:));
   add(@"Show log", @selector(showLog:));
   self.autostartItem = add(@"Start at login", @selector(toggleAutostart:));
   add(@"About Virgil", @selector(about:));
@@ -688,16 +711,15 @@ void set_autostart(bool on) {
     alert(@"Could not start the Virgil service. See the log (Show log) for details.");
 }
 
-- (void)openPage:(const char*)anchor {
-  [[NSWorkspace sharedWorkspace]
-      openURL:[NSURL URLWithString:ns("http://127.0.0.1:" + std::to_string(g_port) + "/" + anchor)]];
-}
-- (void)openBrowser:(id)sender {
-  [self openPage:""];
-}
-// Dropout details and the channel name editor live in the control panel.
+// Native windows (windows_mac.mm), one of each.
 - (void)openDiagnostics:(id)sender {
-  [self openPage:"#diagnostics"];
+  vcmac::show_diagnostics(g_port);
+}
+- (void)showChannelNames:(id)sender {
+  vcmac::show_channel_names(g_port, desktop_channels);
+}
+- (void)showConfigEditor:(id)sender {
+  vcmac::show_config_editor(g_port);
 }
 
 - (void)showLog:(id)sender {
@@ -761,14 +783,19 @@ void set_autostart(bool on) {
   dispatch_async(background(), ^{
     const vc::HttpResult c = vc::http(g_port, "GET", "/api/config");
     std::vector<vc::Interface> ifs;
-    if (c.status == 200) ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
+    RemoteInfo remote;
+    if (c.status == 200) {
+      ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
+      const vc::HttpResult st = vc::http(g_port, "GET", "/api/status");
+      if (st.status == 200) remote = parse_remote(st.body);
+    }
     on_main(^{
       self.settingsLoading = NO;
       if (c.status != 200) {
         alert(@"The Virgil service is not running, so its settings cannot be changed now.");
         return;
       }
-      [self openSettings:c.body interfaces:ifs];
+      [self openSettings:c.body interfaces:ifs remote:remote];
     });
   });
 }
@@ -777,14 +804,24 @@ void set_autostart(bool on) {
 // until it is applied or cancelled. The save itself runs off the main thread.
 - (void)runSettings {
   NSAlert* a = self.settingsAlert;
-  [NSApp activateIgnoringOtherApps:YES];
-  const NSModalResponse response = [a runModal];
+  NSModalResponse response;
+  for (;;) {
+    [NSApp activateIgnoringOtherApps:YES];
+    response = [a runModal];
+    if (response != NSAlertFirstButtonReturn) break;
+    // Checked here (the daemon would refuse it too), keeping the dialog open.
+    const std::string problem = self.settingsProblem ? self.settingsProblem() : std::string();
+    if (problem.empty()) break;
+    self.settingsError.stringValue = ns(problem);
+  }
   if (response != NSAlertFirstButtonReturn) {
     self.settingsAlert = nil;
     self.settingsError = nil;
     self.settingsCollect = nil;
-    if (response == NSAlertThirdButtonReturn) [self openPage:"#channels"];
-    if (response == NSAlertThirdButtonReturn + 1) [self openPage:"#diagnostics"];
+    self.settingsProblem = nil;
+    if (response == NSAlertThirdButtonReturn) [self showChannelNames:nil];
+    if (response == NSAlertThirdButtonReturn + 1) [self openDiagnostics:nil];
+    if (response == NSAlertThirdButtonReturn + 2) [self showConfigEditor:nil];
     return;
   }
   const std::string conf = self.settingsCollect();
@@ -798,6 +835,7 @@ void set_autostart(bool on) {
         self.settingsAlert = nil;
         self.settingsError = nil;
         self.settingsCollect = nil;
+        self.settingsProblem = nil;
         return;
       }
       self.settingsError.stringValue = ns(e);
@@ -806,7 +844,9 @@ void set_autostart(bool on) {
   });
 }
 
-- (void)openSettings:(const std::string&)conf interfaces:(const std::vector<vc::Interface>&)ifs {
+- (void)openSettings:(const std::string&)conf
+          interfaces:(const std::vector<vc::Interface>&)ifs
+              remote:(const RemoteInfo&)remote {
   const vc::SettingsForm f = vc::load_settings(conf, ifs);
 
   auto label = [](NSString* s) {
@@ -843,7 +883,28 @@ void set_autostart(bool on) {
                                           target:nil
                                           action:nil];
   master.state = f.master_capable ? NSControlStateValueOn : NSControlStateValueOff;
+  // The web panel from other computers ([device] remote_access / remote_password).
+  NSButton* remoteOn = [NSButton checkboxWithTitle:@"Allow remote access from other computers (web browser)"
+                                            target:nil
+                                            action:nil];
+  remoteOn.state = f.remote_access ? NSControlStateValueOn : NSControlStateValueOff;
+  NSSecureTextField* password = [[NSSecureTextField alloc] initWithFrame:NSZeroRect];
+  password.stringValue = ns(f.remote_password);
+  password.placeholderString = @"At least 8 characters";
+  NSView* remoteInfo = [NSGridCell emptyContentView];
+  if (remote.listening) {
+    std::string t = "Open from another computer:";
+    for (const auto& u : remote.urls) t += "\n" + u;
+    t += "\nPlain HTTP: the password crosses the network unencrypted.";
+    NSTextField* l = [NSTextField wrappingLabelWithString:ns(t)];
+    l.preferredMaxLayoutWidth = 300;
+    l.selectable = YES;
+    l.textColor = [NSColor secondaryLabelColor];
+    l.font = [NSFont systemFontOfSize:11];
+    remoteInfo = l;
+  }
   NSTextField* err = [NSTextField wrappingLabelWithString:@""];
+  err.preferredMaxLayoutWidth = 300;
   err.textColor = color(vc::color::kBad);
 
   NSGridView* grid = [NSGridView gridViewWithViews:@[
@@ -855,6 +916,9 @@ void set_autostart(bool on) {
     @[ label(@"Transmit latency (ms, 3.5 min):"), txl ],
     @[ label(@"Clock:"), clock ],
     @[ [NSGridCell emptyContentView], master ],
+    @[ [NSGridCell emptyContentView], remoteOn ],
+    @[ label(@"Remote password:"), password ],
+    @[ [NSGridCell emptyContentView], remoteInfo ],
     @[ [NSGridCell emptyContentView], err ],
   ]];
   grid.rowSpacing = 8;
@@ -869,7 +933,10 @@ void set_autostart(bool on) {
   [a addButtonWithTitle:@"Cancel"];
   [a addButtonWithTitle:@"Channel names…"];
   [a addButtonWithTitle:@"Dropouts and diagnostics…"];
-  NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, 520, 320)];
+  [a addButtonWithTitle:@"Edit configuration…"];
+  const NSSize fit = grid.fittingSize;
+  NSView* box = [[NSView alloc] initWithFrame:NSMakeRect(0, 0, std::max<CGFloat>(520, std::ceil(fit.width)),
+                                                         std::ceil(fit.height) + 4)];
   [box addSubview:grid];
   [grid.leadingAnchor constraintEqualToAnchor:box.leadingAnchor].active = YES;
   [grid.topAnchor constraintEqualToAnchor:box.topAnchor].active = YES;
@@ -879,7 +946,8 @@ void set_autostart(bool on) {
   const std::string base = conf;  // a copy: blocks would capture the reference itself
   self.settingsAlert = a;
   self.settingsError = err;
-  self.settingsCollect = ^std::string(void) {
+  // The form as the fields have it now.
+  vc::SettingsForm (^form)(void) = ^vc::SettingsForm(void) {
     vc::SettingsForm g = f;
     g.name = name.stringValue.UTF8String ?: "";
     g.iface_index = int(iface.indexOfSelectedItem);
@@ -891,7 +959,15 @@ void set_autostart(bool on) {
     g.tx_latency_ms = txl.stringValue.UTF8String ?: "4";
     g.local_clock = clock.indexOfSelectedItem == 1;
     g.master_capable = master.state == NSControlStateValueOn;
-    return vc::apply_settings(base, g);
+    g.remote_access = remoteOn.state == NSControlStateValueOn;
+    g.remote_password = password.stringValue.UTF8String ?: "";
+    return g;
+  };
+  self.settingsCollect = ^std::string(void) {
+    return vc::apply_settings(base, form());
+  };
+  self.settingsProblem = ^std::string(void) {
+    return vc::remote_access_problem(form());
   };
   [self runSettings];
 }

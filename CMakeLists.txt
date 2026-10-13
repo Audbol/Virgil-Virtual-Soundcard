@@ -118,6 +118,7 @@ if(APPLE)
   set_source_files_properties(branding/virgil.icns branding/virgil-256.png PROPERTIES
                               MACOSX_PACKAGE_LOCATION Resources)
   add_executable(virgil-control MACOSX_BUNDLE tools/control_mac/main.mm tools/control_mac/desktop_audio_mac.mm
+                 tools/control_mac/windows_mac.mm
                  tools/control_common/api.cpp tools/control_common/settings_model.cpp
                  tools/control_common/diagnostics_model.cpp tools/control_common/config_model.cpp
                  tools/control_common/view.cpp branding/virgil.icns branding/virgil-256.png)
