@@ -91,6 +91,7 @@ const char* source_type_key(DesktopAudioSource::Type t) {
   switch (t) {
     case DesktopAudioSource::kApp: return "app";
     case DesktopAudioSource::kAllApps: return "all-apps";
+    case DesktopAudioSource::kInput: return "input";
     default: return "device";
   }
 }
@@ -126,7 +127,8 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
       warn(source_line, "source without an app (app = name.exe): skipped");
       return;
     }
-    if (cur.type == DesktopAudioSource::kDevice && cur.device.empty()) cur.device = "default";
+    if ((cur.type == DesktopAudioSource::kDevice || cur.type == DesktopAudioSource::kInput) && cur.device.empty())
+      cur.device = "default";
     if (out->sources.size() >= kMaxDesktopSources) {
       warn(source_line, "more than " + std::to_string(kMaxDesktopSources) + " sources: skipped");
       return;
@@ -190,6 +192,7 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
         if (t == "device" || t == "system") cur.type = DesktopAudioSource::kDevice;
         else if (t == "app" || t == "process") cur.type = DesktopAudioSource::kApp;
         else if (t == "all-apps" || t == "all_apps" || t == "all") cur.type = DesktopAudioSource::kAllApps;
+        else if (t == "input" || t == "interface") cur.type = DesktopAudioSource::kInput;
         else {
           warn(line_no, "unknown source type '" + v + "': source skipped");
           source_ok = false;
@@ -213,6 +216,24 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
       } else if (key == "gain_db") {
         if (parse_double(v, &d)) (src ? cur.gain_db : out->output.gain_db) = std::max(kMinGainDb, std::min(kMaxGainDb, d));
         else bad();
+      } else if (src && key == "api") {
+        const std::string a = lower(v);
+        if (a == "asio" || a == "wasapi" || a.empty()) cur.api = a;
+        else bad();
+      } else if (src && (key == "first_input" || key == "inputs" || key == "buffer")) {
+        if (!parse_uint(v, &n)) {
+          bad();
+        } else if (key == "first_input") {
+          if (n < 1 || n > 256) warn(line_no, "first_input " + v + " out of range 1-256: clamped");
+          cur.first_input = unsigned(std::max(1L, std::min(256L, n)));
+        } else if (key == "inputs") {
+          if (n < 1 || n > long(kMaxInterfaceInputs))
+            warn(line_no, "inputs " + v + " out of range 1-" + std::to_string(kMaxInterfaceInputs) + ": clamped");
+          cur.inputs = unsigned(std::max(1L, std::min(long(kMaxInterfaceInputs), n)));
+        } else {
+          if (n > 8192) warn(line_no, "buffer " + v + " out of range 0-8192: clamped");
+          cur.buffer = unsigned(std::min(8192L, n));
+        }
       } else if (src && key == "mute") {
         if (parse_bool(v, &b)) cur.mute = b;
         else bad();
@@ -239,13 +260,19 @@ std::string format_desktop_audio(const DesktopAudioSettings& s) {
   for (const DesktopAudioSource& src : s.sources) {
     o += "\n[source]\n";
     o += std::string("type = ") + source_type_key(src.type) + "\n";
-    if (src.type == DesktopAudioSource::kDevice) {
-      o += "device = " + clean(src.device.empty() ? "default" : src.device) + "\n";
+    if (src.type == DesktopAudioSource::kInput && !src.api.empty()) o += "api = " + src.api + "\n";
+    if (src.type == DesktopAudioSource::kDevice || src.type == DesktopAudioSource::kInput) {
+      o += "device = \"" + clean(src.device.empty() ? "default" : src.device) + "\"\n";
       if (!src.name.empty()) o += "name = \"" + clean(src.name) + "\"\n";
     }
     if (src.type == DesktopAudioSource::kApp) o += "app = \"" + clean(src.app) + "\"\n";
+    if (src.type == DesktopAudioSource::kInput) {
+      o += "first_input = " + std::to_string(src.first_input) + "\n";
+      o += "inputs = " + std::to_string(src.inputs) + "\n";
+      o += "buffer = " + std::to_string(src.buffer) + "\n";
+    }
     o += "channel = " + std::to_string(src.channel) + "\n";
-    o += std::string("mono = ") + (src.mono ? "true" : "false") + "\n";
+    if (src.type != DesktopAudioSource::kInput) o += std::string("mono = ") + (src.mono ? "true" : "false") + "\n";
     o += "gain_db = " + fmt_double(src.gain_db) + "\n";
     o += std::string("mute = ") + (src.mute ? "true" : "false") + "\n";
   }

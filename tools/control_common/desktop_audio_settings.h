@@ -28,6 +28,18 @@
 //   [source]
 //   type = all-apps          # every program except Virgil Control itself
 //
+//   [source]
+//   type = input             # input: an audio interface's inputs, one channel each
+//   api = asio               #   Windows: asio (the interface's ASIO driver) or wasapi;
+//                            #   ignored elsewhere (Core Audio, PulseAudio / PipeWire)
+//   device = "Focusrite USB ASIO"  # ASIO: driver name; WASAPI: endpoint id ("default" =
+//                            #   default recording device); macOS: device UID; Linux: source name
+//   name = "Scarlett 18i20"  #   the device's name when it was chosen
+//   first_input = 1          #   first input of the interface (1-based)
+//   inputs = 8               #   how many inputs: first_input.. -> channel.. (1-64)
+//   buffer = 0               #   ASIO buffer in frames (0 = the driver's preferred size)
+//   channel = 1              #   first Virgil transmit channel
+//
 //   [output]                 # Dante receive channels -> an output device
 //   enabled = false
 //   device = default
@@ -44,23 +56,30 @@
 namespace vc {
 
 constexpr size_t kMaxDesktopSources = 16;
+constexpr unsigned kMaxInterfaceInputs = 64;
 constexpr double kMinGainDb = -60, kMaxGainDb = 12;
 
 struct DesktopAudioSource {
-  enum Type { kDevice, kApp, kAllApps };
+  enum Type { kDevice, kApp, kAllApps, kInput };
   Type type = kDevice;
   std::string device = "default";  // kDevice: "default" or a device id (UTF-8)
   std::string name;                // kDevice: friendly name, for display while unplugged
   std::string app;                 // kApp: chrome.exe (Windows), Firefox (Linux), com.spotify.client (macOS)
   unsigned channel = 1;            // first Virgil transmit channel, 1-based
-  bool mono = false;
+  bool mono = false;               // kDevice / kApp / kAllApps: one channel, left + right
   double gain_db = 0;
   bool mute = false;
+  // kInput: an audio interface's inputs, first_input.. -> channel.., one each.
+  std::string api;                 // Windows: "asio" (default) or "wasapi"; "" elsewhere
+  unsigned first_input = 1;        // 1-based
+  unsigned inputs = 2;             // 1..kMaxInterfaceInputs
+  unsigned buffer = 0;             // ASIO buffer in frames, 0 = the driver's preferred
 
-  unsigned width() const { return mono ? 1u : 2u; }
+  unsigned width() const { return type == kInput ? inputs : mono ? 1u : 2u; }
   // Same capture (type, device or app, channels); gain and mute may differ.
   bool same_route(const DesktopAudioSource& o) const {
-    return type == o.type && device == o.device && app == o.app && channel == o.channel && mono == o.mono;
+    return type == o.type && device == o.device && app == o.app && channel == o.channel && mono == o.mono &&
+           api == o.api && first_input == o.first_input && inputs == o.inputs && buffer == o.buffer;
   }
   bool operator==(const DesktopAudioSource& o) const {
     return same_route(o) && name == o.name && gain_db == o.gain_db && mute == o.mute;

@@ -1319,7 +1319,17 @@ TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
   b.mono = true;
   b.mute = true;
   b.channel = 8;
-  s.sources = {a, b};
+  DesktopAudioSource c;  // an audio interface's inputs 3-10 -> transmit 11-18
+  c.type = DesktopAudioSource::kInput;
+  c.api = "asio";
+  c.device = "Focusrite USB ASIO; #2";
+  c.name = "Scarlett 18i20";
+  c.first_input = 3;
+  c.inputs = 8;
+  c.buffer = 128;
+  c.channel = 11;
+  CHECK(c.width() == 8);
+  s.sources = {a, b, c};
   s.output.enabled = true;
   s.output.channel = 5;
   s.output.device = "default";
@@ -1328,8 +1338,16 @@ TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
   std::vector<std::string> warnings;
   CHECK(parse_desktop_audio(text, &t, &warnings));
   CHECK(warnings.empty());
+  CHECK(t.sources.size() == 3 && t.sources[2] == c && t.sources[2].width() == 8);
+  {
+    DesktopAudioSettings u;
+    std::vector<std::string> w;
+    parse_desktop_audio("[source]\ntype = input\ninputs = 99\nfirst_input = 0\napi = coreaudio\n", &u, &w);
+    CHECK(u.sources.size() == 1 && u.sources[0].inputs == kMaxInterfaceInputs && u.sources[0].first_input == 1);
+    CHECK(u.sources[0].device == "default" && u.sources[0].api.empty() && w.size() == 3);
+  }
   CHECK(t.enabled);
-  CHECK(t.sources.size() == 2);
+  CHECK(t.sources.size() == 3);
   CHECK(t.sources[0].type == DesktopAudioSource::kDevice && t.sources[0].device == a.device);
   CHECK(t.sources[0].channel == 3 && std::fabs(t.sources[0].gain_db + 6.5) < 1e-9);
   CHECK(t.sources[1].type == DesktopAudioSource::kApp && t.sources[1].app == "chrome.exe");
