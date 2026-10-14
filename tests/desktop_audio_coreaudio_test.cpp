@@ -72,6 +72,22 @@ TEST(coreaudio_backend_lists_and_reports) {
     CHECK(found);
   }
 
+  // Recording devices (audio interfaces, microphones), with their input counts.
+  const std::vector<desk::Device> ins = be->inputs();
+  int in_defaults = 0;
+  for (const auto& d : ins) {
+    CHECK(!d.id.empty());
+    CHECK(!d.name.empty());
+    CHECK(d.channels > 0);
+    CHECK(d.id.rfind("org.virgil.control.desktop-audio.", 0) != 0);
+    if (d.is_default) ++in_defaults;
+    std::printf("  input: %s (%s), %u channels%s\n", d.name.c_str(), d.id.c_str(), d.channels,
+                d.is_default ? " [default]" : "");
+  }
+  CHECK(in_defaults <= 1);
+  (void)be->default_input();
+  for (const auto& d : outs) CHECK(d.channels > 0);
+
   // Process lists work without any permission.
   for (const auto& a : be->apps()) {
     CHECK(!a.id.empty());
@@ -85,8 +101,22 @@ TEST(coreaudio_backend_lists_and_reports) {
   // Unknown devices are refused with a reason.
   Silence src;
   std::string err;
-  CHECK(be->open_render("no-such-device-uid", 2, 0.03, &src, &err) == nullptr);
+  CHECK(be->open_render("no-such-device-uid", 0, 2, 0.03, &src, &err) == nullptr);
   CHECK(!err.empty());
+  // (Never opens a real input: that would ask for the microphone permission.)
+  struct Nothing : desk::AudioSink {
+    void audio(const float*, size_t, int64_t) override {}
+  } sink;
+  err.clear();
+  CHECK(be->open_input_capture("no-such-device-uid", 1, 2, &sink, &err) == nullptr);
+  CHECK(err.find("not connected") != std::string::npos);
+  // More outputs than the default device has.
+  for (const auto& d : outs)
+    if (d.is_default) {
+      err.clear();
+      CHECK(be->open_render(d.id, d.channels, 2, 0.01, &src, &err) == nullptr);
+      CHECK(err.find("outputs: choose others") != std::string::npos);
+    }
 }
 
 TEST(coreaudio_render_opens_and_closes) {
@@ -97,7 +127,7 @@ TEST(coreaudio_render_opens_and_closes) {
   }
   Silence src;
   std::string err;
-  std::unique_ptr<desk::Stream> s = be->open_render("default", 2, 0.03, &src, &err);
+  std::unique_ptr<desk::Stream> s = be->open_render("default", 0, 2, 0.03, &src, &err);
   if (!s) {
     std::printf("  cannot open the default output (%s): skipped\n", err.c_str());
     return;

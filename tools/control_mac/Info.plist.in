@@ -32,5 +32,7 @@
 	<string>${MACOSX_BUNDLE_COPYRIGHT}</string>
 	<key>NSAudioCaptureUsageDescription</key>
 	<string>Virgil Control sends audio from apps you choose to your Dante network.</string>
+	<key>NSMicrophoneUsageDescription</key>
+	<string>Virgil Control sends your audio interface's inputs to your Dante network.</string>
 </dict>
 </plist>

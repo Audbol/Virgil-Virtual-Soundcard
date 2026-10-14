@@ -67,6 +67,8 @@ enum {  // pa_context_flags_t
 };
 enum {  // pa_stream_flags_t
   PA_STREAM_INTERPOLATE_TIMING_ = 0x0002,
+  PA_STREAM_NO_REMAP_CHANNELS_ = 0x0010,  // channels by index, not by position
+  PA_STREAM_NO_REMIX_CHANNELS_ = 0x0020,
   PA_STREAM_AUTO_TIMING_UPDATE_ = 0x0008,
   PA_STREAM_DONT_MOVE_ = 0x0200,
   PA_STREAM_ADJUST_LATENCY_ = 0x2000,
@@ -74,11 +76,13 @@ enum {  // pa_stream_flags_t
 };
 enum {  // pa_subscription_mask_t
   PA_SUBSCRIPTION_MASK_SINK_ = 0x0001,
+  PA_SUBSCRIPTION_MASK_SOURCE_ = 0x0002,
   PA_SUBSCRIPTION_MASK_SINK_INPUT_ = 0x0004,
   PA_SUBSCRIPTION_MASK_SERVER_ = 0x0080,
 };
 enum {  // pa_subscription_event_type_t
   PA_SUBSCRIPTION_EVENT_SINK_ = 0x0000,
+  PA_SUBSCRIPTION_EVENT_SOURCE_ = 0x0001,
   PA_SUBSCRIPTION_EVENT_SINK_INPUT_ = 0x0002,
   PA_SUBSCRIPTION_EVENT_SERVER_ = 0x0007,
   PA_SUBSCRIPTION_EVENT_FACILITY_MASK_ = 0x000F,
@@ -114,6 +118,18 @@ struct pa_sink_info {  // prefix
   int flags;  // pa_sink_flags_t
   pa_proplist* proplist;
 };
+struct pa_source_info {  // prefix
+  const char* name;
+  uint32_t index;
+  const char* description;
+  pa_sample_spec sample_spec;
+  pa_channel_map channel_map;
+  uint32_t owner_module;
+  pa_cvolume volume;
+  int mute;
+  uint32_t monitor_of_sink;  // PA_INVALID_INDEX_ unless it is a sink's monitor
+  const char* monitor_of_sink_name;
+};
 struct pa_sink_input_info {  // prefix
   uint32_t index;
   const char* name;
@@ -137,6 +153,7 @@ typedef void (*pa_context_success_cb_t)(pa_context*, int success, void*);
 typedef void (*pa_context_subscribe_cb_t)(pa_context*, int event, uint32_t idx, void*);
 typedef void (*pa_server_info_cb_t)(pa_context*, const pa_server_info*, void*);
 typedef void (*pa_sink_info_cb_t)(pa_context*, const pa_sink_info*, int eol, void*);
+typedef void (*pa_source_info_cb_t)(pa_context*, const pa_source_info*, int eol, void*);
 typedef void (*pa_sink_input_info_cb_t)(pa_context*, const pa_sink_input_info*, int eol, void*);
 typedef void (*pa_stream_notify_cb_t)(pa_stream*, void*);
 typedef void (*pa_stream_request_cb_t)(pa_stream*, size_t nbytes, void*);
@@ -171,6 +188,8 @@ struct PulseApi {
   pa_operation* (*context_get_server_info)(pa_context*, pa_server_info_cb_t, void*);
   pa_operation* (*context_get_sink_info_list)(pa_context*, pa_sink_info_cb_t, void*);
   pa_operation* (*context_get_sink_info_by_index)(pa_context*, uint32_t, pa_sink_info_cb_t, void*);
+  pa_operation* (*context_get_source_info_list)(pa_context*, pa_source_info_cb_t, void*);
+  pa_operation* (*context_get_source_info_by_index)(pa_context*, uint32_t, pa_source_info_cb_t, void*);
   pa_operation* (*context_get_sink_input_info_list)(pa_context*, pa_sink_input_info_cb_t, void*);
   pa_operation* (*context_get_sink_input_info)(pa_context*, uint32_t, pa_sink_input_info_cb_t, void*);
   void (*operation_unref)(pa_operation*);

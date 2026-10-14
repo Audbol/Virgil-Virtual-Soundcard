@@ -3,7 +3,8 @@
 // engine: mixing, channel mapping, gain / mute / mono, the "Desktop audio"
 // playback slot, receive channels to the output, app streams coming and
 // going, following the default device, the feedback warning, reconnecting
-// after Virgil restarts, and the settings file.
+// after Virgil restarts, the settings file, and an audio interface's inputs
+// (to transmit channels) and outputs (from receive channels), N channels each.
 #include <algorithm>
 #include <atomic>
 #include <cmath>
@@ -45,6 +46,12 @@ class FakeStream : public desk::Stream {
       : be_(be), capture_(capture), ch_(ch), rate_(rate), device_(std::move(device)), id_(id), sink_(sink), src_(src) {}
   ~FakeStream() override;
   bool start(std::string*) override;
+  double period_s() const override { return period_; }
+  // Set before start(): an interface input (first input, 1-based) or an
+  // interface output (first output, 1-based, of dev_ch outputs).
+  bool input = false;
+  unsigned first = 0, dev_ch = 0;
+  double period_ = 0;
   bool failed(std::string* why) const override {
     if (failed_.load() && why) *why = "fake failure";
     return failed_.load();
@@ -81,9 +88,16 @@ class FakeBackend : public desk::Backend {
     float level;
   };
   std::vector<AppS> app_list = {{1, "Player", 0.3f}, {2, "Player", 0.1f}, {3, "Other", 0.7f}};
+  // Recording devices (audio interfaces): input count; input k (1-based)
+  // of "iface" records 0.05 k, of "mic" -0.1 k, of anything else 0.02 k.
+  std::map<std::string, unsigned> input_devs = {{"iface", 8}, {"mic", 2}};
+  std::string default_in = "mic";
+  std::map<std::string, unsigned> out_ch = {{"spk", 2}, {"hp", 2}, {"usb", 2}, {"iface8", 8}};
   std::vector<FakeStream*> live;      // guarded by mu
-  std::vector<std::string> opened;    // "dev:<id>", "app:<id>", "out:<id>"
+  std::vector<std::string> opened;    // "dev:<id>", "app:<id>", "out:<id>", "in:<id>:<first>:<count>"
   std::vector<float> played;          // what the render stream got (left channel), last 2 s
+  std::vector<float> played_dev;      // interface outputs: every output of the device, interleaved, last 0.5 s
+  unsigned played_dev_ch = 0;
   std::atomic<unsigned> changes_{0}, defaults_{0};
 
   std::string name() const override { return "Fake"; }
@@ -96,8 +110,21 @@ class FakeBackend : public desk::Backend {
   std::vector<desk::Device> outputs() override {
     std::lock_guard<std::mutex> l(mu);
     std::vector<desk::Device> r;
-    for (auto& kv : devices) r.push_back({kv.first, kv.first, kv.first == default_dev});
+    for (auto& kv : out_ch) r.push_back({kv.first, kv.first, kv.first == default_dev, kv.second});
     return r;
+  }
+  std::vector<desk::Device> inputs() override {
+    std::lock_guard<std::mutex> l(mu);
+    std::vector<desk::Device> r;
+    for (auto& kv : input_devs) r.push_back({kv.first, kv.first, kv.first == default_in, kv.second});
+    return r;
+  }
+  std::string default_input() override {
+    std::lock_guard<std::mutex> l(mu);
+    return default_in;
+  }
+  static float input_value(const std::string& dev, unsigned k) {
+    return dev == "iface" ? 0.05f * float(k) : dev == "mic" ? -0.1f * float(k) : 0.02f * float(k);
   }
   std::string default_output() override {
     std::lock_guard<std::mutex> l(mu);
@@ -138,12 +165,45 @@ class FakeBackend : public desk::Backend {
     opened.push_back("app:" + std::to_string(s.id));
     return std::unique_ptr<desk::Stream>(new FakeStream(this, true, ch, 48000, default_dev, s.id, sink, nullptr));
   }
-  std::unique_ptr<desk::Stream> open_render(const std::string& device, unsigned ch, double, desk::AudioSource* src,
-                                            std::string*) override {
+  std::unique_ptr<desk::Stream> open_input_capture(const std::string& device, unsigned first, unsigned count,
+                                                   desk::AudioSink* sink, std::string* error) override {
+    std::lock_guard<std::mutex> l(mu);
+    const std::string id = device.empty() || device == "default" ? default_in : device;
+    auto it = input_devs.find(id);
+    if (it == input_devs.end()) {
+      *error = "The device is not connected";
+      return nullptr;
+    }
+    if (first < 1 || first - 1 + count > it->second) {
+      *error = "bad inputs";
+      return nullptr;
+    }
+    opened.push_back("in:" + id + ":" + std::to_string(first) + ":" + std::to_string(count));
+    auto* s = new FakeStream(this, true, count, 48000, id, 0, sink, nullptr);
+    s->input = true;
+    s->first = first;
+    s->period_ = 0.005;
+    return std::unique_ptr<desk::Stream>(s);
+  }
+  std::unique_ptr<desk::Stream> open_render(const std::string& device, unsigned first, unsigned ch, double,
+                                            desk::AudioSource* src, std::string* error) override {
     std::lock_guard<std::mutex> l(mu);
     const std::string id = device.empty() || device == "default" ? default_dev : device;
+    if (!out_ch.count(id)) {
+      *error = "The device is not connected";
+      return nullptr;
+    }
     opened.push_back("out:" + id);
-    return std::unique_ptr<desk::Stream>(new FakeStream(this, false, ch, 44100, id, 0, nullptr, src));
+    if (first == 0) return std::unique_ptr<desk::Stream>(new FakeStream(this, false, ch, 44100, id, 0, nullptr, src));
+    if (first - 1 + ch > out_ch[id]) {
+      *error = "bad outputs";
+      return nullptr;
+    }
+    auto* s = new FakeStream(this, false, ch, 48000, id, 0, nullptr, src);
+    s->first = first;
+    s->dev_ch = out_ch[id];
+    s->period_ = 0.005;
+    return std::unique_ptr<desk::Stream>(s);
   }
 
   // What one capture stream records now.
@@ -160,6 +220,25 @@ class FakeBackend : public desk::Backend {
     std::lock_guard<std::mutex> l(mu);
     for (size_t f = 0; f < frames; ++f) played.push_back(d[f * ch]);
     if (played.size() > 88200) played.erase(played.begin(), played.end() - 88200);
+  }
+  void record_dev(const float* d, size_t frames, unsigned ch) {
+    std::lock_guard<std::mutex> l(mu);
+    if (played_dev_ch != ch) played_dev.clear();
+    played_dev_ch = ch;
+    played_dev.insert(played_dev.end(), d, d + frames * ch);
+    if (played_dev.size() > 24000 * ch) played_dev.erase(played_dev.begin(), played_dev.end() - 24000 * ch);
+  }
+  // Mean of each device output over the last 100 ms (empty: not enough yet).
+  std::vector<double> dev_means() {
+    std::lock_guard<std::mutex> l(mu);
+    const unsigned ch = played_dev_ch;
+    const size_t n = 4800;
+    if (!ch || played_dev.size() < n * ch) return {};
+    std::vector<double> m(ch, 0.0);
+    for (size_t f = played_dev.size() / ch - n; f < played_dev.size() / ch; ++f)
+      for (unsigned k = 0; k < ch; ++k) m[k] += played_dev[f * ch + k];
+    for (double& v : m) v /= double(n);
+    return m;
   }
   size_t count(const std::string& what) {
     std::lock_guard<std::mutex> l(mu);
@@ -195,16 +274,28 @@ bool FakeStream::start(std::string*) {
   return true;
 }
 
-// 10 ms packets on the system clock (a sound card exactly on time).
+// 10 ms packets on the system clock (a sound card exactly on time); 5 ms for
+// an interface's inputs and outputs.
 void FakeStream::run() {
-  const size_t n = rate_ / 100;
-  std::vector<float> buf(n * ch_);
+  const int64_t period_ns = period_ > 0 ? int64_t(period_ * 1e9) : 10000000;
+  const size_t n = size_t(int64_t(rate_) * period_ns / 1000000000);
+  std::vector<float> buf(n * ch_), dev(n * std::max(1u, dev_ch));
   int64_t next = virgil::mono_ns();
   while (!quit_) {
-    next += 10000000;
+    next += period_ns;
     virgil::sleep_until_ns(next);
     if (failed_) continue;
-    if (capture_) {
+    if (capture_ && input) {
+      for (size_t f = 0; f < n; ++f)
+        for (unsigned k = 0; k < ch_; ++k) buf[f * ch_ + k] = FakeBackend::input_value(device_, first + k);
+      sink_->audio(buf.data(), n, next);
+    } else if (!capture_ && first) {
+      src_->render(buf.data(), n, next);
+      std::fill(dev.begin(), dev.end(), 0.f);
+      for (size_t f = 0; f < n; ++f)
+        for (unsigned k = 0; k < ch_; ++k) dev[f * dev_ch + first - 1 + k] = buf[f * ch_ + k];
+      be_->record_dev(dev.data(), n, dev_ch);
+    } else if (capture_) {
       const Signal s = be_->signal_of(*this);
       for (size_t f = 0; f < n; ++f) {
         if (ch_ == 1) {
@@ -227,17 +318,17 @@ struct Virgil {
   std::unique_ptr<virgil::Engine> e;
   std::atomic<bool> sim_run{false};
   std::thread sim;
-  float rx_dc[4] = {-0.2f, 0.3f, 0.f, 0.f};
+  std::vector<float> rx_dc = {-0.2f, 0.3f, 0.f, 0.f};  // per receive channel (missing ones: 0)
 
-  explicit Virgil(const std::string& shm) {
+  explicit Virgil(const std::string& shm, unsigned tx = 6, unsigned rx = 4) {
     virgil::g_log_level = virgil::kLogWarn;
     c.device_name = "DA Test";
     c.interface = "127.0.0.1";
     c.shm_name = shm;
     c.clock = "free";
     c.lock_memory = false;
-    c.tx_channels = 6;
-    c.rx_channels = 4;
+    c.tx_channels = tx;
+    c.rx_channels = rx;
     c.latency_us = 10000;
     c.tx_latency_us = 4000;
     c.ring_frames = 16384;
@@ -260,9 +351,11 @@ struct Virgil {
         // Start at the media clock, and never fall more than a ring behind
         // (from 0, or after a stall, this would loop over billions of frames).
         if (done + c.ring_frames / 2 < media) done = media;
+        const uint32_t R = c.rx_channels;
         for (; done < media + 2400; ++done)
-          for (uint32_t ch = 0; ch < 4; ++ch)
-            rx[size_t(done & dmask) * 4 + ch] = int32_t(std::lround(double(rx_dc[ch]) * 2147483647.0));
+          for (uint32_t ch = 0; ch < R; ++ch)
+            rx[size_t(done & dmask) * R + ch] =
+                int32_t(std::lround(double(ch < rx_dc.size() ? rx_dc[ch] : 0.f) * 2147483647.0));
       }
     });
     return true;
@@ -275,13 +368,14 @@ struct Virgil {
   }
   // Mean of each transmit channel over the last 100 ms the engine mixed.
   std::vector<double> tx_means() {
-    std::vector<double> m(6, 0.0);
+    const unsigned T = c.tx_channels;
+    std::vector<double> m(T, 0.0);
     auto& tx = e->dante_tx_ring();
     const uint64_t dmask = c.ring_frames - 1;
     const uint64_t now = e->header()->now_frames.load();
     const uint64_t n = 4800, from = now - n - 96;
     for (uint64_t f = from; f < from + n; ++f)
-      for (unsigned ch = 0; ch < 6; ++ch) m[ch] += double(tx[size_t(f & dmask) * 6 + ch]) / 2147483648.0;
+      for (unsigned ch = 0; ch < T; ++ch) m[ch] += double(tx[size_t(f & dmask) * T + ch]) / 2147483648.0;
     for (double& v : m) v /= double(n);
     return m;
   }
@@ -336,6 +430,32 @@ vc::DesktopAudioSettings base_settings() {
   s.output.device = "usb";
   s.output.channel = 2;
   s.output.mono = true;
+  return s;
+}
+
+// What every transmit channel carries is `want` (missing entries: 0), to eps.
+bool tx_is(Virgil& v, const std::vector<double>& want, double eps) {
+  const std::vector<double> m = v.tx_means();
+  for (size_t k = 0; k < m.size(); ++k)
+    if (!near(m[k], k < want.size() ? want[k] : 0.0, eps)) return false;
+  return true;
+}
+void print_means(const char* what, const std::vector<double>& m) {
+  std::printf("  %s:", what);
+  for (double x : m) std::printf(" %.4f", x);
+  std::printf("\n");
+}
+
+vc::DesktopAudioSettings input_settings(const std::string& device, unsigned first, unsigned count, unsigned channel) {
+  vc::DesktopAudioSettings s;
+  s.enabled = true;
+  vc::DesktopAudioSource a;
+  a.type = vc::DesktopAudioSource::kInput;
+  a.device = device;
+  a.first_input = first;
+  a.inputs = count;
+  a.channel = channel;
+  s.sources = {a};
   return s;
 }
 
@@ -527,6 +647,165 @@ TEST(desktop_audio_bad_channels_are_reported) {
   eng.shutdown();
 }
 
+TEST(desktop_audio_interface_inputs) {
+  Virgil v(test_shm("i"), 12, 4);
+  CHECK(v.start());
+  if (!v.e) return;
+  auto* fake = new FakeBackend;
+  desk::Engine eng(std::unique_ptr<desk::Backend>(fake), v.c.shm_name);
+  // All 8 inputs of "iface" (0.05, 0.10, ... 0.40) -> transmit channels 3-10.
+  eng.start(input_settings("iface", 1, 8, 3));
+  std::vector<double> want = {0, 0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0, 0};
+  const bool exact = eventually(3000, [&] { return tx_is(v, want, 1e-4); });
+  print_means("8 inputs -> tx 3-10", v.tx_means());
+  CHECK(exact);
+  desk::Status st;
+  CHECK(eventually(2000, [&] {
+    st = eng.status();
+    return st.sources.size() == 1 && st.sources[0].text.find("Capturing 8 inputs (48 kHz") == 0;
+  }));
+  if (st.sources.size() == 1) {
+    std::printf("  \"%s\"\n", st.sources[0].text.c_str());
+    CHECK(!st.sources[0].error && st.sources[0].sound);
+  }
+  CHECK(fake->count("in:iface:1:8") == 1);
+
+  // Inputs 5 + 6 of 8 -> transmit channels 1 + 2.
+  vc::DesktopAudioSettings s = input_settings("iface", 5, 2, 1);
+  eng.apply(s);
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.25, 0.30}, 1e-4); }));
+  print_means("inputs 5-6 -> tx 1-2", v.tx_means());
+
+  // Gain, then mute: no reopening.
+  const size_t opens = fake->count("in:iface:5:2");
+  s.sources[0].gain_db = -6;
+  eng.apply(s);
+  const double g6 = vc::db_to_gain(-6);
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.25 * g6, 0.30 * g6}, 1e-4); }));
+  s.sources[0].mute = true;
+  eng.apply(s);
+  CHECK(eventually(3000, [&] { return tx_is(v, {}, 1e-6); }));
+  CHECK(fake->count("in:iface:5:2") == opens);
+
+  // Inputs the device does not have, transmit channels Virgil does not have.
+  eng.apply(input_settings("iface", 7, 4, 1));
+  CHECK(eventually(3000, [&] {
+    st = eng.status();
+    return st.sources.size() == 1 && st.sources[0].error &&
+           st.sources[0].text.find("The device has 8 inputs: choose others") == 0;
+  }));
+  std::printf("  \"%s\"\n", st.sources[0].text.c_str());
+  eng.apply(input_settings("iface", 1, 4, 10));
+  CHECK(eventually(3000, [&] {
+    st = eng.status();
+    return st.sources.size() == 1 && st.sources[0].error &&
+           st.sources[0].text.find("12 transmit channels") != std::string::npos;
+  }));
+  std::printf("  \"%s\"\n", st.sources[0].text.c_str());
+
+  // An interface that is not plugged in: says so, and starts when it appears.
+  eng.apply(input_settings("usbif", 2, 3, 4));
+  CHECK(eventually(3000, [&] {
+    st = eng.status();
+    return st.sources.size() == 1 && st.sources[0].error && st.sources[0].text.find("not connected") != std::string::npos;
+  }));
+  std::printf("  \"%s\"\n", st.sources[0].text.c_str());
+  {
+    std::lock_guard<std::mutex> l(fake->mu);
+    fake->input_devs["usbif"] = 4;
+  }
+  fake->changes_++;
+  CHECK(eventually(3000, [&] { return tx_is(v, {0, 0, 0, 0.04, 0.06, 0.08}, 1e-4); }));
+  print_means("plugged in: usbif 2-4 -> tx 4-6", v.tx_means());
+
+  // The default recording device, and following it when it changes.
+  eng.apply(input_settings("default", 1, 2, 1));
+  CHECK(eventually(3000, [&] { return tx_is(v, {-0.1, -0.2}, 1e-4); }));
+  {
+    std::lock_guard<std::mutex> l(fake->mu);
+    fake->default_in = "iface";
+  }
+  fake->defaults_++;
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.05, 0.10}, 1e-4); }));
+  eng.shutdown();
+}
+
+TEST(desktop_audio_interface_outputs) {
+  Virgil v(test_shm("o"), 4, 6);
+  v.rx_dc = {-0.2f, 0.3f, 0.15f, -0.35f, 0.45f, 0.05f};
+  CHECK(v.start());
+  if (!v.e) return;
+  auto* fake = new FakeBackend;
+  desk::Engine eng(std::unique_ptr<desk::Backend>(fake), v.c.shm_name);
+  // Receive channels 2-5 -> outputs 3-6 of the 8 of "iface8"; and inputs of
+  // an interface at the same time (no echo warning: they are not a capture
+  // of what the device plays).
+  vc::DesktopAudioSettings s = input_settings("iface", 1, 2, 1);
+  s.output.enabled = true;
+  s.output.type = vc::DesktopAudioOutput::kInterface;
+  s.output.device = "iface8";
+  s.output.channel = 2;
+  s.output.first_output = 3;
+  s.output.outputs = 4;
+  eng.start(s);
+  auto dev_is = [&](const std::vector<double>& want, double eps) {
+    const std::vector<double> m = fake->dev_means();
+    if (m.size() != 8) return false;
+    for (size_t k = 0; k < 8; ++k)
+      if (!near(m[k], want[k], eps)) return false;
+    return true;
+  };
+  const bool exact = eventually(3000, [&] { return dev_is({0, 0, 0.3, 0.15, -0.35, 0.45, 0, 0}, 1e-4); });
+  print_means("rx 2-5 -> outputs 3-6 of 8", fake->dev_means());
+  CHECK(exact);
+  desk::Status st;
+  CHECK(eventually(2000, [&] { return (st = eng.status()).output.text.find("Playing 4 channels on iface8 (48 kHz") == 0; }));
+  std::printf("  \"%s\"\n", st.output.text.c_str());
+  CHECK(!st.output.error && st.output.sound);
+  CHECK(st.sources.size() == 1 && !st.sources[0].error);
+  CHECK(eventually(2000, [&] { return tx_is(v, {0.05, 0.10}, 1e-4); }));
+
+  // Gain without reopening.
+  const size_t opens = fake->count("out:iface8");
+  s.output.gain_db = -6;
+  eng.apply(s);
+  const double g6 = vc::db_to_gain(-6);
+  CHECK(eventually(3000, [&] { return dev_is({0, 0, 0.3 * g6, 0.15 * g6, -0.35 * g6, 0.45 * g6, 0, 0}, 1e-4); }));
+  CHECK(fake->count("out:iface8") == opens);
+
+  // Outputs the device does not have; receive channels Virgil does not have.
+  s.output.first_output = 6;
+  eng.apply(s);
+  CHECK(eventually(3000, [&] {
+    st = eng.status();
+    return st.output.error && st.output.text.find("The device has 8 outputs: choose others") == 0;
+  }));
+  std::printf("  \"%s\"\n", st.output.text.c_str());
+  s.output.first_output = 1;
+  s.output.channel = 4;  // 4-7 of 6
+  eng.apply(s);
+  CHECK(eventually(3000, [&] {
+    st = eng.status();
+    return st.output.error && st.output.text.find("6 receive channels") != std::string::npos;
+  }));
+  std::printf("  \"%s\"\n", st.output.text.c_str());
+
+  // The ordinary (stereo) output is unchanged by all this.
+  s.output.type = vc::DesktopAudioOutput::kDevice;
+  s.output.device = "usb";
+  s.output.channel = 1;
+  s.output.gain_db = 0;
+  eng.apply(s);
+  CHECK(eventually(3000, [&] {
+    std::lock_guard<std::mutex> l(fake->mu);
+    if (fake->played.size() < 4410) return false;
+    double sum = 0;
+    for (size_t i = fake->played.size() - 4410; i < fake->played.size(); ++i) sum += fake->played[i];
+    return near(sum / 4410, -0.2, 0.004);
+  }));
+  eng.shutdown();
+}
+
 TEST(desktop_audio_settings_file) {
 #if !defined(_WIN32)
   char tmpl[] = "/tmp/virgil-da-test-XXXXXX";
@@ -546,6 +825,18 @@ TEST(desktop_audio_settings_file) {
   s.sources[1].app = "Google Chrome";  // names with spaces (Linux app names)
   s.sources[0].device = "alsa_output.pci-0000_00_1f.3.analog-stereo";
   s.sources[0].name = "Built-in Audio Analog Stereo";
+  vc::DesktopAudioSource in;  // an interface's inputs 3-10 -> 9..16
+  in.type = vc::DesktopAudioSource::kInput;
+  in.device = "alsa_input.usb-Focusrite_Scarlett_18i20-00.pro-input-0";
+  in.name = "Scarlett 18i20 Pro";
+  in.first_input = 3;
+  in.inputs = 8;
+  in.channel = 9;
+  s.sources.push_back(in);
+  s.output.type = vc::DesktopAudioOutput::kInterface;  // rx 2.. -> outputs 5-8
+  s.output.first_output = 5;
+  s.output.mono = false;  // (not stored for interface outputs)
+  s.output.outputs = 4;
   CHECK(desk::save_settings(path, s, &err));  // creates the folder
   const vc::DesktopAudioSettings back = desk::load_settings(path, &err);
   CHECK(err.empty());

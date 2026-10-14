@@ -19,17 +19,38 @@
 //       -> rx ch N/N+1 -> output device SINK; --measure DEV also times tone
 //       bursts played on DEV against their arrival on SINK (latency)
 //
-//   SPEC: device:<sink>|device:default|app:<name>|all
+//   virgil_desktop_audio_e2e inputs --shm NAME --fifo PATH --dev-ch D --source input:<source>
+//                                   --first F --count N --channel C [--seconds S]
+//       an audio interface's inputs into a running virgild (free-run): this
+//       program feeds a module-pipe-source (PATH, D float32 channels, input k
+//       = +-0.05 k, the sign flipping for 100 ms every second) in real time;
+//       its inputs F.. go to transmit channels C.. Checks the values that
+//       arrive in the "Desktop audio" slot (exact, the others silent) and the
+//       latency from writing a flip to its Dante transmit time.
+//   virgil_desktop_audio_e2e outputs --out SINK --dev-ch D --first F --count N
+//                                    --channel C [--seconds S]
+//       an in-process Virgil engine whose receive channel k carries +-0.1 k
+//       (sign flipping for 100 ms every second of media time); receive
+//       channels C.. go to the outputs F.. of SINK (D channels), recorded with
+//       parec from its monitor: exact values there, silence on the other
+//       outputs, and the latency from Dante media time to the device.
+//
+//   SPEC: device:<sink>|device:default|app:<name>|all|input:<source>
 #include <algorithm>
 #include <atomic>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <deque>
 #include <string>
 #include <mutex>
 #include <thread>
 #include <vector>
+
+#include <fcntl.h>
+#include <signal.h>
+#include <unistd.h>
 
 #include "desktop_audio_engine.h"
 #include "virgil/client.h"
@@ -43,8 +64,8 @@ namespace {
 void wait_ms(int ms) { virgil::sleep_until_ns(virgil::mono_ns() + int64_t(ms) * 1000000); }
 
 struct Args {
-  std::string mode, shm, source = "device:default", out = "default", measure_src;
-  unsigned channel = 1;
+  std::string mode, shm, source = "device:default", out = "default", measure_src, fifo;
+  unsigned channel = 1, first = 1, count = 2, dev_ch = 0;
   bool mono = false;
   double seconds = 4, freq = 1000, ppm = 0, share = 0.95;
 };
@@ -55,6 +76,9 @@ bool parse_source(const std::string& spec, vc::DesktopAudioSource* s) {
   } else if (spec.rfind("device:", 0) == 0) {
     s->type = vc::DesktopAudioSource::kDevice;
     s->device = spec.substr(7);
+  } else if (spec.rfind("input:", 0) == 0) {
+    s->type = vc::DesktopAudioSource::kInput;
+    s->device = spec.substr(6);
   } else if (spec.rfind("app:", 0) == 0) {
     s->type = vc::DesktopAudioSource::kApp;
     s->app = spec.substr(4);
@@ -177,7 +201,11 @@ int list_mode() {
     return 1;
   }
   std::printf("default output: %s\n", be->default_output().c_str());
-  for (const auto& d : be->outputs()) std::printf("output %s%s  (%s)\n", d.id.c_str(), d.is_default ? " *" : "", d.name.c_str());
+  for (const auto& d : be->outputs())
+    std::printf("output %s%s  (%s, %u channels)\n", d.id.c_str(), d.is_default ? " *" : "", d.name.c_str(), d.channels);
+  std::printf("default input: %s\n", be->default_input().c_str());
+  for (const auto& d : be->inputs())
+    std::printf("input %s%s  (%s, %u channels)\n", d.id.c_str(), d.is_default ? " *" : "", d.name.c_str(), d.channels);
   for (const auto& a : be->apps())
     std::printf("app %s  (%s)%s\n", a.id.c_str(), a.name.c_str(), a.playing ? " playing" : "");
   return 0;
@@ -391,12 +419,353 @@ int loop_mode(const Args& a) {
   return ok ? 0 : 1;
 }
 
+
+struct Stats {
+  std::vector<double> v;
+  void add(double x) { v.push_back(x); }
+  std::string text() {
+    if (v.empty()) return "none";
+    std::sort(v.begin(), v.end());
+    char b[128];
+    std::snprintf(b, sizeof b, "min %.2f, median %.2f, max %.2f ms over %zu", v.front(), v[v.size() / 2], v.back(),
+                  v.size());
+    return b;
+  }
+};
+
+// The test signal: channel k (1-based) is +-scale k, negative during the
+// first tenth of every second (frame counts at `rate`).
+float test_value(uint64_t frame, unsigned k, unsigned rate, float scale) {
+  return (frame % rate < rate / 10 ? -scale : scale) * float(k);
+}
+
+// An audio interface's inputs (a pipe source this program feeds) -> a running virgild.
+int inputs_mode(const Args& a) {
+  if (a.fifo.empty() || !a.dev_ch) {
+    std::printf("inputs needs --fifo and --dev-ch\n");
+    return 2;
+  }
+  const unsigned D = a.dev_ch, rate = 48000;
+  const int fd = open(a.fifo.c_str(), O_WRONLY);
+  if (fd < 0) {
+    std::printf("cannot open %s\n", a.fifo.c_str());
+    return 1;
+  }
+  // The writer: 1 ms chunks in real time; when each second's flip was written.
+  std::atomic<bool> run{true};
+  std::mutex wmu;
+  std::deque<int64_t> flips;  // mono_ns of each flip's write, oldest first
+  std::thread writer([&] {
+    const size_t n = rate / 1000;
+    std::vector<float> buf(n * D);
+    uint64_t frame = 0;
+    int64_t next = virgil::mono_ns();
+    while (run) {
+      for (size_t f = 0; f < n; ++f)
+        for (unsigned k = 0; k < D; ++k) buf[f * D + k] = test_value(frame + f, k + 1, rate, 0.05f);
+      const int64_t now = virgil::mono_ns();
+      if (frame % rate == 0) {
+        std::lock_guard<std::mutex> l(wmu);
+        flips.push_back(now);
+        if (flips.size() > 64) flips.pop_front();
+      }
+      const ssize_t w = write(fd, buf.data(), buf.size() * sizeof(float));
+      if (w < 0) break;
+      frame += n;
+      next += 1000000;
+      virgil::sleep_until_ns(next);
+    }
+  });
+
+  vc::DesktopAudioSettings s;
+  s.enabled = true;
+  vc::DesktopAudioSource src;
+  if (!parse_source(a.source, &src) || src.type != vc::DesktopAudioSource::kInput) {
+    std::printf("inputs needs --source input:<source>\n");
+    return 2;
+  }
+  src.first_input = a.first;
+  src.inputs = a.count;
+  src.channel = a.channel;
+  s.sources.push_back(src);
+  desk::Engine e(desk::make_system_backend(), a.shm);
+  e.start(s);
+  virgil::Client c;
+  for (int k = 0; k < 50 && !c.open(a.shm); ++k) wait_ms(100);
+  if (!c.is_open()) {
+    std::printf("cannot open %s: %s\n", a.shm.c_str(), c.open_error().c_str());
+    run = false;
+    writer.join();
+    return 1;
+  }
+  const unsigned C = c.tx_channels(), ring = c.ring_frames();
+  auto* h = const_cast<virgil::ShmHeader*>(c.header());
+  const int64_t t0 = virgil::mono_ns();
+  int slot = -1;
+  uint64_t next = 0, checked = 0, exact = 0, bad_other = 0;
+  int sign = 0;  // of the first mapped channel, with hysteresis (+1, -1)
+  const float thr = 0.025f * float(a.first);
+  int64_t settle_until = 0, next_print = 0;
+  uint64_t skip_until = 0;  // frames near a flip (the resampler's kernel rings there)
+  std::deque<uint64_t> recent_bad;
+  Stats lat;
+  std::vector<double> sum(C, 0.0);
+  uint64_t nsum = 0;
+  while (virgil::mono_ns() - t0 < int64_t(a.seconds * 1e9)) {
+    const int64_t now_ns = virgil::mono_ns();
+    if (now_ns >= next_print) {
+      next_print = now_ns + 1000000000LL;
+      print_status(e);
+    }
+    if (slot < 0) {
+      for (unsigned i = 0; i < virgil::kMaxTxClients; ++i)
+        if (h->clients[i].pid.load() && virgil::slot_name(h->clients[i]) == "Desktop audio") slot = int(i);
+      wait_ms(5);
+      continue;
+    }
+    const float* r = virgil::tx_ring(h, uint32_t(slot));
+    const uint64_t now = h->now_frames.load();
+    const uint64_t w = h->clients[slot].written_until.load();
+    if (next < now) {  // missed some (or the first round): start over
+      next = std::max(now, w > 400 ? w - 400 : 0);
+      skip_until = next + 256;
+    }
+    virgil::ClockAnchor an;
+    const bool have_anchor = c.anchor(&an);
+    const bool counting = now_ns - t0 > 3000000000LL;  // bridges settled
+    for (; next < w; ++next) {
+      const float* fr = r + size_t(next & (ring - 1)) * C;
+      const float v0 = fr[a.channel - 1];
+      // A flip to negative: its Dante transmit time against when it was written.
+      const int sg = v0 > thr ? 1 : v0 < -thr ? -1 : sign;
+      if (sign > 0 && sg < 0 && have_anchor && counting && now_ns > settle_until) {
+        const int64_t tx_ns = an.host_ns_at(double(next));
+        std::lock_guard<std::mutex> l(wmu);
+        for (auto it = flips.rbegin(); it != flips.rend(); ++it)
+          if (*it < tx_ns) {
+            if (tx_ns - *it < 900000000LL) lat.add((tx_ns - *it) / 1e6);
+            break;
+          }
+      }
+      if (sg != sign) {
+        // The resampler's kernel rings on both sides of a step: the frames
+        // just before it do not count either.
+        skip_until = next + 64;
+        while (!recent_bad.empty() && recent_bad.back() + 64 > next) {
+          recent_bad.pop_back();
+          --checked;
+        }
+      }
+      sign = sg;
+      if (!counting || next < skip_until) continue;
+      ++checked;
+      bool ok = true;
+      for (unsigned ch = 0; ch < C; ++ch) {
+        const bool mapped = ch + 1 >= a.channel && ch + 1 < a.channel + a.count;
+        if (mapped) {
+          const unsigned k = a.first + (ch + 1 - a.channel);
+          const float want = (sign < 0 ? -0.05f : 0.05f) * float(k);
+          if (std::fabs(fr[ch] - want) > 1e-4f) ok = false;
+          sum[ch] += std::fabs(fr[ch]);
+        } else if (std::fabs(fr[ch]) > 1e-6f) {
+          ++bad_other;
+          ok = false;
+        }
+      }
+      ++nsum;
+      if (ok) ++exact;
+      else recent_bad.push_back(next);
+      if (recent_bad.size() > 256) recent_bad.pop_front();
+    }
+    virgil::sleep_until_ns(virgil::mono_ns() + 200000);
+  }
+  e.shutdown();
+  run = false;
+  close(fd);
+  writer.join();
+  std::printf("      mean |value| per transmit channel:");
+  for (unsigned ch = 0; ch < C; ++ch) std::printf(" %.4f", nsum ? sum[ch] / double(nsum) : 0.0);
+  std::printf("\n");
+  std::printf("RESULT inputs: %llu of %llu frames exact on tx %u-%u (inputs %u-%u), %llu with sound elsewhere; "
+              "latency written -> Dante transmit time: %s (Virgil's transmit lead %.1f ms included)\n",
+              (unsigned long long)exact, (unsigned long long)checked, a.channel, a.channel + a.count - 1, a.first,
+              a.first + a.count - 1, (unsigned long long)bad_other, lat.text().c_str(),
+              c.tx_lead_frames() * 1000.0 / c.sample_rate());
+  return checked > 48000 && exact >= checked * 995 / 1000 && !lat.v.empty() ? 0 : 1;
+}
+
+// Dante receive channels -> an audio interface's outputs (a null sink, read back with parec).
+int outputs_mode(const Args& a) {
+  if (!a.dev_ch) {
+    std::printf("outputs needs --dev-ch\n");
+    return 2;
+  }
+  virgil::g_log_level = virgil::kLogWarn;
+  virgil::Config c;
+  c.device_name = "DA Out";
+  c.interface = "127.0.0.1";
+  c.shm_name = std::string(virgil::kDefaultShmName) + "-da-e2o-" + std::to_string(virgil::process_id());
+  c.clock = "free";
+  c.lock_memory = false;
+  c.tx_channels = 2;
+  c.rx_channels = 8;
+  c.latency_us = 10000;
+  c.tx_latency_us = 4000;
+  c.ring_frames = 16384;
+  virgil::Engine ve(c);
+  ve.set_dante_enabled(false);
+  if (!ve.start()) {
+    std::printf("cannot start the Virgil engine\n");
+    return 1;
+  }
+  const unsigned R = c.rx_channels, rate = c.sample_rate;
+  const uint64_t dmask = c.ring_frames - 1;
+  std::atomic<bool> sim_run{true};
+  std::thread sim([&] {
+    auto& rx = ve.dante_rx_ring();
+    uint64_t done = 0;
+    while (sim_run) {
+      wait_ms(1);
+      const uint64_t media = ve.header()->now_frames.load();
+      if (!media) continue;
+      if (done + c.ring_frames / 2 < media) done = media;
+      for (; done < media + 8000; ++done)
+        for (uint32_t ch = 0; ch < R; ++ch)
+          rx[size_t(done & dmask) * R + ch] = int32_t(std::lround(double(test_value(done, ch + 1, rate, 0.1f)) * 2147483647.0));
+    }
+  });
+  virgil::Client vc_;
+  for (int k = 0; k < 20 && !vc_.open(c.shm_name); ++k) wait_ms(50);
+
+  vc::DesktopAudioSettings s;
+  s.enabled = true;
+  s.output.enabled = true;
+  s.output.type = vc::DesktopAudioOutput::kInterface;
+  s.output.device = a.out;
+  s.output.channel = a.channel;
+  s.output.first_output = a.first;
+  s.output.outputs = a.count;
+  desk::Engine e(desk::make_system_backend(), c.shm_name);
+  e.start(s);
+
+  // parec of the sink's monitor, every channel, by index.
+  const unsigned D = a.dev_ch;
+  const std::string cmd = "exec parec -d '" + a.out + ".monitor' --raw --format=float32le --rate=" +
+                          std::to_string(rate) + " --channels=" + std::to_string(D) +
+                          " --no-remap --no-remix --latency-msec=2 2>/dev/null";
+  FILE* p = popen(cmd.c_str(), "r");
+  if (!p) {
+    std::printf("cannot run parec\n");
+    return 1;
+  }
+  std::atomic<bool> run{true};
+  std::mutex mu;
+  uint64_t checked = 0, exact = 0, bad_other = 0;
+  std::vector<double> sum(D, 0.0);
+  Stats lat;
+  const int64_t t0 = virgil::mono_ns();
+  std::thread reader([&] {
+    std::vector<float> buf(4096 * D);
+    int sign = 0;  // of the first mapped output, with hysteresis
+    const float thr = 0.05f * float(a.channel);
+    uint64_t skip = 0, total = 0;
+    std::deque<uint64_t> recent_bad;  // inexact frames just before a flip do not count
+    size_t carry = 0;  // bytes of a partial frame at the start of buf
+    for (;;) {
+      const ssize_t n = read(fileno(p), reinterpret_cast<char*>(buf.data()) + carry, buf.size() * 4 - carry);
+      if (n <= 0) break;
+      const int64_t at = virgil::mono_ns();
+      const size_t bytes = carry + size_t(n), frames = bytes / (4 * D);
+      const bool counting = at - t0 > 3000000000LL;
+      virgil::ClockAnchor an;
+      const bool have = vc_.is_open() && vc_.anchor(&an);
+      std::lock_guard<std::mutex> l(mu);
+      for (size_t f = 0; f < frames; ++f, ++total) {
+        const float* fr = &buf[f * D];
+        const float v0 = fr[a.first - 1];
+        const int sg = v0 > thr ? 1 : v0 < -thr ? -1 : sign;
+        if (sign > 0 && sg < 0 && have && counting) {
+          // Arrived about now (minus the frames after it in this read); due at
+          // Dante when its media frame (a multiple of the rate) was.
+          const int64_t arr = at - int64_t(double(frames - 1 - f) * 1e9 / rate);
+          const double fnow = an.frame_at(arr);
+          for (uint64_t m = uint64_t(fnow) / rate * rate; m + rate > uint64_t(fnow); m -= rate) {
+            const int64_t due = an.host_ns_at(double(m));
+            if (due < arr) {
+              lat.add((arr - due) / 1e6);
+              break;
+            }
+            if (m < rate) break;
+          }
+        }
+        if (sg != sign) {
+          skip = total + 64;
+          while (!recent_bad.empty() && recent_bad.back() + 64 > total) {
+            recent_bad.pop_back();
+            --checked;
+          }
+        }
+        sign = sg;
+        if (!counting || total < skip) continue;
+        ++checked;
+        bool ok = true;
+        for (unsigned k = 0; k < D; ++k) {
+          const bool mapped = k + 1 >= a.first && k + 1 < a.first + a.count;
+          if (mapped) {
+            const unsigned rxk = a.channel + (k + 1 - a.first);
+            const float want = (sign < 0 ? -0.1f : 0.1f) * float(rxk);
+            if (std::fabs(fr[k] - want) > 1e-4f) ok = false;
+          } else if (std::fabs(fr[k]) > 1e-6f) {
+            ++bad_other;
+            ok = false;
+          }
+          sum[k] += std::fabs(fr[k]);
+        }
+        if (ok) ++exact;
+        else recent_bad.push_back(total);
+        if (!ok && std::getenv("E2E_TRACE")) {
+          static int shown = 0;
+          if (shown++ < 200) std::printf("TRACE bad %llu (flip+%lld): %.5f %.5f %.5f %.5f\n", (unsigned long long)total, (long long)(total - skip + 64), fr[a.first-1], fr[a.first], fr[a.first+1], fr[a.first+2]);
+        }
+        if (recent_bad.size() > 256) recent_bad.pop_front();
+      }
+      carry = bytes - frames * 4 * D;
+      if (carry) std::memmove(buf.data(), reinterpret_cast<char*>(buf.data()) + frames * 4 * D, carry);
+      if (!run) break;
+    }
+  });
+  while (virgil::mono_ns() - t0 < int64_t(a.seconds * 1e9)) {
+    wait_ms(1000);
+    print_status(e);
+  }
+  const desk::Status st = e.status();
+  run = false;
+  e.shutdown();
+  wait_ms(200);
+  // parec never ends on its own.
+  if (FILE* k = popen(("pkill -f -- \"-d '" + a.out + ".monitor' --raw\" ").c_str(), "r")) pclose(k);
+  reader.join();
+  pclose(p);
+  sim_run = false;
+  sim.join();
+  ve.stop();
+  std::lock_guard<std::mutex> l(mu);
+  std::printf("      mean |value| per output:");
+  for (unsigned k = 0; k < D; ++k) std::printf(" %.4f", checked ? sum[k] / double(checked) : 0.0);
+  std::printf("\n");
+  std::printf("RESULT outputs: %llu of %llu frames exact on outputs %u-%u (rx %u-%u), %llu with sound elsewhere; "
+              "latency Dante media time -> device: %s (Virgil's receive latency %.1f ms included)\n",
+              (unsigned long long)exact, (unsigned long long)checked, a.first, a.first + a.count - 1, a.channel,
+              a.channel + a.count - 1, (unsigned long long)bad_other, lat.text().c_str(), c.latency_us / 1000.0);
+  return !st.output.error && checked > 48000 && exact >= checked * 995 / 1000 && !lat.v.empty() ? 0 : 1;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   Args a;
   if (argc < 2) {
-    std::fprintf(stderr, "usage: %s list|tx|loop [options] (see the source)\n", argv[0]);
+    std::fprintf(stderr, "usage: %s list|probe|tx|loop|inputs|outputs [options] (see the source)\n", argv[0]);
     return 2;
   }
   a.mode = argv[1];
@@ -413,6 +782,10 @@ int main(int argc, char** argv) {
     else if (k == "--ppm") a.ppm = std::atof(val().c_str());
     else if (k == "--measure") a.measure_src = val();
     else if (k == "--share") a.share = std::atof(val().c_str());
+    else if (k == "--fifo") a.fifo = val();
+    else if (k == "--first") a.first = unsigned(std::atoi(val().c_str()));
+    else if (k == "--count") a.count = unsigned(std::atoi(val().c_str()));
+    else if (k == "--dev-ch") a.dev_ch = unsigned(std::atoi(val().c_str()));
     else {
       std::fprintf(stderr, "unknown option %s\n", k.c_str());
       return 2;
@@ -423,6 +796,8 @@ int main(int argc, char** argv) {
   if (a.mode == "probe") return probe_mode(a);
   if (a.mode == "tx") return tx_mode(a);
   if (a.mode == "loop") return loop_mode(a);
+  if (a.mode == "inputs") return inputs_mode(a);
+  if (a.mode == "outputs") return outputs_mode(a);
   std::fprintf(stderr, "unknown mode %s\n", a.mode.c_str());
   return 2;
 }

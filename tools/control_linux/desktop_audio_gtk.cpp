@@ -19,17 +19,22 @@ const char* const kHelpText =
     "apps that have a stream open now; you can also type a name (as the sound settings show it) or the "
     "program's file name.\n"
     "• All apps except Virgil: every app's streams, without what Virgil Control itself plays (no echo when "
-    "you also listen to Dante on this computer).\n\n"
-    "Each source goes to a pair of transmit channels (or one, mixed to mono); sources on the same channels are "
-    "mixed. Route those channels in Dante Controller like any other.\n\n"
-    "Dante receive channels can play on an output device too. Do not play them on a device you also capture: "
-    "they would echo back into Dante.\n\n"
+    "you also listen to Dante on this computer).\n"
+    "• Audio interface inputs: inputs of an audio interface (or any recording device), one transmit channel "
+    "each, with low latency (a few milliseconds). With PipeWire, choose the interface's \"Pro Audio\" profile "
+    "in the sound settings (or pavucontrol) to get every input as its own channel.\n\n"
+    "Each source goes to a pair of transmit channels (or one, mixed to mono; interface inputs: one each); "
+    "sources on the same channels are mixed. Route those channels in Dante Controller like any other.\n\n"
+    "Dante receive channels can play on an output device too (a pair, or one on both sides), or on an audio "
+    "interface's outputs, one receive channel per output. Do not play them on a device whose sound you also "
+    "capture: they would echo back into Dante.\n\n"
     "Captured audio still plays on its own device. To hear it only through Dante, let those apps play on an "
     "output you do not listen to, for example a virtual one made with:\n"
     "    pactl load-module module-null-sink sink_name=dante sink_properties=device.description=Dante\n\n"
     "The audio is converted to Virgil's sample rate and follows the small difference between the clock of the "
-    "computer's sound hardware and the Dante clock. It adds roughly 60 ms of latency in each direction, so use "
-    "it for music, video calls and system sounds, not for live monitoring.\n\n"
+    "computer's sound hardware and the Dante clock. Captured app and device sound adds roughly 60 ms of latency "
+    "in each direction (fine for music, video calls and system sounds); audio interface inputs and outputs "
+    "add about 15-25 ms.\n\n"
     "Desktop audio runs while Virgil Control runs (it starts at login) and pauses while Virgil is stopped. "
     "Settings are saved in ~/.config/virgil/desktop-audio.conf.";
 
@@ -38,7 +43,8 @@ namespace {
 struct Inventory {
   bool ok = false;
   std::string why;
-  std::vector<desk::Device> devices;
+  std::vector<desk::Device> devices;  // outputs
+  std::vector<desk::Device> inputs;   // recording devices
   std::vector<desk::App> apps;
 };
 
@@ -51,6 +57,7 @@ void load_inventory(desk::Engine& engine, std::function<void(std::shared_ptr<Inv
     inv->ok = be->connect(&inv->why);
     if (inv->ok) {
       inv->devices = be->outputs();
+      inv->inputs = be->inputs();
       inv->apps = be->apps();
     }
     auto* cb = new std::function<void()>([done, inv] { done(inv); });
@@ -90,6 +97,29 @@ std::string device_name(const std::string& id, const std::string& saved, const I
   return saved.empty() ? id : saved;
 }
 
+std::string input_name(const std::string& id, const std::string& saved, const Inventory* inv) {
+  if (id.empty() || id == "default") return "Default input device";
+  if (inv)
+    for (const auto& e : inv->inputs)
+      if (e.id == id) return e.name;
+  return saved.empty() ? id : saved;
+}
+
+// Channels of a device in a list (0 = unknown, or not there).
+unsigned device_channels(const std::vector<desk::Device>& list, const std::string& id) {
+  const bool def = id.empty() || id == "default";
+  for (const auto& e : list)
+    if (def ? e.is_default : e.id == id) return e.channels;
+  return 0;
+}
+
+std::string range_text(unsigned first, unsigned count) {
+  char b[32];
+  if (count <= 1) std::snprintf(b, sizeof b, "%u", first);
+  else std::snprintf(b, sizeof b, "%u-%u", first, first + count - 1);
+  return b;
+}
+
 std::string app_name(const std::string& id, const Inventory* inv) {
   if (inv)
     for (const auto& a : inv->apps)
@@ -101,6 +131,10 @@ std::string source_label(const vc::DesktopAudioSource& s, const Inventory* inv) 
   switch (s.type) {
     case vc::DesktopAudioSource::kApp: return "App: " + app_name(s.app, inv);
     case vc::DesktopAudioSource::kAllApps: return "All apps except Virgil";
+    case vc::DesktopAudioSource::kInput:
+      // "Scarlett 18i20 inputs 1-8 → TX 1-8"
+      return input_name(s.device, s.name, inv) + (s.inputs == 1 ? " input " : " inputs ") +
+             range_text(s.first_input, s.inputs) + " → TX " + range_text(s.channel, s.inputs);
     default:
       return (s.device == "default" || s.device.empty() ? "" : "Output: ") + device_name(s.device, s.name, inv);
   }
@@ -154,15 +188,43 @@ bool combo_channels(GtkComboBox* combo, unsigned* first, bool* mono) {
   return true;
 }
 
-// Output device combo: Default, then every device; a configured one that is
-// not there stays, marked. Item id = device id.
-void fill_devices(GtkComboBoxText* combo, const Inventory* inv, const std::string& cur, const std::string& cur_name) {
+// Single channels from every channel, for interface inputs / outputs (a run
+// of channels from there). Item id: "<first>:0", as fill_channels.
+void fill_first_channel(GtkComboBoxText* combo, unsigned count, const std::vector<std::string>& names, unsigned first) {
   gtk_combo_box_text_remove_all(combo);
-  gtk_combo_box_text_append(combo, "default", "Default output device (follows the system)");
+  const bool known = count > 0;
+  if (!known) count = 128;
+  bool have = false;
+  for (unsigned f = 1; f <= count; ++f) {
+    std::string t = std::to_string(f);
+    if (f <= names.size() && !names[f - 1].empty()) t += "   (" + names[f - 1] + ")";
+    gtk_combo_box_text_append(combo, (std::to_string(f) + ":0").c_str(), t.c_str());
+    have = have || f == first;
+  }
+  if (!have && first >= 1)
+    gtk_combo_box_text_append(combo, (std::to_string(first) + ":0").c_str(),
+                              (std::to_string(first) + (known ? "  (not available)" : "")).c_str());
+  if (!gtk_combo_box_set_active_id(GTK_COMBO_BOX(combo), (std::to_string(first) + ":0").c_str()))
+    gtk_combo_box_set_active(GTK_COMBO_BOX(combo), 0);
+}
+
+// Output (or, inputs = true, recording) device combo: Default, then every
+// device; a configured one that is not there stays, marked. Item id = device
+// id. counts: the device's channel count after its name ("8 outputs").
+void fill_devices(GtkComboBoxText* combo, const Inventory* inv, const std::string& cur, const std::string& cur_name,
+                  bool inputs = false, bool counts = false) {
+  gtk_combo_box_text_remove_all(combo);
+  gtk_combo_box_text_append(combo, "default",
+                            inputs ? "Default input device (follows the system)"
+                                   : "Default output device (follows the system)");
   bool found = cur.empty() || cur == "default";
   if (inv)
-    for (const auto& e : inv->devices) {
-      gtk_combo_box_text_append(combo, e.id.c_str(), e.name.c_str());
+    for (const auto& e : inputs ? inv->inputs : inv->devices) {
+      std::string t = e.name;
+      if (counts && e.channels)
+        t += "  (" + std::to_string(e.channels) + (inputs ? (e.channels == 1 ? " input)" : " inputs)")
+                                                           : (e.channels == 1 ? " output)" : " outputs)"));
+      gtk_combo_box_text_append(combo, e.id.c_str(), t.c_str());
       if (e.id == cur) found = true;
     }
   if (!found)
@@ -225,6 +287,8 @@ void install_css() {
 
 struct SourceUi {
   GtkWidget *d, *dev, *devcombo, *app, *appcombo, *refresh, *apphint, *all, *ch, *gain, *mute, *err;
+  GtkWidget *in, *incombo, *infirst, *incount, *inof, *inch, *chl, *inchl;
+  ChannelInfo chinfo;
   vc::DesktopAudioSource src;
   std::shared_ptr<Inventory> inv;
   desk::Capabilities caps;
@@ -238,6 +302,21 @@ void source_enable(SourceUi& s) {
   gtk_widget_set_sensitive(s.refresh, app && s.caps.app_capture);
   gtk_widget_set_sensitive(s.app, s.caps.app_capture || app);
   gtk_widget_set_sensitive(s.all, s.caps.all_apps || gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s.all)));
+  const bool in = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s.in));
+  for (GtkWidget* w : {s.incombo, s.infirst, s.incount, s.inof}) gtk_widget_set_sensitive(w, in);
+  // Interface inputs: a run of single channels; the others: a pair or one.
+  gtk_widget_set_visible(s.ch, !in);
+  gtk_widget_set_visible(s.chl, !in);
+  gtk_widget_set_visible(s.inch, in);
+  gtk_widget_set_visible(s.inchl, in);
+}
+
+// "of 8 inputs" for the chosen recording device.
+void source_input_count(SourceUi& s) {
+  const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(s.incombo));
+  const unsigned n = s.inv ? device_channels(s.inv->inputs, id ? id : "default") : 0;
+  const std::string t = n ? "of " + std::to_string(n) + (n == 1 ? " input" : " inputs") : std::string();
+  gtk_label_set_text(GTK_LABEL(s.inof), t.c_str());
 }
 
 void source_fill_apps(SourceUi& s) {
@@ -285,7 +364,9 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
   gtk_grid_attach(GTK_GRID(grid), s->dev, 0, row++, 3, 1);
   s->devcombo = gtk_combo_box_text_new();
   gtk_widget_set_margin_start(s->devcombo, 22);
-  fill_devices(GTK_COMBO_BOX_TEXT(s->devcombo), s->inv.get(), s->src.device, s->src.name);
+  const bool was_device = s->src.type == vc::DesktopAudioSource::kDevice;
+  fill_devices(GTK_COMBO_BOX_TEXT(s->devcombo), s->inv.get(), was_device ? s->src.device : "default",
+               was_device ? s->src.name : "");
   gtk_grid_attach(GTK_GRID(grid), s->devcombo, 0, row++, 3, 1);
 
   s->app = gtk_radio_button_new_with_label_from_widget(GTK_RADIO_BUTTON(s->dev), "One app (every stream it plays)");
@@ -313,13 +394,44 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
   gtk_widget_set_margin_top(s->all, 6);
   gtk_grid_attach(GTK_GRID(grid), s->all, 0, row++, 3, 1);
 
-  GtkWidget* chl = hlabel("Virgil transmit channels:");
-  gtk_widget_set_margin_top(chl, 10);
-  gtk_grid_attach(GTK_GRID(grid), chl, 0, row, 1, 1);
+  s->in = gtk_radio_button_new_with_label_from_widget(
+      GTK_RADIO_BUTTON(s->dev), "Audio interface inputs (one transmit channel each, low latency)");
+  gtk_widget_set_margin_top(s->in, 6);
+  gtk_grid_attach(GTK_GRID(grid), s->in, 0, row++, 3, 1);
+  s->incombo = gtk_combo_box_text_new();
+  gtk_widget_set_margin_start(s->incombo, 22);
+  const bool was_input = s->src.type == vc::DesktopAudioSource::kInput;
+  fill_devices(GTK_COMBO_BOX_TEXT(s->incombo), s->inv.get(), was_input ? s->src.device : "default",
+               was_input ? s->src.name : "", true, true);
+  gtk_grid_attach(GTK_GRID(grid), s->incombo, 0, row++, 3, 1);
+  GtkWidget* inbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  gtk_widget_set_margin_start(inbox, 22);
+  s->infirst = gtk_spin_button_new_with_range(1, 256, 1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->infirst), s->src.first_input);
+  s->incount = gtk_spin_button_new_with_range(1, vc::kMaxInterfaceInputs, 1);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(s->incount), was_input ? s->src.inputs : 2);
+  s->inof = hlabel("");
+  gtk_style_context_add_class(gtk_widget_get_style_context(s->inof), "dim-label");
+  gtk_box_pack_start(GTK_BOX(inbox), hlabel("First input:"), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(inbox), s->infirst, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(inbox), hlabel("How many:"), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(inbox), s->incount, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(inbox), s->inof, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(grid), inbox, 0, row++, 3, 1);
+
+  s->chinfo = ch;
+  s->chl = hlabel("Virgil transmit channels:");
+  gtk_widget_set_margin_top(s->chl, 10);
+  gtk_grid_attach(GTK_GRID(grid), s->chl, 0, row, 1, 1);
   s->ch = gtk_combo_box_text_new();
   gtk_widget_set_margin_top(s->ch, 10);
   fill_channels(GTK_COMBO_BOX_TEXT(s->ch), ch.tx, ch.tx_names, s->src.channel, s->src.mono);
   gtk_grid_attach(GTK_GRID(grid), s->ch, 1, row++, 2, 1);
+  s->inchl = hlabel("To transmit channel:");
+  gtk_grid_attach(GTK_GRID(grid), s->inchl, 0, row, 1, 1);
+  s->inch = gtk_combo_box_text_new();
+  fill_first_channel(GTK_COMBO_BOX_TEXT(s->inch), ch.tx, ch.tx_names, s->src.channel);
+  gtk_grid_attach(GTK_GRID(grid), s->inch, 1, row++, 2, 1);
   gtk_grid_attach(GTK_GRID(grid), hlabel("Gain (dB):"), 0, row, 1, 1);
   GtkWidget* gbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 12);
   s->gain = gtk_spin_button_new_with_range(vc::kMinGainDb, vc::kMaxGainDb, 0.5);
@@ -339,17 +451,24 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
 
   GtkWidget* radio = s->src.type == vc::DesktopAudioSource::kApp      ? s->app
                      : s->src.type == vc::DesktopAudioSource::kAllApps ? s->all
+                     : s->src.type == vc::DesktopAudioSource::kInput   ? s->in
                                                                        : s->dev;
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(radio), TRUE);
   source_fill_apps(*s);
-  source_enable(*s);
+  source_input_count(*s);
 
   auto* sp = new std::shared_ptr<SourceUi>(s);
   g_signal_connect_data(
       d, "destroy", G_CALLBACK(+[](GtkWidget*, gpointer) {}), sp,
       +[](gpointer p, GClosure*) { delete static_cast<std::shared_ptr<SourceUi>*>(p); }, GConnectFlags(0));
   auto on_toggle = +[](GtkToggleButton*, gpointer p) { source_enable(**static_cast<std::shared_ptr<SourceUi>*>(p)); };
-  for (GtkWidget* r : {s->dev, s->app, s->all}) g_signal_connect(r, "toggled", G_CALLBACK(on_toggle), sp);
+  for (GtkWidget* r : {s->dev, s->app, s->all, s->in}) g_signal_connect(r, "toggled", G_CALLBACK(on_toggle), sp);
+  g_signal_connect(s->incombo, "changed", G_CALLBACK(+[](GtkComboBox*, gpointer p) {
+                     auto& u = **static_cast<std::shared_ptr<SourceUi>*>(p);
+                     gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(u.in), TRUE);
+                     source_input_count(u);
+                   }),
+                   sp);
   g_signal_connect(s->devcombo, "changed", G_CALLBACK(+[](GtkComboBox*, gpointer p) {
                      auto& u = **static_cast<std::shared_ptr<SourceUi>*>(p);
                      gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(u.dev), TRUE);
@@ -364,10 +483,16 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
       auto u = weak.lock();
       if (!u || !u->d) return;
       const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(u->devcombo));
-      const std::string cur = id ? id : u->src.device;
+      const bool was_device = u->src.type == vc::DesktopAudioSource::kDevice;
+      const std::string cur = id ? id : was_device ? u->src.device : "default";
       u->inv = inv;
-      fill_devices(GTK_COMBO_BOX_TEXT(u->devcombo), inv.get(), cur, u->src.name);
+      fill_devices(GTK_COMBO_BOX_TEXT(u->devcombo), inv.get(), cur, was_device ? u->src.name : "");
+      const char* iid = gtk_combo_box_get_active_id(GTK_COMBO_BOX(u->incombo));
+      const std::string icur = iid ? iid : "default";
+      fill_devices(GTK_COMBO_BOX_TEXT(u->incombo), inv.get(), icur,
+                   u->src.type == vc::DesktopAudioSource::kInput ? u->src.name : "", true, true);
       source_fill_apps(*u);
+      source_input_count(*u);
     });
   };
   auto* rf = new std::function<void()>(refresh);
@@ -377,6 +502,7 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
   if (!s->inv) refresh();
 
   gtk_widget_show_all(d);
+  source_enable(*s);  // after show_all: hides the channel row the type does not use
   bool ok = false;
   while (gtk_dialog_run(GTK_DIALOG(d)) == GTK_RESPONSE_OK) {
     vc::DesktopAudioSource r = s->src;
@@ -392,6 +518,31 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
       r.app = a;
     } else if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->all))) {
       r.type = vc::DesktopAudioSource::kAllApps;
+    } else if (gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(s->in))) {
+      r.type = vc::DesktopAudioSource::kInput;
+      const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(s->incombo));
+      r.device = id ? id : "default";
+      r.name = r.device == "default" ? std::string() : input_name(r.device, r.name, s->inv.get());
+      gtk_spin_button_update(GTK_SPIN_BUTTON(s->infirst));
+      gtk_spin_button_update(GTK_SPIN_BUTTON(s->incount));
+      r.first_input = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(s->infirst)));
+      r.inputs = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(s->incount)));
+      r.mono = false;
+      const unsigned have = s->inv ? device_channels(s->inv->inputs, r.device) : 0;
+      if (have && r.first_input + r.inputs - 1 > have) {
+        set_markup(s->err, "The device has " + std::to_string(have) + " inputs: choose others.", kRed);
+        continue;
+      }
+      bool mono = false;
+      if (!combo_channels(GTK_COMBO_BOX(s->inch), &r.channel, &mono)) {
+        set_markup(s->err, "Choose the first transmit channel.", kRed);
+        continue;
+      }
+      if (s->chinfo.tx && r.channel + r.inputs - 1 > s->chinfo.tx) {
+        set_markup(s->err, "Virgil has " + std::to_string(s->chinfo.tx) + " transmit channels: choose others.",
+                   kRed);
+        continue;
+      }
     } else {
       r.type = vc::DesktopAudioSource::kDevice;
       const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(s->devcombo));
@@ -399,11 +550,11 @@ bool edit_source_dialog(GtkWindow* parent, desk::Engine& engine, vc::DesktopAudi
       r.name = r.device == "default" ? std::string() : device_name(r.device, r.name, s->inv.get());
     }
     if (r.type != vc::DesktopAudioSource::kApp) r.app.clear();
-    if (r.type != vc::DesktopAudioSource::kDevice) {
+    if (r.type != vc::DesktopAudioSource::kDevice && r.type != vc::DesktopAudioSource::kInput) {
       r.device = "default";
       r.name.clear();
     }
-    if (!combo_channels(GTK_COMBO_BOX(s->ch), &r.channel, &r.mono)) {
+    if (r.type != vc::DesktopAudioSource::kInput && !combo_channels(GTK_COMBO_BOX(s->ch), &r.channel, &r.mono)) {
       set_markup(s->err, "Choose the transmit channels.", kRed);
       continue;
     }
@@ -432,6 +583,7 @@ struct Row {
 struct Main {
   GtkWidget *w = nullptr, *enable, *status, *list, *add, *edit, *remove;
   GtkWidget *out_enable, *out_ch, *out_gain, *out_dev, *out_meter, *out_state;
+  GtkWidget *out_type, *out_chl, *out_ifbox, *out_first, *out_count, *out_of;
   desk::Engine* engine = nullptr;
   ChannelSource channels;
   vc::DesktopAudioSettings cfg;
@@ -478,7 +630,8 @@ void fill_list(Main& m) {
     GtkWidget* box = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 10);
     r.label = cell(m, 0, hlabel(source_label(s, m.inv.get()).c_str()));
     gtk_label_set_ellipsize(GTK_LABEL(r.label), PANGO_ELLIPSIZE_END);
-    r.channels = cell(m, 1, hlabel(channels_short(s.channel, s.mono).c_str()));
+    r.channels = cell(m, 1, hlabel(s.type == vc::DesktopAudioSource::kInput ? range_text(s.channel, s.inputs).c_str()
+                                                                              : channels_short(s.channel, s.mono).c_str()));
     r.gain = cell(m, 2, hlabel(s.mute ? "muted" : gain_text(s.gain_db).c_str()));
     r.meter = cell(m, 3, meter());
     r.status = hlabel("");
@@ -496,13 +649,36 @@ void fill_list(Main& m) {
   update_buttons(m);
 }
 
+bool out_iface(const vc::DesktopAudioOutput& o) { return o.type == vc::DesktopAudioOutput::kInterface; }
+
+// Receive channels: a pair or one (output device), or the first of a run (interface outputs).
+void fill_out_channels(Main& m) {
+  const vc::DesktopAudioOutput& o = m.cfg.output;
+  if (out_iface(o)) fill_first_channel(GTK_COMBO_BOX_TEXT(m.out_ch), m.ch.rx, m.ch.rx_names, o.channel);
+  else fill_channels(GTK_COMBO_BOX_TEXT(m.out_ch), m.ch.rx, m.ch.rx_names, o.channel, o.mono);
+}
+
+void out_count_text(Main& m) {
+  const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(m.out_dev));
+  const unsigned n = m.inv ? device_channels(m.inv->devices, id ? id : "default") : 0;
+  const std::string t = n ? "of " + std::to_string(n) + (n == 1 ? " output" : " outputs") : std::string();
+  gtk_label_set_text(GTK_LABEL(m.out_of), t.c_str());
+}
+
 void fill_output(Main& m) {
   m.filling = true;
   const vc::DesktopAudioOutput& o = m.cfg.output;
+  const bool iface = out_iface(o);
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(m.out_enable), o.enabled);
-  fill_channels(GTK_COMBO_BOX_TEXT(m.out_ch), m.ch.rx, m.ch.rx_names, o.channel, o.mono);
-  fill_devices(GTK_COMBO_BOX_TEXT(m.out_dev), m.inv.get(), o.device, o.name);
+  gtk_combo_box_set_active_id(GTK_COMBO_BOX(m.out_type), iface ? "interface" : "device");
+  fill_out_channels(m);
+  fill_devices(GTK_COMBO_BOX_TEXT(m.out_dev), m.inv.get(), o.device, o.name, false, iface);
   gtk_spin_button_set_value(GTK_SPIN_BUTTON(m.out_gain), o.gain_db);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(m.out_first), o.first_output);
+  gtk_spin_button_set_value(GTK_SPIN_BUTTON(m.out_count), o.outputs);
+  gtk_label_set_text(GTK_LABEL(m.out_chl), iface ? "From receive channel:" : "Receive channels:");
+  gtk_widget_set_visible(m.out_ifbox, iface);
+  out_count_text(m);
   m.filling = false;
 }
 
@@ -557,14 +733,26 @@ void read_output(Main& m) {
   if (m.filling) return;
   vc::DesktopAudioOutput o = m.cfg.output;
   o.enabled = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(m.out_enable));
-  combo_channels(GTK_COMBO_BOX(m.out_ch), &o.channel, &o.mono);
+  const char* type = gtk_combo_box_get_active_id(GTK_COMBO_BOX(m.out_type));
+  o.type = type && std::string(type) == "interface" ? vc::DesktopAudioOutput::kInterface
+                                                     : vc::DesktopAudioOutput::kDevice;
+  const bool retyped = o.type != m.cfg.output.type;
+  if (!retyped) {
+    bool mono = o.mono;
+    combo_channels(GTK_COMBO_BOX(m.out_ch), &o.channel, &mono);
+    if (!out_iface(o)) o.mono = mono;
+  }
   if (const char* id = gtk_combo_box_get_active_id(GTK_COMBO_BOX(m.out_dev))) {
     o.device = id;
     o.name = o.device == "default" ? std::string() : device_name(o.device, o.name, m.inv.get());
   }
   o.gain_db = gtk_spin_button_get_value(GTK_SPIN_BUTTON(m.out_gain));
+  o.first_output = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(m.out_first)));
+  o.outputs = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(m.out_count)));
+  out_count_text(m);
   if (o == m.cfg.output) return;
   m.cfg.output = o;
+  if (retyped) fill_output(m);  // the channel list and device names differ
   if (o.enabled && !m.cfg.enabled) {
     m.cfg.enabled = true;
     m.filling = true;
@@ -608,7 +796,7 @@ gboolean tick(gpointer) {
     m.ch = c;
     if (changed) {
       m.filling = true;
-      fill_channels(GTK_COMBO_BOX_TEXT(m.out_ch), m.ch.rx, m.ch.rx_names, m.cfg.output.channel, m.cfg.output.mono);
+      fill_out_channels(m);
       m.filling = false;
     }
   }
@@ -765,25 +953,45 @@ void show(GtkWindow* parent, GdkPixbuf* icon, desk::Engine& engine, ChannelSourc
   GtkWidget* og = gtk_grid_new();
   gtk_grid_set_row_spacing(GTK_GRID(og), 6);
   gtk_grid_set_column_spacing(GTK_GRID(og), 10);
-  m.out_enable = gtk_check_button_new_with_label("Play receive channels");
+  m.out_enable = gtk_check_button_new_with_label("Play receive channels on");
   gtk_grid_attach(GTK_GRID(og), m.out_enable, 0, 0, 1, 1);
-  m.out_ch = gtk_combo_box_text_new();
-  gtk_grid_attach(GTK_GRID(og), m.out_ch, 1, 0, 1, 1);
-  gtk_grid_attach(GTK_GRID(og), hlabel("Gain (dB):", 1), 2, 0, 1, 1);
-  m.out_gain = gtk_spin_button_new_with_range(vc::kMinGainDb, vc::kMaxGainDb, 0.5);
-  gtk_spin_button_set_digits(GTK_SPIN_BUTTON(m.out_gain), 1);
-  gtk_grid_attach(GTK_GRID(og), m.out_gain, 3, 0, 1, 1);
-  gtk_grid_attach(GTK_GRID(og), hlabel("on", 1), 0, 1, 1, 1);
+  m.out_type = gtk_combo_box_text_new();
+  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(m.out_type), "device", "An output device (a pair, or one on both sides)");
+  gtk_combo_box_text_append(GTK_COMBO_BOX_TEXT(m.out_type), "interface",
+                            "Audio interface outputs (one receive channel each, low latency)");
+  gtk_grid_attach(GTK_GRID(og), m.out_type, 1, 0, 3, 1);
   m.out_dev = gtk_combo_box_text_new();
   gtk_widget_set_hexpand(m.out_dev, TRUE);
   gtk_grid_attach(GTK_GRID(og), m.out_dev, 1, 1, 3, 1);
+  m.out_ifbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  m.out_first = gtk_spin_button_new_with_range(1, 256, 1);
+  m.out_count = gtk_spin_button_new_with_range(1, vc::kMaxInterfaceInputs, 1);
+  m.out_of = hlabel("");
+  gtk_style_context_add_class(gtk_widget_get_style_context(m.out_of), "dim-label");
+  gtk_box_pack_start(GTK_BOX(m.out_ifbox), hlabel("First output:"), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(m.out_ifbox), m.out_first, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(m.out_ifbox), hlabel("How many:"), FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(m.out_ifbox), m.out_count, FALSE, FALSE, 0);
+  gtk_box_pack_start(GTK_BOX(m.out_ifbox), m.out_of, FALSE, FALSE, 0);
+  gtk_widget_show_all(m.out_ifbox);
+  gtk_widget_set_no_show_all(m.out_ifbox, TRUE);  // shown for interface outputs only (fill_output)
+  gtk_grid_attach(GTK_GRID(og), m.out_ifbox, 1, 2, 3, 1);
+  m.out_chl = hlabel("Receive channels:", 1);
+  gtk_grid_attach(GTK_GRID(og), m.out_chl, 0, 3, 1, 1);
+  m.out_ch = gtk_combo_box_text_new();
+  gtk_grid_attach(GTK_GRID(og), m.out_ch, 1, 3, 1, 1);
+  gtk_grid_attach(GTK_GRID(og), hlabel("Gain (dB):", 1), 2, 3, 1, 1);
+  m.out_gain = gtk_spin_button_new_with_range(vc::kMinGainDb, vc::kMaxGainDb, 0.5);
+  gtk_spin_button_set_digits(GTK_SPIN_BUTTON(m.out_gain), 1);
+  gtk_grid_attach(GTK_GRID(og), m.out_gain, 3, 3, 1, 1);
   m.out_meter = meter();
   gtk_widget_set_size_request(m.out_meter, 90, -1);
-  gtk_grid_attach(GTK_GRID(og), m.out_meter, 0, 2, 1, 1);
+  gtk_grid_attach(GTK_GRID(og), m.out_meter, 0, 4, 1, 1);
   m.out_state = hlabel("");
   gtk_label_set_ellipsize(GTK_LABEL(m.out_state), PANGO_ELLIPSIZE_END);
-  gtk_grid_attach(GTK_GRID(og), m.out_state, 1, 2, 3, 1);
-  gtk_box_pack_start(GTK_BOX(v), frame("Dante receive channels to an output device", og), FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(og), m.out_state, 1, 4, 3, 1);
+  gtk_box_pack_start(GTK_BOX(v), frame("Dante receive channels to an output device or audio interface", og), FALSE,
+                     FALSE, 0);
 
   GtkWidget* note = hlabel(
       "Captured audio still plays on the device it was sent to. To hear it only through Dante, play those apps on "
@@ -846,6 +1054,9 @@ void show(GtkWindow* parent, GdkPixbuf* icon, desk::Engine& engine, ChannelSourc
   g_signal_connect(m.out_ch, "changed", G_CALLBACK(out_changed), nullptr);
   g_signal_connect(m.out_dev, "changed", G_CALLBACK(out_changed), nullptr);
   g_signal_connect(m.out_gain, "value-changed", G_CALLBACK(out_changed), nullptr);
+  g_signal_connect(m.out_type, "changed", G_CALLBACK(out_changed), nullptr);
+  g_signal_connect(m.out_first, "value-changed", G_CALLBACK(out_changed), nullptr);
+  g_signal_connect(m.out_count, "value-changed", G_CALLBACK(out_changed), nullptr);
   g_signal_connect(help, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
                      if (g_main) show_help(GTK_WINDOW(g_main->w));
                    }),

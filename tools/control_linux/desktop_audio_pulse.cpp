@@ -7,10 +7,16 @@
 //   one app         record each of its sink inputs (pa_stream_set_monitor_stream),
 //                   matched by application.name or application.process.binary
 //   all apps        the same for every sink input except this process's own
+//   interface inputs  a record stream on a (non-monitor) source with all of its
+//                   channels, mapped by index; the inputs asked for are picked
+//                   out in the read callback. Small fragments (5 ms).
 //   output          a playback stream to a sink (or the default one)
+//   interface outputs a playback stream with all of the sink's channels, by
+//                   index; the receive channels go to the outputs asked for,
+//                   the others get silence. Small buffer (10 ms).
 //
 // One threaded mainloop and one context for everything. A cache of sinks,
-// sink inputs and the default sink is kept up to date by subscription events
+// sources, sink inputs and the default sink and source is kept up to date by subscription events
 // on the mainloop thread, so the queries the engine and the window make never
 // wait for the server. Streams ask for float32 at the sink's own rate; the
 // engine's AdaptiveBridge converts to Virgil's rate and follows the drift.
@@ -49,6 +55,22 @@ struct SinkRec {
   uint32_t index = 0;
   std::string name, desc, monitor;
   unsigned rate = 48000, channels = 2;
+  pa_channel_map map{};
+};
+struct SourceRec {  // a recording device (not a sink's monitor)
+  uint32_t index = 0;
+  std::string name, desc;
+  unsigned rate = 48000, channels = 2;
+  pa_channel_map map{};
+};
+
+// What a stream carries beyond its plain channel count: the device's own
+// layout (interface inputs / outputs) and which of its channels are ours.
+struct Layout {
+  unsigned dev_ch = 0;    // the stream's channels (0 = the engine's count)
+  unsigned first = 0;     // the engine's first channel among them (0-based)
+  const pa_channel_map* map = nullptr;  // the device's map, used by index
+  double period_s = 0;
 };
 struct InputRec {
   uint32_t index = 0, sink = 0, pid = 0;
@@ -66,9 +88,16 @@ class PulseBackend;
 class PulseStream : public Stream {
  public:
   PulseStream(PulseBackend* be, bool capture, unsigned channels, unsigned rate, const std::string& pa_device,
-              const std::string& device, uint32_t monitor_input, AudioSink* sink, AudioSource* src)
-      : be_(be), capture_(capture), ch_(channels), rate_(rate), pa_device_(pa_device), device_(device),
-        monitor_input_(monitor_input), sink_(sink), src_(src) {}
+              const std::string& device, uint32_t monitor_input, AudioSink* sink, AudioSource* src,
+              const Layout& lay = Layout())
+      : be_(be), capture_(capture), ch_(channels), rate_(rate), dev_ch_(lay.dev_ch ? lay.dev_ch : channels),
+        first_(lay.first), period_(lay.period_s), pa_device_(pa_device), device_(device),
+        monitor_input_(monitor_input), sink_(sink), src_(src) {
+    if (lay.map) {
+      map_ = *lay.map;
+      has_map_ = true;
+    }
+  }
   ~PulseStream() override;
 
   bool create(pa_context* ctx, std::string* error);  // under the mainloop lock
@@ -83,8 +112,11 @@ class PulseStream : public Stream {
   }
   unsigned rate() const override { return rate_; }
   std::string device() const override { return device_; }
+  double period_s() const override { return period_; }
 
  private:
+  bool picks() const { return dev_ch_ != ch_ || first_ != 0; }  // some of the device's channels
+  void deliver(const float* f, size_t frames, int64_t now);
   static void state_cb(pa_stream* s, void* u);
   static void read_cb(pa_stream* s, size_t n, void* u);
   static void write_cb(pa_stream* s, size_t n, void* u);
@@ -100,6 +132,10 @@ class PulseStream : public Stream {
   PulseBackend* be_;
   const bool capture_;
   const unsigned ch_, rate_;
+  const unsigned dev_ch_, first_;  // the stream's channels; ours start at first_
+  const double period_;
+  pa_channel_map map_{};
+  bool has_map_ = false;
   const std::string pa_device_, device_;
   const uint32_t monitor_input_;
   AudioSink* const sink_;
@@ -110,9 +146,9 @@ class PulseStream : public Stream {
   mutable std::mutex mu_;
   std::string why_;
   // Mainloop thread only.
-  uint8_t carry_[4 * 8] = {};
+  uint8_t carry_[4 * PA_CHANNELS_MAX_] = {};
   size_t carry_n_ = 0;
-  std::vector<float> buf_;
+  std::vector<float> buf_, pick_;
 };
 
 class PulseBackend : public Backend {
@@ -205,6 +241,7 @@ class PulseBackend : public Backend {
       d.id = kv.second.name;
       d.name = kv.second.desc.empty() ? kv.second.name : kv.second.desc;
       d.is_default = kv.second.name == default_sink_;
+      d.channels = kv.second.channels;
       r.push_back(d);
     }
     std::sort(r.begin(), r.end(), [](const Device& a, const Device& b) { return a.name < b.name; });
@@ -214,6 +251,30 @@ class PulseBackend : public Backend {
   std::string default_output() override {
     std::lock_guard<std::mutex> l(mu_);
     return default_sink_;
+  }
+
+  std::vector<Device> inputs() override {
+    std::lock_guard<std::mutex> l(mu_);
+    std::vector<Device> r;
+    for (const auto& kv : sources_) {
+      Device d;
+      d.id = kv.second.name;
+      d.name = kv.second.desc.empty() ? kv.second.name : kv.second.desc;
+      d.is_default = kv.second.name == default_source_;
+      d.channels = kv.second.channels;
+      r.push_back(d);
+    }
+    std::sort(r.begin(), r.end(), [](const Device& a, const Device& b) { return a.name < b.name; });
+    return r;
+  }
+
+  std::string default_input() override {
+    std::lock_guard<std::mutex> l(mu_);
+    // A sink's monitor as the default source (PulseAudio picks one when
+    // there is no microphone) is not an input.
+    for (const auto& kv : sources_)
+      if (kv.second.name == default_source_) return default_source_;
+    return std::string();
   }
 
   std::vector<App> apps() override {
@@ -293,13 +354,55 @@ class PulseBackend : public Backend {
     return make(true, channels, rec.rate, rec.monitor, rec.name, uint32_t(s.id), sink, nullptr, error);
   }
 
-  std::unique_ptr<Stream> open_render(const std::string& device, unsigned channels, double latency_s,
-                                      AudioSource* source, std::string* error) override {
+  std::unique_ptr<Stream> open_input_capture(const std::string& device, unsigned first_input, unsigned count,
+                                             AudioSink* sink, std::string* error) override {
+    if (!connect(error)) return nullptr;
+    SourceRec rec;
+    {
+      std::lock_guard<std::mutex> l(mu_);
+      const bool def = device.empty() || device == "default";
+      const std::string want = def ? default_source_ : device;
+      bool found = false;
+      for (const auto& kv : sources_)
+        if (kv.second.name == want) {
+          rec = kv.second;
+          found = true;
+        }
+      if (!found) {
+        if (error) *error = def ? "There is no input device" : "The device is not connected";
+        return nullptr;
+      }
+    }
+    if (count < 1 || first_input < 1 || first_input - 1 + count > rec.channels) {
+      if (error) *error = "The device has " + std::to_string(rec.channels) + " inputs: choose others";
+      return nullptr;
+    }
+    Layout lay;
+    lay.dev_ch = rec.channels;
+    lay.first = first_input - 1;
+    lay.map = &rec.map;
+    lay.period_s = 0.005;
+    return make(true, count, rec.rate, rec.name, rec.name, PA_INVALID_INDEX_, sink, nullptr, error, lay);
+  }
+
+  std::unique_ptr<Stream> open_render(const std::string& device, unsigned first_channel, unsigned channels,
+                                      double latency_s, AudioSource* source, std::string* error) override {
     if (!connect(error)) return nullptr;
     SinkRec rec;
     if (!find_sink(device, &rec, error)) return nullptr;
     latency_s_ = latency_s;
-    return make(false, channels, rec.rate, rec.name, rec.name, PA_INVALID_INDEX_, nullptr, source, error);
+    Layout lay;
+    if (first_channel > 0) {
+      if (channels < 1 || first_channel - 1 + channels > rec.channels) {
+        if (error) *error = "The device has " + std::to_string(rec.channels) + " outputs: choose others";
+        return nullptr;
+      }
+      lay.dev_ch = rec.channels;
+      lay.first = first_channel - 1;
+      lay.map = &rec.map;
+      lay.period_s = 0.005;
+    }
+    return make(false, channels, rec.rate, rec.name, rec.name, PA_INVALID_INDEX_, nullptr, source, error, lay);
   }
 
   const PulseApi& api() const { return pa_; }
@@ -349,6 +452,8 @@ class PulseBackend : public Backend {
     sym(pa_.context_get_server_info, "pa_context_get_server_info");
     sym(pa_.context_get_sink_info_list, "pa_context_get_sink_info_list");
     sym(pa_.context_get_sink_info_by_index, "pa_context_get_sink_info_by_index");
+    sym(pa_.context_get_source_info_list, "pa_context_get_source_info_list");
+    sym(pa_.context_get_source_info_by_index, "pa_context_get_source_info_by_index");
     sym(pa_.context_get_sink_input_info_list, "pa_context_get_sink_input_info_list");
     sym(pa_.context_get_sink_input_info, "pa_context_get_sink_input_info");
     sym(pa_.operation_unref, "pa_operation_unref");
@@ -403,6 +508,7 @@ class PulseBackend : public Backend {
     state_ = -1;
     synced_ = false;
     sinks_.clear();
+    sources_.clear();
     inputs_.clear();
   }
 
@@ -421,9 +527,9 @@ class PulseBackend : public Backend {
 
   std::unique_ptr<Stream> make(bool capture, unsigned channels, unsigned rate, const std::string& pa_device,
                                const std::string& device, uint32_t input, AudioSink* sink, AudioSource* src,
-                               std::string* error) {
+                               std::string* error, const Layout& lay = Layout()) {
     std::unique_ptr<PulseStream> s(
-        new PulseStream(this, capture, channels, rate, pa_device, device, input, sink, src));
+        new PulseStream(this, capture, channels, rate, pa_device, device, input, sink, src, lay));
     pa_.threaded_mainloop_lock(ml_);
     const bool ok = ctx_ && s->create(ctx_, error);
     pa_.threaded_mainloop_unlock(ml_);
@@ -443,13 +549,14 @@ class PulseBackend : public Backend {
     if (st == PA_CONTEXT_READY_) {
       {
         std::lock_guard<std::mutex> l(self->mu_);
-        self->pending_ = 3;
+        self->pending_ = 4;
       }
-      self->unref(pa.context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK_ | PA_SUBSCRIPTION_MASK_SINK_INPUT_ |
-                                              PA_SUBSCRIPTION_MASK_SERVER_,
+      self->unref(pa.context_subscribe(c, PA_SUBSCRIPTION_MASK_SINK_ | PA_SUBSCRIPTION_MASK_SOURCE_ |
+                                              PA_SUBSCRIPTION_MASK_SINK_INPUT_ | PA_SUBSCRIPTION_MASK_SERVER_,
                                        nullptr, nullptr));
       self->unref(pa.context_get_server_info(c, &PulseBackend::server_first_cb, self));
       self->unref(pa.context_get_sink_info_list(c, &PulseBackend::sink_list_cb, self));
+      self->unref(pa.context_get_source_info_list(c, &PulseBackend::source_list_cb, self));
       self->unref(pa.context_get_sink_input_info_list(c, &PulseBackend::input_list_cb, self));
     }
     {
@@ -459,6 +566,7 @@ class PulseBackend : public Backend {
         self->error_ = pa.strerror(pa.context_errno(c));
         self->synced_ = false;
         self->sinks_.clear();
+        self->sources_.clear();
         self->inputs_.clear();
         self->changes_.fetch_add(1, std::memory_order_acq_rel);
         self->next_try_ = 0;  // try again right away next time
@@ -484,8 +592,10 @@ class PulseBackend : public Backend {
     if (c != self->ctx_) return;
     std::lock_guard<std::mutex> l(self->mu_);
     const std::string d = i && i->default_sink_name ? i->default_sink_name : "";
-    if (d != self->default_sink_) {
+    const std::string src = i && i->default_source_name ? i->default_source_name : "";
+    if (d != self->default_sink_ || src != self->default_source_) {
       self->default_sink_ = d;
+      self->default_source_ = src;
       self->defaults_.fetch_add(1, std::memory_order_acq_rel);
     }
   }
@@ -504,9 +614,26 @@ class PulseBackend : public Backend {
     r.monitor = i->monitor_source_name ? i->monitor_source_name : "";
     r.rate = i->sample_spec.rate ? i->sample_spec.rate : 48000;
     r.channels = i->sample_spec.channels;
+    r.map = i->channel_map;
     std::lock_guard<std::mutex> l(mu_);
-    const bool fresh = sinks_.find(r.index) == sinks_.end();
+    auto it = sinks_.find(r.index);
+    const bool fresh = it == sinks_.end() || it->second.channels != r.channels;
     sinks_[r.index] = r;
+    if (fresh) changes_.fetch_add(1, std::memory_order_acq_rel);
+  }
+  void put_source(const pa_source_info* i) {
+    if (i->monitor_of_sink != PA_INVALID_INDEX_) return;  // what a sink plays: the device sources' business
+    SourceRec r;
+    r.index = i->index;
+    r.name = i->name ? i->name : "";
+    r.desc = i->description ? i->description : "";
+    r.rate = i->sample_spec.rate ? i->sample_spec.rate : 48000;
+    r.channels = i->sample_spec.channels;
+    r.map = i->channel_map;
+    std::lock_guard<std::mutex> l(mu_);
+    auto it = sources_.find(r.index);
+    const bool fresh = it == sources_.end() || it->second.channels != r.channels || it->second.rate != r.rate;
+    sources_[r.index] = r;
     if (fresh) changes_.fetch_add(1, std::memory_order_acq_rel);
   }
   void put_input(const pa_sink_input_info* i) {
@@ -535,6 +662,16 @@ class PulseBackend : public Backend {
     if (eol) return self->list_done();
     if (i) self->put_sink(i);
   }
+  static void source_list_cb(pa_context* c, const pa_source_info* i, int eol, void* u) {
+    auto* self = static_cast<PulseBackend*>(u);
+    if (c != self->ctx_) return;
+    if (eol) return self->list_done();
+    if (i) self->put_source(i);
+  }
+  static void source_one_cb(pa_context* c, const pa_source_info* i, int eol, void* u) {
+    auto* self = static_cast<PulseBackend*>(u);
+    if (c == self->ctx_ && !eol && i) self->put_source(i);
+  }
   static void input_list_cb(pa_context* c, const pa_sink_input_info* i, int eol, void* u) {
     auto* self = static_cast<PulseBackend*>(u);
     if (c != self->ctx_) return;
@@ -562,6 +699,13 @@ class PulseBackend : public Backend {
         self->changes_.fetch_add(1, std::memory_order_acq_rel);
       } else {
         self->unref(pa.context_get_sink_info_by_index(c, idx, &PulseBackend::sink_one_cb, self));
+      }
+    } else if (facility == PA_SUBSCRIPTION_EVENT_SOURCE_) {
+      if (type == PA_SUBSCRIPTION_EVENT_REMOVE_) {
+        std::lock_guard<std::mutex> l(self->mu_);
+        if (self->sources_.erase(idx)) self->changes_.fetch_add(1, std::memory_order_acq_rel);
+      } else {
+        self->unref(pa.context_get_source_info_by_index(c, idx, &PulseBackend::source_one_cb, self));
       }
     } else if (facility == PA_SUBSCRIPTION_EVENT_SINK_INPUT_) {
       if (type == PA_SUBSCRIPTION_EVENT_REMOVE_) {
@@ -596,8 +740,9 @@ class PulseBackend : public Backend {
   int pending_ = 0;
   std::string error_;
   std::map<uint32_t, SinkRec> sinks_;
+  std::map<uint32_t, SourceRec> sources_;  // recording devices only
   std::map<uint32_t, InputRec> inputs_;
-  std::string default_sink_;
+  std::string default_sink_, default_source_;
   std::atomic<unsigned> changes_{0}, defaults_{0};
 };
 
@@ -609,12 +754,14 @@ bool PulseStream::create(pa_context* ctx, std::string* error) {
   pa_sample_spec ss;
   ss.format = PA_SAMPLE_FLOAT32LE_;
   ss.rate = rate_;
-  ss.channels = uint8_t(ch_);
+  ss.channels = uint8_t(dev_ch_);
+  const char* what = capture_ ? (has_map_ ? "Audio interface inputs to Dante" : "Desktop audio to Dante")
+                              : "Dante receive channels";
   pa_proplist* p = pa.proplist_new();
-  pa.proplist_sets(p, "media.name", capture_ ? "Desktop audio to Dante" : "Dante receive channels");
+  pa.proplist_sets(p, "media.name", what);
   pa.proplist_sets(p, "application.icon_name", "virgil");
-  s_ = pa.stream_new_with_proplist(ctx, capture_ ? "Desktop audio to Dante" : "Dante receive channels", &ss,
-                                   nullptr, p);
+  if (has_map_) pa.proplist_sets(p, "media.role", "production");
+  s_ = pa.stream_new_with_proplist(ctx, what, &ss, has_map_ ? &map_ : nullptr, p);
   pa.proplist_free(p);
   if (!s_) {
     if (error) *error = pa.strerror(pa.context_errno(ctx));
@@ -633,21 +780,26 @@ bool PulseStream::create(pa_context* ctx, std::string* error) {
 bool PulseStream::start(std::string* error) {
   const PulseApi& pa = be_->api();
   pa_threaded_mainloop* ml = be_->mainloop();
-  const uint32_t fb = 4 * ch_;
+  const uint32_t fb = 4 * dev_ch_;
+  // Interface inputs / outputs: the device's channels one to one, by index.
+  const int by_index = has_map_ ? PA_STREAM_NO_REMAP_CHANNELS_ | PA_STREAM_NO_REMIX_CHANNELS_ : 0;
   pa_buffer_attr a;
   a.maxlength = a.tlength = a.prebuf = a.minreq = a.fragsize = 0xFFFFFFFFu;
   int rc;
   pa.threaded_mainloop_lock(ml);
   if (capture_) {
-    a.fragsize = fb * (rate_ / 100);  // 10 ms
+    // Monitors: 10 ms, and they must not keep a sink awake. Interface
+    // inputs: 5 ms (the source then runs at about that latency).
+    a.fragsize = fb * (has_map_ ? rate_ / 200 : rate_ / 100);
     rc = pa.stream_connect_record(s_, pa_device_.c_str(), &a,
-                                  PA_STREAM_ADJUST_LATENCY_ | PA_STREAM_DONT_MOVE_ | PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND_);
+                                  PA_STREAM_ADJUST_LATENCY_ | PA_STREAM_DONT_MOVE_ | by_index |
+                                      (has_map_ ? 0 : PA_STREAM_DONT_INHIBIT_AUTO_SUSPEND_));
   } else {
     a.tlength = fb * uint32_t(double(rate_) * be_->render_latency());
-    a.minreq = fb * (rate_ / 200);  // 5 ms
+    a.minreq = fb * (has_map_ ? rate_ / 400 : rate_ / 200);  // 2.5 / 5 ms
     rc = pa.stream_connect_playback(s_, pa_device_.c_str(), &a,
                                     PA_STREAM_ADJUST_LATENCY_ | PA_STREAM_DONT_MOVE_ | PA_STREAM_INTERPOLATE_TIMING_ |
-                                        PA_STREAM_AUTO_TIMING_UPDATE_,
+                                        PA_STREAM_AUTO_TIMING_UPDATE_ | by_index,
                                     nullptr, nullptr);
   }
   if (rc < 0 && error) *error = pa.strerror(pa.context_errno(ctx_));
@@ -682,8 +834,20 @@ void PulseStream::state_cb(pa_stream* s, void* u) {
   }
 }
 
+// Whole frames of the stream's dev_ch_ channels -> the engine's ch_ of them.
+void PulseStream::deliver(const float* f, size_t frames, int64_t now) {
+  if (!picks()) {
+    sink_->audio(f, frames, now);
+    return;
+  }
+  if (pick_.size() < frames * ch_) pick_.resize(frames * ch_);
+  for (size_t i = 0; i < frames; ++i)
+    std::memcpy(&pick_[i * ch_], f + i * dev_ch_ + first_, ch_ * sizeof(float));
+  sink_->audio(pick_.data(), frames, now);
+}
+
 void PulseStream::feed(const uint8_t* p, size_t n, int64_t now) {
-  const size_t fb = 4 * ch_;
+  const size_t fb = 4 * dev_ch_;
   if (carry_n_) {
     const size_t k = std::min(fb - carry_n_, n);
     std::memcpy(carry_ + carry_n_, p, k);
@@ -691,19 +855,19 @@ void PulseStream::feed(const uint8_t* p, size_t n, int64_t now) {
     p += k;
     n -= k;
     if (carry_n_ < fb) return;
-    float f[8];
+    float f[PA_CHANNELS_MAX_];
     std::memcpy(f, carry_, fb);
     carry_n_ = 0;
-    sink_->audio(f, 1, now);
+    deliver(f, 1, now);
   }
   const size_t frames = n / fb;
   if (frames) {
     if (reinterpret_cast<uintptr_t>(p) % alignof(float) == 0) {
-      sink_->audio(reinterpret_cast<const float*>(p), frames, now);
+      deliver(reinterpret_cast<const float*>(p), frames, now);
     } else {
-      buf_.resize(frames * ch_);
+      buf_.resize(frames * dev_ch_);
       std::memcpy(buf_.data(), p, frames * fb);
-      sink_->audio(buf_.data(), frames, now);
+      deliver(buf_.data(), frames, now);
     }
   }
   const size_t rest = n - frames * fb;
@@ -727,7 +891,7 @@ void PulseStream::read_cb(pa_stream* s, size_t, void* u) {
     if (pa.stream_peek(s, &data, &n) < 0 || n == 0) break;
     const int64_t now = virgil::mono_ns();
     if (data) self->feed(static_cast<const uint8_t*>(data), n, now);
-    else self->sink_->audio(nullptr, n / (4 * self->ch_), now);  // a gap in the recording
+    else self->sink_->audio(nullptr, n / (4 * self->dev_ch_), now);  // a gap in the recording
     pa.stream_drop(s);
   }
 }
@@ -740,12 +904,22 @@ void PulseStream::write_cb(pa_stream* s, size_t nbytes, void* u) {
   }
   auto* self = static_cast<PulseStream*>(u);
   const PulseApi& pa = self->be_->api();
-  const size_t fb = 4 * self->ch_;
+  const size_t fb = 4 * self->dev_ch_;
   const size_t frames = nbytes / fb;
   if (!frames) return;
   if (self->buf_.size() < frames * self->ch_) self->buf_.resize(frames * self->ch_);
   self->src_->render(self->buf_.data(), frames, virgil::mono_ns());
-  pa.stream_write(s, self->buf_.data(), frames * fb, nullptr, 0, PA_SEEK_RELATIVE_);
+  if (!self->picks()) {
+    pa.stream_write(s, self->buf_.data(), frames * fb, nullptr, 0, PA_SEEK_RELATIVE_);
+    return;
+  }
+  // Ours to outputs first_.., silence on the device's others.
+  const unsigned dc = self->dev_ch_, ch = self->ch_, first = self->first_;
+  if (self->pick_.size() < frames * dc) self->pick_.resize(frames * dc);
+  float* d = self->pick_.data();
+  std::fill(d, d + frames * dc, 0.f);
+  for (size_t i = 0; i < frames; ++i) std::memcpy(d + i * dc + first, &self->buf_[i * ch], ch * sizeof(float));
+  pa.stream_write(s, d, frames * fb, nullptr, 0, PA_SEEK_RELATIVE_);
 }
 
 }  // namespace

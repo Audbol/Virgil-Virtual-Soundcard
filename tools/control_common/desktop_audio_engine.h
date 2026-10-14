@@ -1,6 +1,7 @@
 // Desktop audio for Virgil Control on Linux and macOS: what other programs
-// play -> Virgil's Dante transmit channels, and Dante receive channels -> an
-// ordinary output device (headphones, speakers). No driver.
+// play, or an audio interface's inputs -> Virgil's Dante transmit channels,
+// and Dante receive channels -> an ordinary output device (headphones,
+// speakers) or an audio interface's outputs. No driver.
 //
 // The same engine as the Windows app (tools/control_win/desktop_audio.cpp),
 // in portable C++ (std::thread, UTF-8 std::string). Everything the operating
@@ -50,18 +51,23 @@ namespace desk {
 //    time per stream (different streams may use different threads).
 //  * Callbacks must not block or allocate in the engine; they get exactly the
 //    channel count asked for (1 = mono mix of the device, 2 = stereo; the
-//    backend folds or maps other layouts), interleaved float32, at rate().
+//    backend folds or maps other layouts; interface inputs / outputs: the
+//    `count` channels asked for, one per input / output, never remixed),
+//    interleaved float32, at rate().
 //  * Destroying a stream stops it: when the destructor returns no callback is
 //    running or will run. Never destroyed from inside its own callback.
 //  * failed() turns true when the stream died (device unplugged, server
 //    restarted, app quit); the engine then destroys it and opens a new one.
-//  * changes() / default_changes() are counters that go up when output
-//    devices or app streams come or go / when the default output changes.
+//  * changes() / default_changes() are counters that go up when output or
+//    input devices or app streams come or go / when the default output or
+//    the default input changes.
 
+// An output device (outputs()) or a recording device (inputs()).
 struct Device {
   std::string id;    // stored in the settings ("default" = follow the system)
   std::string name;  // for people
   bool is_default = false;
+  unsigned channels = 0;  // outputs() its output channels, inputs() its input channels (0 = unknown)
 };
 
 // A program that has audio streams right now (one entry per program).
@@ -113,6 +119,9 @@ class Stream {
   // text while it is not empty (e.g. macOS: "Silent: allow recording…").
   // Called from the engine's threads, a few times a second.
   virtual std::string note() const { return std::string(); }
+  // Optional: the device's callback period in seconds (0 = unknown), known
+  // before start(). Interface inputs / outputs size their bridges from it.
+  virtual double period_s() const { return 0; }
 };
 
 class Backend {
@@ -125,6 +134,10 @@ class Backend {
   virtual Capabilities capabilities() = 0;
   virtual std::vector<Device> outputs() = 0;  // the default one flagged
   virtual std::string default_output() = 0;   // its id, "" if none
+  // Recording devices (audio interfaces, microphones; not monitors of
+  // outputs), with their input channel counts; the default one flagged.
+  virtual std::vector<Device> inputs() = 0;
+  virtual std::string default_input() = 0;  // its id, "" if none
   virtual std::vector<App> apps() = 0;        // without this process
   // The capturable streams of `app` (App::id or the name a user typed), or
   // with all = true those of every app except this process.
@@ -136,9 +149,19 @@ class Backend {
                                                       AudioSink* sink, std::string* error) = 0;
   virtual std::unique_ptr<Stream> open_app_capture(const AppStream& s, unsigned channels, AudioSink* sink,
                                                    std::string* error) = 0;
-  // latency_s: the device buffer to aim for.
-  virtual std::unique_ptr<Stream> open_render(const std::string& device, unsigned channels, double latency_s,
-                                              AudioSource* source, std::string* error) = 0;
+  // An audio interface's inputs first_input .. first_input + count - 1
+  // (1-based) of `device` (an id from inputs(), or "default" / ""), `count`
+  // interleaved channels in that order. Low latency: a small device buffer
+  // (a few ms), period_s() set.
+  virtual std::unique_ptr<Stream> open_input_capture(const std::string& device, unsigned first_input, unsigned count,
+                                                     AudioSink* sink, std::string* error) = 0;
+  // first_channel = 0: an ordinary output, `channels` 1 (mono, on both
+  // sides) or 2 mapped onto the device's layout. first_channel >= 1 (an
+  // interface's outputs): the `channels` rendered channels go to the device's
+  // outputs first_channel.. (1-based) one each, every other output gets
+  // silence. latency_s: the device buffer to aim for.
+  virtual std::unique_ptr<Stream> open_render(const std::string& device, unsigned first_channel, unsigned channels,
+                                              double latency_s, AudioSource* source, std::string* error) = 0;
 };
 
 // The platform's backend (Linux: PulseAudio / PipeWire, loaded at run time;

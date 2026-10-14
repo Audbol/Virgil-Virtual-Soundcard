@@ -37,6 +37,7 @@ constexpr unsigned kMaxStreamsPerApp = 16;  // streams of one app (or of "all ap
 constexpr int64_t kStaleNs = 2000000000LL;  // virgild silent this long: gone
 constexpr int64_t kSoundHoldNs = 500000000LL;
 constexpr float kSilence = 1e-5f;  // -100 dBFS
+constexpr unsigned kMaxWidth = vc::kMaxInterfaceInputs;  // channels of one lane (interface inputs)
 
 std::string fmt(const char* f, ...) {
   char buf[512];
@@ -69,6 +70,28 @@ std::string rate_text(unsigned rate) {
   return rate % 1000 ? fmt("%.1f kHz", rate / 1000.0) : fmt("%u kHz", rate / 1000);
 }
 
+// Bridge level for an audio interface's inputs / outputs: a few ms. The FIFO
+// swings by one device period on one side and one I/O block (block_s) on the
+// other; twice the period, the block and 2 ms of scheduling jitter keep it
+// from running dry. period_s: the stream's, 0 = unknown (5 ms assumed).
+double interface_target_s(double period_s, double block_s) {
+  const double p = period_s > 0 ? std::min(period_s, 0.050) : 0.005;
+  return std::max(0.006, 2 * p + block_s + 0.002);
+}
+
+// The entry for `want` ("default" / "" = the flagged default) in a device list.
+bool find_device(const std::vector<Device>& list, const std::string& want, Device* out) {
+  const bool def = want.empty() || want == "default";
+  for (const Device& d : list)
+    if (def ? d.is_default : d.id == want) {
+      *out = d;
+      return true;
+    }
+  return false;
+}
+
+std::string plural(unsigned n, const char* one, const char* many) { return fmt("%u %s", n, n == 1 ? one : many); }
+
 // VIRGIL_DA_DEBUG=1 in the environment: the bridges' level and counters in
 // the status texts (for tuning and bug reports).
 std::string bridge_detail(const virgil::AdaptiveBridge& b) {
@@ -83,7 +106,7 @@ std::string bridge_detail(const virgil::AdaptiveBridge& b) {
 struct Lane : AudioSink {
   std::mutex mu;                  // the I/O thread try-locks it per block
   bool live = false;              // guarded by mu
-  unsigned source = 0, first = 0, width = 2;  // guarded by mu
+  unsigned source = 0, first = 0, width = 2;  // guarded by mu; width up to kMaxWidth
   virgil::AdaptiveBridge bridge;  // configured under mu by the owner; then SPSC
   std::atomic<bool> claimed{false};
 
@@ -115,8 +138,8 @@ class Session : AudioSource {
     B_ = std::max(16u, (rate_ / 200 + 15) / 16 * 16);
     while (B_ > 16 && B_ >= ring_ / 8) B_ /= 2;
     mix_.assign(size_t(B_) * std::max(1u, txch_), 0.f);
-    tmp_.assign(size_t(B_) * 2, 0.f);
-    rxbuf_.assign(size_t(B_) * 2, 0.f);
+    tmp_.assign(size_t(B_) * kMaxWidth, 0.f);
+    rxbuf_.assign(size_t(B_) * kMaxWidth, 0.f);
     set_gains(cfg);
   }
   ~Session() override { stop(); }
@@ -211,14 +234,14 @@ class Session : AudioSource {
     return -1;
   }
   // Before the stream starts (no producer yet).
-  bool arm_lane(int k, unsigned in_rate) {
+  bool arm_lane(int k, unsigned in_rate, double target_s, double slack_s) {
     Lane& ln = lanes_[k];
     virgil::BridgeConfig bc;
     bc.channels = ln.width;
     bc.in_rate = in_rate;
     bc.out_rate = rate_;
-    bc.target_s = 0.050;  // capture callbacks come every 10-20 ms, sometimes in bursts
-    bc.slack_s = 0.200;
+    bc.target_s = target_s;
+    bc.slack_s = slack_s;
     bc.max_pull = B_;
     std::lock_guard<std::mutex> l(ln.mu);
     if (!ln.bridge.init(bc)) return false;
@@ -334,12 +357,25 @@ class Session : AudioSource {
         const unsigned c0 = cfg_.output.channel - 1, c1 = cfg_.output.mono ? c0 : c0 + 1;
         const float g = out_.gain.load(std::memory_order_relaxed);
         float pk = 0;
-        for (uint32_t f = 0; f < B; ++f) {
-          const float* fr = c_.rx_frame(start + f);
-          const float lv = c0 < rxch_ ? g * fr[c0] : 0.f, rv = c1 < rxch_ ? g * fr[c1] : 0.f;
-          rxbuf_[2 * f] = lv;
-          rxbuf_[2 * f + 1] = rv;
-          pk = std::max(pk, std::max(std::fabs(lv), std::fabs(rv)));
+        if (cfg_.output.type == vc::DesktopAudioOutput::kInterface) {
+          // Receive channels channel.. -> the interface's outputs, one each.
+          const unsigned w = std::min(kMaxWidth, cfg_.output.width());
+          for (uint32_t f = 0; f < B; ++f) {
+            const float* fr = c_.rx_frame(start + f);
+            for (unsigned k = 0; k < w; ++k) {
+              const float v = c0 + k < rxch_ ? g * fr[c0 + k] : 0.f;
+              rxbuf_[size_t(f) * w + k] = v;
+              pk = std::max(pk, std::fabs(v));
+            }
+          }
+        } else {
+          for (uint32_t f = 0; f < B; ++f) {
+            const float* fr = c_.rx_frame(start + f);
+            const float lv = c0 < rxch_ ? g * fr[c0] : 0.f, rv = c1 < rxch_ ? g * fr[c1] : 0.f;
+            rxbuf_[2 * f] = lv;
+            rxbuf_[2 * f + 1] = rv;
+            pk = std::max(pk, std::max(std::fabs(lv), std::fabs(rv)));
+          }
         }
         peak_max(out_.peak, pk);
         if (pk > kSilence) out_.sound_ns.store(due, std::memory_order_relaxed);
@@ -364,7 +400,11 @@ class Session : AudioSource {
       return false;
     }
     cap->st = open(&lanes_[cap->lane]);
-    if (cap->st && !arm_lane(cap->lane, cap->st->rate())) {
+    // Interface inputs: a few ms (steady callbacks of a known period). The
+    // rest: capture callbacks come every 10-20 ms, sometimes in bursts.
+    const bool low = src.type == vc::DesktopAudioSource::kInput;
+    const double target = low ? interface_target_s(cap->st ? cap->st->period_s() : 0, double(B_) / rate_) : 0.050;
+    if (cap->st && !arm_lane(cap->lane, cap->st->rate(), target, low ? 0.040 : 0.200)) {
       *err = "Out of memory";
       cap->st.reset();
     }
@@ -396,12 +436,81 @@ class Session : AudioSource {
     raise_audio_thread_priority(10000000, 20);
     const vc::DesktopAudioSource& src = cfg_.sources[i];
     Shared& sh = src_[i];
-    if (src.channel < 1 || src.channel > txch_) {
+    // Interface inputs: every one needs a channel (the others may run off the end, as before).
+    const unsigned last = src.type == vc::DesktopAudioSource::kInput ? src.channel + src.width() - 1 : src.channel;
+    if (src.channel < 1 || last > txch_) {
       set_text(sh, fmt("Virgil has %u transmit channels: choose others", txch_), true);
       return;
     }
     if (src.type == vc::DesktopAudioSource::kDevice) device_source(i, src);
+    else if (src.type == vc::DesktopAudioSource::kInput) input_source(i, src);
     else app_source(i, src);
+  }
+
+  // An audio interface's inputs first_input.. -> transmit channels channel.., one each.
+  void input_source(unsigned i, const vc::DesktopAudioSource& src) {
+    Shared& sh = src_[i];
+    const bool follows_default = src.device.empty() || src.device == "default";
+    const unsigned count = src.width();
+    auto wait_change = [&](unsigned changes0) {  // again in 3 s, or as soon as a device comes or goes
+      for (int k = 0; k < 30 && !quitting() && be_.changes() == changes0; ++k) wait_quit(100);
+    };
+    while (!quitting()) {
+      const unsigned changes0 = be_.changes();
+      unsigned defaults = be_.default_changes();
+      Device dev;
+      if (!find_device(be_.inputs(), src.device, &dev)) {
+        set_text(sh, follows_default ? "There is no input device" : "The device is not connected", true);
+        wait_change(changes0);
+        continue;
+      }
+      if (src.first_input < 1 || (dev.channels && src.first_input - 1 + count > dev.channels)) {
+        set_text(sh, "The device has " + plural(dev.channels, "input", "inputs") + ": choose others", true);
+        wait_change(changes0);
+        continue;
+      }
+      Capture cap;
+      std::string err;
+      if (!open_capture(i, src, &cap, &err, [&](Lane* ln) {
+            return be_.open_input_capture(dev.id, src.first_input, count, ln, &err);
+          })) {
+        set_text(sh, err, true);
+        wait_change(changes0);
+        continue;
+      }
+      int64_t next_text = 0;
+      std::string why;
+      bool failed = false;
+      while (!wait_quit(50)) {
+        if ((failed = cap.st->failed(&why))) break;
+        if (follows_default && be_.default_changes() != defaults) {
+          defaults = be_.default_changes();
+          const std::string now_default = be_.default_input();
+          if (!now_default.empty() && now_default != cap.st->device()) break;  // follow the new default
+        }
+        const int64_t now = virgil::mono_ns();
+        if (now >= next_text) {
+          next_text = now + 250000000;
+          const virgil::AdaptiveBridge& b = lanes_[cap.lane].bridge;
+          const std::string note = cap.st->note();
+          const std::string rate = rate_text(cap.st->rate());
+          set_text(sh,
+                   !note.empty() ? note
+                   : b.frames_in() == 0 ? "No audio from the device yet (" + rate + ")"
+                   : b.state() != virgil::AdaptiveBridge::kRunning
+                       ? "Starting (" + rate + ")"
+                       : fmt("Capturing %s (%s, clock %+.0f ppm)", plural(count, "input", "inputs").c_str(),
+                             rate.c_str(), b.adjust_ppm()) +
+                             bridge_detail(b),
+                   false);
+        }
+      }
+      close_capture(&cap);
+      if (failed) {
+        set_text(sh, (why.empty() ? std::string("The device stopped") : why) + ": retrying", true);
+        wait_quit(500);
+      }
+    }
   }
 
   void device_source(unsigned i, const vc::DesktopAudioSource& src) {
@@ -559,7 +668,10 @@ class Session : AudioSource {
   void output_loop() {
     raise_audio_thread_priority(10000000, 20);
     const vc::DesktopAudioOutput& o = cfg_.output;
-    if (o.channel < 1 || o.channel > rxch_) {
+    const bool iface = o.type == vc::DesktopAudioOutput::kInterface;
+    const unsigned width = iface ? std::min(kMaxWidth, o.width()) : 2;
+    const unsigned last = iface ? o.channel + width - 1 : o.channel;
+    if (o.channel < 1 || last > rxch_) {
       set_text(out_,
                rxch_ ? fmt("Virgil has %u receive channels: choose others", rxch_)
                      : std::string("Virgil has no receive channels (Settings)"),
@@ -570,14 +682,27 @@ class Session : AudioSource {
       const unsigned changes0 = be_.changes();
       unsigned defaults = be_.default_changes();
       std::string err;
-      std::unique_ptr<Stream> r = be_.open_render(o.device, 2, 0.030, this, &err);
+      std::unique_ptr<Stream> r;
+      Device dev;
+      if (iface) {
+        // An interface's outputs first_output.. (the device's other outputs get silence).
+        if (!find_device(be_.outputs(), o.device, &dev)) {
+          err = o.device.empty() || o.device == "default" ? "There is no output device" : "The device is not connected";
+        } else if (o.first_output < 1 || (dev.channels && o.first_output - 1 + width > dev.channels)) {
+          err = "The device has " + plural(dev.channels, "output", "outputs") + ": choose others";
+        } else {
+          r = be_.open_render(dev.id, o.first_output, width, 0.020, this, &err);
+        }
+      } else {
+        r = be_.open_render(o.device, 0, 2, 0.030, this, &err);
+      }
       if (r) {
         virgil::BridgeConfig bc;
-        bc.channels = 2;
+        bc.channels = width;
         bc.in_rate = rate_;
         bc.out_rate = r->rate();
-        bc.target_s = 0.040;
-        bc.slack_s = 0.200;
+        bc.target_s = iface ? interface_target_s(r->period_s(), double(B_) / rate_) : 0.040;
+        bc.slack_s = iface ? 0.040 : 0.200;
         bc.max_pull = 2048;  // larger requests are split
         std::lock_guard<std::mutex> l(out_mu_);
         out_pulling_.store(false, std::memory_order_relaxed);
@@ -603,6 +728,7 @@ class Session : AudioSource {
       int64_t next_text = 0;
       std::string why;
       bool failed = false;
+      const std::string dev_name = !dev.name.empty() ? dev.name : !o.name.empty() ? o.name : r->device();
       while (!wait_quit(50)) {
         if ((failed = r->failed(&why))) break;
         if (o.device.empty() || o.device == "default") {
@@ -615,11 +741,18 @@ class Session : AudioSource {
         const int64_t now = virgil::mono_ns();
         if (now >= next_text) {
           next_text = now + 250000000;
+          const std::string note = r->note();
+          const bool run = out_bridge_.state() == virgil::AdaptiveBridge::kRunning;
+          const std::string rate = rate_text(r->rate());
           set_text(out_,
-                   out_bridge_.state() == virgil::AdaptiveBridge::kRunning
-                       ? fmt("Playing (%s, clock %+.0f ppm)", rate_text(r->rate()).c_str(), out_bridge_.adjust_ppm()) +
-                             bridge_detail(out_bridge_)
-                       : std::string("Starting…"),
+                   !note.empty() ? note
+                   : !run        ? std::string("Starting…")
+                   : iface       ? fmt("Playing %s on %s (%s, clock %+.0f ppm)",
+                                       plural(width, "channel", "channels").c_str(), dev_name.c_str(), rate.c_str(),
+                                       out_bridge_.adjust_ppm()) +
+                                 bridge_detail(out_bridge_)
+                                 : fmt("Playing (%s, clock %+.0f ppm)", rate.c_str(), out_bridge_.adjust_ppm()) +
+                                 bridge_detail(out_bridge_),
                    false);
         }
       }

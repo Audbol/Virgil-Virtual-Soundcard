@@ -374,6 +374,27 @@ says that desktop audio needs PulseAudio or PipeWire.
   (the next video, the next track) are picked up as they appear.
 - **All apps except Virgil:** every app's streams, without Virgil Control's
   own (and without what plays on a sink whose name contains "virgil").
+- **Audio interface inputs:** inputs of an audio interface (any PulseAudio /
+  PipeWire *source* that is not a monitor), one transmit channel each:
+  inputs *first*.. go to transmit channels *channel*.. (`Scarlett 18i20
+  inputs 1-8 → TX 1-8`). The stream records all of the source's channels by
+  index (no remixing) in 5 ms fragments and picks out the ones chosen, so the
+  latency stays low: about 23 ms from the input to Virgil's transmit time
+  (measured with a pipe source, Virgil's 2 ms transmit lead included). With
+  PipeWire, choose the interface's **Pro Audio** profile (sound settings or
+  `pavucontrol` › Configuration): the ALSA card then appears as one source
+  with every input as its own channel (`AUX0`, `AUX1`, …), instead of a
+  stereo "Analog" source. *Default input device* follows the system's.
+
+Receive channels can also go to an **audio interface's outputs**, one each
+(receive channels *channel*.. → outputs *first output*..; the interface's
+other outputs get silence), through a playback stream with all of the
+sink's channels by index and a 10 ms buffer: about 20 ms from Dante media
+time to the device (measured on a 6-channel null sink, Virgil's 10 ms receive
+latency not counted). Pick *Audio interface outputs* in the window's output
+section; with PipeWire, again the *Pro Audio* profile. Using the same
+interface for inputs and outputs is normal (there is no echo warning: it is
+not a capture of what the device plays).
 
 The rest is as on Windows: gain, mute, mono, a level meter and status per
 source; receive channels to a device with a warning when that device is also
@@ -410,6 +431,21 @@ output device part works, and the window says why.
 - **All apps except Virgil:** every app, without Virgil Control itself and
   without apps that play on Virgil's own device (so nothing echoes back into
   Dante).
+- **Audio interface inputs** (any macOS version): inputs of an audio
+  interface or any other recording device, one transmit channel each (inputs
+  *first*.. → transmit channels *channel*..), read directly with an IOProc on
+  the device (128-frame buffer asked for, for Virgil Control only), across
+  the device's input streams whether interleaved or not. *Default input
+  device* follows System Settings › Sound. macOS asks once whether Virgil
+  Control may use the microphone (that permission covers every audio input);
+  if it was refused, the source says so: allow it in System Settings ›
+  Privacy & Security › *Microphone* and turn the source off and on.
+
+Receive channels can also go to an **audio interface's outputs**, one each
+(receive channels *channel*.. → outputs *first output*.., silence on the
+others, across the device's output streams), with a small buffer as for
+inputs. Inputs and outputs of the same interface together are normal (no echo
+warning).
 
 The first time a source captures, macOS asks whether Virgil Control may
 record this computer's audio. If that was refused, captured audio is silent
@@ -422,7 +458,8 @@ device as usual (taps do not mute it).
 The rest is as on Windows and Linux: gain, mute, mono, a level meter and status
 per source; receive channels to a device (its first two channels), with a
 warning when that device is also captured; one playback slot named *Desktop
-audio*; roughly 60 ms of latency per direction; drift between the Mac's audio
+audio*; roughly 60 ms of latency per direction (interface inputs and outputs: a few
+ms of buffering plus Virgil's own latency); drift between the Mac's audio
 clock and the Dante clock followed by the adaptive resampler. Settings are per
 user in `~/Library/Application Support/Virgil/desktop-audio.conf`, the same
 format as on Windows, with Core Audio device UIDs as device ids and bundle IDs
@@ -515,8 +552,8 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 | Raspberry Pi (arm64) | In use with REAPER on a Raspberry Pi (64-bit Raspberry Pi OS); unit and loopback tests also run under QEMU in CI |
 | CoreAudio driver, macOS `.pkg`, Virgil Control for macOS | Built by CI on macOS; **not yet run on a real Mac** |
 | Virgil Control (Linux / Pi) | Run under X11 with a live daemon: meters, settings dialog and apply |
-| Desktop audio (Linux) | `tests/desktop_audio_e2e.sh`: a private PulseAudio with null sinks and a free-running `virgild`; a tone from the default device, from one named app and from all apps arrives on the mapped transmit channels only; a round trip device → Virgil → receive channels → another device measures the latency (about 117 ms both ways); with Virgil's clock 150 ppm off, both bridges follow it. The engine itself: `ctest` (`desktop_audio`, against a fake sound system) |
-| Desktop audio (macOS) | `ctest` (`desktop_audio_coreaudio`, macOS only): the Core Audio backend lists output devices and playing apps, reports app capture exactly when macOS is 14.2 or later, refuses unknown devices and opens, runs and closes a render stream on the default output (skipped without one). Process taps themselves need the recording permission, so they are tested by hand |
+| Desktop audio (Linux) | `tests/desktop_audio_e2e.sh`: a private PulseAudio with null sinks and a free-running `virgild`; a tone from the default device, from one named app and from all apps arrives on the mapped transmit channels only; a round trip device → Virgil → receive channels → another device measures the latency (about 117 ms both ways); with Virgil's clock 150 ppm off, both bridges follow it; inputs 2-3 of a 4-channel pipe source (the "interface") arrive exactly on transmit channels 5-6, about 23 ms after they were written; receive channels 2-5 arrive exactly on outputs 3-6 of a 6-channel null sink (read back with `parec`), the other outputs silent, about 30 ms after their Dante media time (Virgil's 10 ms receive latency included). The engine itself: `ctest` (`desktop_audio`, against a fake sound system, including an 8-input interface to transmit channels 3-10 and receive channels to outputs 3-6 of an 8-output one) |
+| Desktop audio (macOS) | `ctest` (`desktop_audio_coreaudio`, macOS only): the Core Audio backend lists output devices and playing apps, reports app capture exactly when macOS is 14.2 or later, lists recording devices with their input counts, refuses unknown devices and outputs a device does not have, and opens, runs and closes a render stream on the default output (skipped without one). Process taps themselves need the recording permission, so they are tested by hand |
 
 Known limitations:
 

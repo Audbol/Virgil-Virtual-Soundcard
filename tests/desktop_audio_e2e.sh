@@ -7,6 +7,10 @@
 #   4. round trip device -> Virgil -> loop back -> receive channels -> another
 #      device, with the latency of tone bursts
 #   5. the same with Virgil's media clock 150 ppm fast (drift following)
+#   6. an audio interface's inputs 2 + 3 (of a 4-channel pipe source this
+#      script's harness feeds) -> transmit channels 5 + 6: exact values, latency
+#   7. receive channels 2-5 -> outputs 3-6 of a 6-channel "interface" (a null
+#      sink, read back with parec): exact values, silent other outputs, latency
 #
 # usage: tests/desktop_audio_e2e.sh BUILD_DIR
 #   PULSEAUDIO=/path/to/pulseaudio   the server binary (default: from PATH)
@@ -36,6 +40,8 @@ cat > "$work/test.pa" <<EOF
 load-module module-native-protocol-unix auth-anonymous=1
 load-module module-null-sink sink_name=speakers rate=48000 channels=2 sink_properties=device.description=Speakers
 load-module module-null-sink sink_name=headphones rate=48000 channels=2 sink_properties=device.description=Headphones
+load-module module-pipe-source source_name=interface4 file=$work/interface4.fifo format=float32le rate=48000 channels=4 channel_map=aux0,aux1,aux2,aux3 source_properties=device.description=Test-Interface
+load-module module-null-sink sink_name=interface6 format=float32le rate=48000 channels=6 channel_map=aux0,aux1,aux2,aux3,aux4,aux5 sink_properties=device.description=Test-Interface-Out
 set-default-sink speakers
 EOF
 pa_args=(-n -F "$work/test.pa" --exit-idle-time=-1 --daemonize=no --system=false --disallow-exit
@@ -69,7 +75,7 @@ cat > "$work/virgil.conf" <<EOF
 [device]
 name = DA-E2E
 interface = 127.0.0.1
-tx_channels = 4
+tx_channels = 8
 rx_channels = 4
 clock = free
 control_port = 0
@@ -114,5 +120,10 @@ VIRGIL_DA_DEBUG=1 run "drift: Virgil's clock +150 ppm, 60 s" "$harness" loop --s
   --ppm 150 --seconds 60
 grep -E "source 1|output:" "$work/step.log" | tail -2
 stop_players
+
+run "interface inputs 2 + 3 (of 4) -> tx 5 + 6" "$harness" inputs --shm "$shm" --fifo "$work/interface4.fifo" \
+  --dev-ch 4 --source input:interface4 --first 2 --count 2 --channel 5 --seconds 12
+run "rx 2-5 -> interface outputs 3-6 (of 6)" "$harness" outputs --out interface6 --dev-ch 6 --first 3 --count 4 \
+  --channel 2 --seconds 12
 [ $status = 0 ] && echo "all passed" || echo "some FAILED"
 exit $status

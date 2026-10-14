@@ -6,7 +6,15 @@
 //                   (its helpers too, e.g. a browser's audio process)
 //   all apps        a stereo global tap of every process except this one and
 //                   those that play on a Virgil device (no echo into Dante)
+//   interface inputs  an IOProc on a recording device (an audio interface),
+//                   its input buffers: inputs first.. picked out across them
+//                   (interleaved or not), a small I/O buffer (128 frames
+//                   asked for). Any macOS version; needs the microphone
+//                   permission (NSMicrophoneUsageDescription), asked for the
+//                   first time from the main thread.
 //   output          an IOProc on the output device (or the default one)
+//   interface outputs the same, receive channels to the outputs first..
+//                   (across the device's buffers), silence on the others
 //
 // Every tap is private, leaves the sound audible (CATapUnmuted) and is read
 // through a private aggregate device whose clock is the tapped (or the
@@ -30,6 +38,7 @@
 #else
 #define VIRGIL_HAVE_TAPS 0  // SDK older than macOS 14.2: output only
 #endif
+#include <dispatch/dispatch.h>
 #include <dlfcn.h>
 #include <libproc.h>
 #include <unistd.h>
@@ -65,6 +74,13 @@
 #define kAudioAggregateDeviceMainSubDeviceKey "master"
 #endif
 
+// AVCaptureDevice's class methods used for the microphone permission
+// (AVFoundation is loaded at run time, not linked).
+@protocol VirgilCaptureAuthorization
++ (NSInteger)authorizationStatusForMediaType:(NSString*)mediaType;
++ (void)requestAccessForMediaType:(NSString*)mediaType completionHandler:(void (^)(BOOL granted))handler;
+@end
+
 namespace desk {
 
 namespace {
@@ -80,6 +96,15 @@ const char* const kPermission =
 const char* const kSilentNote =
     "Silent while the app plays: allow Virgil Control in System Settings › Privacy & Security › "
     "Screen & System Audio Recording (System Audio Recording Only), then turn the source off and on";
+
+const char* const kMicDenied =
+    "Virgil Control may not use audio inputs: allow it in System Settings › Privacy & Security › Microphone, "
+    "then turn the source off and on";
+const char* const kMicAsking = "Waiting for permission to use audio inputs: answer the macOS dialog";
+const char* const kMicSilent =
+    "Silent: Virgil Control may not be allowed to use audio inputs (System Settings › Privacy & Security › "
+    "Microphone)";
+constexpr UInt32 kLowLatencyFrames = 128;  // I/O buffer asked for interface inputs / outputs
 
 std::string lower(std::string s) {
   for (char& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
@@ -161,9 +186,10 @@ unsigned channel_count(AudioObjectID dev, AudioObjectPropertyScope scope, unsign
   return n;
 }
 
-struct OutDev {
+struct OutDev {  // an output device, or (list_inputs) a recording device
   AudioObjectID obj = kAudioObjectUnknown;
   std::string uid, name;
+  unsigned channels = 0;  // in the listed direction
 };
 
 bool own_device(const std::string& uid) { return uid.compare(0, std::strlen(kOwnPrefix), kOwnPrefix) == 0; }
@@ -176,7 +202,25 @@ std::vector<OutDev> list_outputs() {
     d.obj = dev;
     d.uid = get_string(dev, kAudioDevicePropertyDeviceUID);
     if (d.uid.empty() || own_device(d.uid)) continue;
-    if (channel_count(dev, kAudioObjectPropertyScopeOutput) == 0) continue;
+    d.channels = channel_count(dev, kAudioObjectPropertyScopeOutput);
+    if (d.channels == 0) continue;
+    d.name = get_string(dev, kAudioObjectPropertyName);
+    if (d.name.empty()) d.name = d.uid;
+    r.push_back(d);
+  }
+  return r;
+}
+
+// Devices that can record (audio interfaces, microphones; our own aggregates left out).
+std::vector<OutDev> list_inputs() {
+  std::vector<OutDev> r;
+  for (AudioObjectID dev : get_ids(kAudioObjectSystemObject, kAudioHardwarePropertyDevices)) {
+    OutDev d;
+    d.obj = dev;
+    d.uid = get_string(dev, kAudioDevicePropertyDeviceUID);
+    if (d.uid.empty() || own_device(d.uid)) continue;
+    d.channels = channel_count(dev, kAudioObjectPropertyScopeInput);
+    if (d.channels == 0) continue;
     d.name = get_string(dev, kAudioObjectPropertyName);
     if (d.name.empty()) d.name = d.uid;
     r.push_back(d);
@@ -188,6 +232,107 @@ AudioObjectID default_output_id() {
   AudioObjectID d = kAudioObjectUnknown;
   if (!get(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultOutputDevice, &d)) return kAudioObjectUnknown;
   return d;
+}
+
+AudioObjectID default_input_id() {
+  AudioObjectID d = kAudioObjectUnknown;
+  if (!get(kAudioObjectSystemObject, kAudioHardwarePropertyDefaultInputDevice, &d)) return kAudioObjectUnknown;
+  return d;
+}
+
+// "default" / "" = the system's default input; else a device UID.
+bool find_input(const std::string& device, OutDev* out, std::string* error) {
+  const bool def = device.empty() || device == "default";
+  const AudioObjectID want = def ? default_input_id() : kAudioObjectUnknown;
+  for (const OutDev& d : list_inputs())
+    if (def ? d.obj == want : d.uid == device) {
+      *out = d;
+      return true;
+    }
+  if (error) *error = def ? "There is no input device" : "The device is not connected";
+  return false;
+}
+
+// Every stream of the device in that direction takes 32-bit float (the
+// IOProc's buffers are in the streams' virtual formats).
+bool float_streams(AudioObjectID dev, AudioObjectPropertyScope scope) {
+  for (AudioObjectID st : get_ids(dev, kAudioDevicePropertyStreams, scope)) {
+    AudioStreamBasicDescription f;
+    std::memset(&f, 0, sizeof f);
+    if (!get(st, kAudioStreamPropertyVirtualFormat, &f)) continue;
+    if (f.mFormatID != kAudioFormatLinearPCM || !(f.mFormatFlags & kAudioFormatFlagIsFloat) || f.mBitsPerChannel != 32)
+      return false;
+  }
+  return true;
+}
+
+// Asks for a small I/O buffer for this process's IOProcs on the device (the
+// HAL keeps other apps' own sizes; within the device's range only). Returns
+// the size in effect afterwards (0 = unknown).
+UInt32 request_buffer_frames(AudioObjectID dev, UInt32 want) {
+  UInt32 cur = 0;
+  get(dev, kAudioDevicePropertyBufferFrameSize, &cur);
+  AudioValueRange range = {0, 0};
+  if (get(dev, kAudioDevicePropertyBufferFrameSizeRange, &range) && range.mMaximum >= range.mMinimum) {
+    want = UInt32(std::max<Float64>(range.mMinimum, std::min<Float64>(range.mMaximum, want)));
+  }
+  if (cur == 0 || cur > want) {
+    const AudioObjectPropertyAddress a = addr(kAudioDevicePropertyBufferFrameSize);
+    Boolean settable = false;
+    if (AudioObjectIsPropertySettable(dev, &a, &settable) == noErr && settable)
+      AudioObjectSetPropertyData(dev, &a, 0, nullptr, sizeof want, &want);
+    get(dev, kAudioDevicePropertyBufferFrameSize, &cur);
+  }
+  return cur;
+}
+
+// ---- microphone permission (TCC), through AVFoundation loaded at run time ----------------
+
+enum MicStatus {  // AVAuthorizationStatus
+  kMicStatusUnknown = -1,
+  kMicStatusNotDetermined = 0,
+  kMicStatusRestricted = 1,
+  kMicStatusDenied = 2,
+  kMicStatusAuthorized = 3,
+};
+
+Class mic_class() {
+  static Class cls = [] {
+    dlopen("/System/Library/Frameworks/AVFoundation.framework/AVFoundation", RTLD_LAZY | RTLD_LOCAL);
+    Class c = NSClassFromString(@"AVCaptureDevice");
+    return c && [c respondsToSelector:@selector(authorizationStatusForMediaType:)] ? c : Nil;
+  }();
+  return cls;
+}
+
+MicStatus mic_status() {
+  Class cls = mic_class();
+  if (!cls) return kMicStatusUnknown;
+  // AVMediaTypeAudio is @"soun".
+  const NSInteger st = [(Class<VirgilCaptureAuthorization>)cls authorizationStatusForMediaType:@"soun"];
+  return st >= 0 && st <= 3 ? MicStatus(st) : kMicStatusUnknown;
+}
+
+// The app's Info.plist says why (without that, asking would end the process).
+bool can_ask_mic() {
+  @autoreleasepool {
+    return [[NSBundle mainBundle] objectForInfoDictionaryKey:@"NSMicrophoneUsageDescription"] != nil;
+  }
+}
+
+// Shows the system's question once (from the main thread); `answered` runs when it is answered.
+void ask_mic(void (^answered)(void)) {
+  static std::atomic<bool> asked{false};
+  if (asked.exchange(true)) return;
+  Class cls = mic_class();
+  if (!cls || ![cls respondsToSelector:@selector(requestAccessForMediaType:completionHandler:)]) return;
+  dispatch_async(dispatch_get_main_queue(), ^{
+    [(Class<VirgilCaptureAuthorization>)cls requestAccessForMediaType:@"soun"
+                                                    completionHandler:^(BOOL granted) {
+                                                      (void)granted;
+                                                      if (answered) answered();
+                                                    }];
+  });
 }
 
 // "default" / "" = the system's default output; else a device UID.
@@ -328,6 +473,7 @@ class CaStream : public Stream {
   }
   unsigned rate() const override { return rate_; }
   std::string device() const override { return device_uid_; }
+  double period_s() const override { return period_frames_ && rate_ ? double(period_frames_) / rate_ : 0; }
 
  protected:
   virtual std::string start_error(OSStatus e) const { return "The device does not start (error " + os_text(e) + ")"; }
@@ -378,6 +524,8 @@ class CaStream : public Stream {
   AudioObjectID watch_dev_ = kAudioObjectUnknown;  // the real device behind it
   AudioDeviceIOProcID proc_ = nullptr;
   unsigned rate_ = 48000, ch_ = 2;
+  unsigned first_ = 0;           // interface inputs / outputs: the device's first channel used (0-based)
+  UInt32 period_frames_ = 0;     // the I/O buffer, when it was set
   std::string device_uid_;
   std::vector<float> buf_;
 
@@ -399,25 +547,28 @@ class RenderStream : public CaStream {
   explicit RenderStream(AudioSource* src) : src_(src) {}
   ~RenderStream() override { close_io(); }
 
-  bool open(const OutDev& d, unsigned channels, std::string* error) {
-    ch_ = std::max(1u, std::min(2u, channels));
+  // first_channel = 0: a pair (or one on both sides) on the device's first
+  // two channels; >= 1: `channels` channels to the outputs first_channel..
+  bool open(const OutDev& d, unsigned first_channel, unsigned channels, std::string* error) {
+    iface_ = first_channel > 0;
+    ch_ = iface_ ? std::max(1u, std::min(vc::kMaxInterfaceInputs, channels)) : std::max(1u, std::min(2u, channels));
+    first_ = iface_ ? first_channel - 1 : 0;
     device_uid_ = d.uid;
     io_dev_ = watch_dev_ = d.obj;
-    for (AudioObjectID s : get_ids(d.obj, kAudioDevicePropertyStreams, kAudioObjectPropertyScopeOutput)) {
-      AudioStreamBasicDescription f;
-      std::memset(&f, 0, sizeof f);
-      if (!get(s, kAudioStreamPropertyVirtualFormat, &f)) continue;
-      if (f.mFormatID != kAudioFormatLinearPCM || !(f.mFormatFlags & kAudioFormatFlagIsFloat) ||
-          f.mBitsPerChannel != 32) {
-        if (error) *error = "The device does not take 32-bit float audio";
-        return false;
-      }
+    if (iface_ && first_ + ch_ > d.channels) {
+      if (error) *error = "The device has " + std::to_string(d.channels) + " outputs: choose others";
+      return false;
+    }
+    if (!float_streams(d.obj, kAudioObjectPropertyScopeOutput)) {
+      if (error) *error = "The device does not take 32-bit float audio";
+      return false;
     }
     rate_ = nominal_rate(d.obj);
     if (!rate_) {
       if (error) *error = "The device has no sample rate";
       return false;
     }
+    if (iface_) period_frames_ = request_buffer_frames(d.obj, kLowLatencyFrames);
     buf_.assign(kChunk * ch_, 0.f);
     const OSStatus e = AudioDeviceCreateIOProcID(d.obj, &RenderStream::io, this, &proc_);
     if (e != noErr || !proc_) {
@@ -455,6 +606,26 @@ class RenderStream : public CaStream {
       const size_t n = std::min(frames - done, kChunk);
       float* in = buf_.data();
       src_->render(in, n, now);
+      if (iface_) {
+        // Engine channel j -> device channel first_ + j, wherever it is
+        // (interleaved in one buffer or one buffer per channel); the rest
+        // stays silent.
+        unsigned k = 0;  // device channel index of the buffer's first channel
+        for (UInt32 i = 0; i < out->mNumberBuffers; ++i) {
+          const unsigned nch = b[i].mNumberChannels;
+          float* d = static_cast<float*>(b[i].mData);
+          if (d && nch)
+            for (unsigned c = 0; c < nch; ++c) {
+              const unsigned dc = k + c;
+              if (dc < first_ || dc >= first_ + ch_) continue;
+              const unsigned j = dc - first_;
+              for (size_t f = 0; f < n; ++f) d[(done + f) * nch + c] = in[f * ch_ + j];
+            }
+          k += nch;
+        }
+        done += n;
+        continue;
+      }
       // The engine's first (or only) two channels into the device's first two.
       unsigned k = 0;  // device channel index across the buffers
       for (UInt32 i = 0; i < out->mNumberBuffers && k < 2; ++i) {
@@ -476,6 +647,137 @@ class RenderStream : public CaStream {
   }
 
   AudioSource* const src_;
+  bool iface_ = false;
+};
+
+// ---- capture: an audio interface's inputs ------------------------------------------------------
+
+class InputStream : public CaStream {
+ public:
+  explicit InputStream(AudioSink* sink) : sink_(sink) {}
+  ~InputStream() override { close_io(); }
+
+  bool open(const OutDev& d, unsigned first_input, unsigned count, std::string* error) {
+    ch_ = std::max(1u, std::min(vc::kMaxInterfaceInputs, count));
+    first_ = first_input > 0 ? first_input - 1 : 0;
+    device_uid_ = d.uid;
+    io_dev_ = watch_dev_ = d.obj;
+    if (first_ + ch_ > d.channels) {
+      if (error) *error = "The device has " + std::to_string(d.channels) + " inputs: choose others";
+      return false;
+    }
+    if (!float_streams(d.obj, kAudioObjectPropertyScopeInput)) {
+      if (error) *error = "The device does not give 32-bit float audio";
+      return false;
+    }
+    rate_ = nominal_rate(d.obj);
+    if (!rate_) {
+      if (error) *error = "The device has no sample rate";
+      return false;
+    }
+    period_frames_ = request_buffer_frames(d.obj, kLowLatencyFrames);
+    buf_.assign(kChunk * ch_, 0.f);
+    const OSStatus e = AudioDeviceCreateIOProcID(d.obj, &InputStream::io, this, &proc_);
+    if (e != noErr || !proc_) {
+      proc_ = nullptr;
+      if (error) *error = "Cannot record from the device (error " + os_text(e) + ")";
+      return false;
+    }
+    return true;
+  }
+
+  // Without the permission macOS delivers silence, not an error.
+  std::string note() const override {
+    if (!started_.load(std::memory_order_acquire)) return std::string();
+    const int64_t now = virgil::mono_ns();
+    if (now >= next_note_) {
+      next_note_ = now + 1000000000LL;
+      const MicStatus st = mic_status();
+      const int64_t sound = last_sound_ns_.load(std::memory_order_relaxed);
+      const int64_t since = sound ? sound : started_ns_.load(std::memory_order_relaxed);
+      note_ = st == kMicStatusDenied || st == kMicStatusRestricted ? kMicDenied
+              : st != kMicStatusAuthorized && last_cb_ns_.load(std::memory_order_relaxed) && now - since > 3000000000LL
+                  ? kMicSilent
+                  : "";
+    }
+    return note_;
+  }
+
+ private:
+  std::string start_error(OSStatus e) const override {
+    return "Cannot start recording from the device (error " + os_text(e) + ")";
+  }
+
+  static OSStatus io(AudioObjectID, const AudioTimeStamp*, const AudioBufferList* in, const AudioTimeStamp* in_time,
+                     AudioBufferList* out, const AudioTimeStamp*, void* user) {
+    auto* self = static_cast<InputStream*>(user);
+    self->in_cb_.fetch_add(1, std::memory_order_seq_cst);
+    if (out)  // a duplex device's outputs: nothing to play from here
+      for (UInt32 i = 0; i < out->mNumberBuffers; ++i)
+        if (out->mBuffers[i].mData) std::memset(out->mBuffers[i].mData, 0, out->mBuffers[i].mDataByteSize);
+    if (!self->stopping_.load(std::memory_order_seq_cst) && in) self->capture(in, in_time);
+    self->in_cb_.fetch_sub(1, std::memory_order_seq_cst);
+    return noErr;
+  }
+
+  void capture(const AudioBufferList* in, const AudioTimeStamp* t) {
+    const int64_t now = virgil::mono_ns();
+    last_cb_ns_.store(now, std::memory_order_relaxed);
+    const UInt32 nb = in->mNumberBuffers;
+    const AudioBuffer* b = in->mBuffers;
+    // Where each wanted input is: the device's channels in buffer order.
+    const float* src[vc::kMaxInterfaceInputs];
+    size_t stride[vc::kMaxInterfaceInputs];
+    unsigned got = 0, k = 0;  // k: device channel index of the buffer's first channel
+    size_t frames = SIZE_MAX;
+    bool gap = false;
+    for (UInt32 i = 0; i < nb && got < ch_; ++i) {
+      const unsigned nch = b[i].mNumberChannels;
+      if (!nch) continue;
+      if (k + nch > first_) {
+        frames = std::min<size_t>(frames, b[i].mDataByteSize / (sizeof(float) * nch));
+        if (!b[i].mData) gap = true;
+        for (unsigned c = k < first_ ? first_ - k : 0; c < nch && got < ch_; ++c, ++got) {
+          src[got] = b[i].mData ? static_cast<const float*>(b[i].mData) + c : nullptr;
+          stride[got] = nch;
+        }
+      }
+      k += nch;
+    }
+    if (got < ch_) return fail("The device's inputs changed");  // fewer than asked for: reopened
+    if (frames == SIZE_MAX || frames == 0) return;
+    int64_t end = now;
+    if (t && (t->mFlags & kAudioTimeStampHostTimeValid)) {
+      // The input time is the first frame's.
+      const int64_t e = int64_t(AudioConvertHostTimeToNanos(t->mHostTime)) + int64_t(double(frames) * 1e9 / rate_);
+      if (e <= now + 20000000LL && e >= now - 500000000LL) end = e;
+    }
+    if (gap) {
+      sink_->audio(nullptr, frames, end);
+      return;
+    }
+    bool sound = false;
+    const unsigned C = ch_;
+    for (size_t done = 0; done < frames;) {
+      const size_t n = std::min(frames - done, kChunk);
+      float* o = buf_.data();
+      for (size_t f = 0; f < n; ++f)
+        for (unsigned j = 0; j < C; ++j) {
+          const float v = src[j][(done + f) * stride[j]];
+          if (v != 0.f) sound = true;
+          o[f * C + j] = v;
+        }
+      done += n;
+      sink_->audio(o, n, end - int64_t(double(frames - done) * 1e9 / rate_));
+    }
+    if (sound) last_sound_ns_.store(now, std::memory_order_relaxed);
+  }
+
+  AudioSink* const sink_;
+  std::atomic<int64_t> last_sound_ns_{0};
+  // note(): the engine's source thread only.
+  mutable int64_t next_note_ = 0;
+  mutable std::string note_;
 };
 
 // ---- capture: a process tap read through a private aggregate device ------------------------------
@@ -734,6 +1036,7 @@ class CoreAudioBackend : public Backend {
       }
       listen(kAudioHardwarePropertyDevices);
       listen(kAudioHardwarePropertyDefaultOutputDevice);
+      listen(kAudioHardwarePropertyDefaultInputDevice);
 #if VIRGIL_HAVE_TAPS
       if (@available(macOS 14.2, *)) listen(kAudioHardwarePropertyProcessObjectList);
 #endif
@@ -759,6 +1062,7 @@ class CoreAudioBackend : public Backend {
       e.id = d.uid;
       e.name = d.name;
       e.is_default = d.obj == def;
+      e.channels = d.channels;
       r.push_back(e);
     }
     std::sort(r.begin(), r.end(), [](const Device& a, const Device& b) { return lower(a.name) < lower(b.name); });
@@ -767,6 +1071,28 @@ class CoreAudioBackend : public Backend {
 
   std::string default_output() override {
     const AudioObjectID def = default_output_id();
+    if (def == kAudioObjectUnknown) return std::string();
+    const std::string uid = get_string(def, kAudioDevicePropertyDeviceUID);
+    return own_device(uid) ? std::string() : uid;
+  }
+
+  std::vector<Device> inputs() override {
+    const AudioObjectID def = default_input_id();
+    std::vector<Device> r;
+    for (const OutDev& d : list_inputs()) {
+      Device e;
+      e.id = d.uid;
+      e.name = d.name;
+      e.is_default = d.obj == def;
+      e.channels = d.channels;
+      r.push_back(e);
+    }
+    std::sort(r.begin(), r.end(), [](const Device& a, const Device& b) { return lower(a.name) < lower(b.name); });
+    return r;
+  }
+
+  std::string default_input() override {
+    const AudioObjectID def = default_input_id();
     if (def == kAudioObjectUnknown) return std::string();
     const std::string uid = get_string(def, kAudioDevicePropertyDeviceUID);
     return own_device(uid) ? std::string() : uid;
@@ -895,13 +1221,37 @@ class CoreAudioBackend : public Backend {
     return std::unique_ptr<Stream>(s.release());
   }
 
-  std::unique_ptr<Stream> open_render(const std::string& device, unsigned channels, double, AudioSource* source,
-                                      std::string* error) override {
+  std::unique_ptr<Stream> open_input_capture(const std::string& device, unsigned first_input, unsigned count,
+                                             AudioSink* sink, std::string* error) override {
+    connect(nullptr);
+    OutDev d;
+    if (!find_input(device, &d, error)) return nullptr;
+    // The microphone permission covers every audio input.
+    const MicStatus st = mic_status();
+    if (st == kMicStatusDenied || st == kMicStatusRestricted) {
+      if (error) *error = kMicDenied;
+      return nullptr;
+    }
+    if (st == kMicStatusNotDetermined && can_ask_mic()) {
+      std::atomic<unsigned>* changes = &changes_;
+      ask_mic(^{
+        changes->fetch_add(1, std::memory_order_acq_rel);  // the engine tries again right away
+      });
+      if (error) *error = kMicAsking;
+      return nullptr;
+    }
+    std::unique_ptr<InputStream> s(new InputStream(sink));
+    if (!s->open(d, first_input, count, error)) return nullptr;
+    return std::unique_ptr<Stream>(s.release());
+  }
+
+  std::unique_ptr<Stream> open_render(const std::string& device, unsigned first_channel, unsigned channels, double,
+                                      AudioSource* source, std::string* error) override {
     connect(nullptr);
     OutDev d;
     if (!find_output(device, &d, error)) return nullptr;
     std::unique_ptr<RenderStream> s(new RenderStream(source));
-    if (!s->open(d, channels, error)) return nullptr;
+    if (!s->open(d, first_channel, channels, error)) return nullptr;
     return std::unique_ptr<Stream>(s.release());
   }
 
@@ -922,7 +1272,9 @@ class CoreAudioBackend : public Backend {
 
   static std::string devices_signature() {
     std::string s;
-    for (const OutDev& d : list_outputs()) s += d.uid + '\n';
+    for (const OutDev& d : list_outputs()) s += d.uid + ' ' + std::to_string(d.channels) + '\n';
+    s += "in\n";
+    for (const OutDev& d : list_inputs()) s += d.uid + ' ' + std::to_string(d.channels) + '\n';
     return s;
   }
 
@@ -930,7 +1282,8 @@ class CoreAudioBackend : public Backend {
   static OSStatus on_change(AudioObjectID, UInt32 n, const AudioObjectPropertyAddress* a, void* user) {
     auto* self = static_cast<CoreAudioBackend*>(user);
     for (UInt32 i = 0; i < n; ++i) {
-      if (a[i].mSelector == kAudioHardwarePropertyDefaultOutputDevice) {
+      if (a[i].mSelector == kAudioHardwarePropertyDefaultOutputDevice ||
+          a[i].mSelector == kAudioHardwarePropertyDefaultInputDevice) {
         self->defaults_.fetch_add(1, std::memory_order_acq_rel);
       } else if (a[i].mSelector == kAudioHardwarePropertyDevices) {
         // Our own aggregates come and go with every capture: not a change.

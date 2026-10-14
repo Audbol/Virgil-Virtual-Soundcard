@@ -37,18 +37,23 @@ const char* const kHelpText =
     "• App: one app, such as Safari, Music or Spotify, with its helper processes. The list shows the apps "
     "that play sound now; you can also type an app's name.\n"
     "• All apps except Virgil: every app, without what Virgil Control itself plays and without apps that play "
-    "on Virgil's own device (no echo when you also listen to Dante on this Mac).\n\n"
-    "Each source goes to a pair of transmit channels (or one, mixed to mono); sources on the same channels are "
-    "mixed. Route those channels in Dante Controller like any other.\n\n"
-    "Dante receive channels can play on an output device too. Do not play them on a device you also capture: "
-    "they would echo back into Dante.\n\n"
+    "on Virgil's own device (no echo when you also listen to Dante on this Mac).\n"
+    "• Audio interface inputs: inputs of an audio interface (or any recording device), one transmit channel "
+    "each, with low latency (a few milliseconds). Works on any macOS version; the first time, macOS asks "
+    "whether Virgil Control may use the microphone (that covers every audio input).\n\n"
+    "Each source goes to a pair of transmit channels (or one, mixed to mono; interface inputs: one each); "
+    "sources on the same channels are mixed. Route those channels in Dante Controller like any other.\n\n"
+    "Dante receive channels can play on an output device too (a pair, or one on both sides), or on an audio "
+    "interface's outputs, one receive channel per output. Do not play them on a device whose sound you also "
+    "capture: they would echo back into Dante.\n\n"
     "Captured audio still plays on its own device. To hear it only through Dante, turn that device down or let "
     "those apps play on an output you do not listen to.\n\n"
     "If a source stays silent while its app plays, allow Virgil Control in System Settings › Privacy & "
     "Security › Screen & System Audio Recording, then turn the source off and on.\n\n"
     "The audio is converted to Virgil's sample rate and follows the small difference between the clock of the "
-    "Mac's sound hardware and the Dante clock. It adds roughly 60 ms of latency in each direction, so use it "
-    "for music, video calls and system sounds, not for live monitoring.\n\n"
+    "Mac's sound hardware and the Dante clock. Captured app and device sound adds roughly 60 ms of latency in "
+    "each direction (fine for music, video calls and system sounds); audio interface inputs and outputs add "
+    "about 15-25 ms.\n\n"
     "Desktop audio runs while Virgil Control runs (it can start at login) and pauses while Virgil is stopped. "
     "Settings are saved in ~/Library/Application Support/Virgil/desktop-audio.conf.";
 
@@ -82,7 +87,8 @@ int64_t now_us() {
 struct Inventory {
   bool ok = false;
   std::string why;
-  std::vector<desk::Device> devices;
+  std::vector<desk::Device> devices;  // outputs
+  std::vector<desk::Device> inputs;   // recording devices
   std::vector<desk::App> apps;
 };
 
@@ -94,6 +100,7 @@ void load_inventory(desk::Engine& engine, std::function<void(std::shared_ptr<Inv
     inv->ok = be->connect(&inv->why);
     if (inv->ok) {
       inv->devices = be->outputs();
+      inv->inputs = be->inputs();
       inv->apps = be->apps();
     }
     on_main(^{
@@ -145,6 +152,29 @@ std::string device_name(const std::string& key, const std::string& saved, const 
   return saved.empty() ? key : saved;
 }
 
+std::string input_name(const std::string& key, const std::string& saved, const Inventory* inv) {
+  if (key.empty() || key == "default") return "Default input device";
+  if (inv)
+    for (const auto& e : inv->inputs)
+      if (e.id == key) return e.name;
+  return saved.empty() ? key : saved;
+}
+
+// Channels of a device in a list (0 = unknown, or not there).
+unsigned device_channels(const std::vector<desk::Device>& list, const std::string& id) {
+  const bool def = id.empty() || id == "default";
+  for (const auto& e : list)
+    if (def ? e.is_default : e.id == id) return e.channels;
+  return 0;
+}
+
+std::string range_text(unsigned first, unsigned count) {
+  char b[32];
+  if (count <= 1) std::snprintf(b, sizeof b, "%u", first);
+  else std::snprintf(b, sizeof b, "%u-%u", first, first + count - 1);
+  return b;
+}
+
 std::string app_name(const std::string& key, const Inventory* inv) {
   if (inv)
     for (const auto& a : inv->apps)
@@ -156,6 +186,10 @@ std::string source_label(const vc::DesktopAudioSource& s, const Inventory* inv) 
   switch (s.type) {
     case vc::DesktopAudioSource::kApp: return "App: " + app_name(s.app, inv);
     case vc::DesktopAudioSource::kAllApps: return "All apps except Virgil";
+    case vc::DesktopAudioSource::kInput:
+      // "Scarlett 18i20 inputs 1-8 → TX 1-8"
+      return input_name(s.device, s.name, inv) + (s.inputs == 1 ? " input " : " inputs ") +
+             range_text(s.first_input, s.inputs) + " → TX " + range_text(s.channel, s.inputs);
     default:
       return (s.device == "default" || s.device.empty() ? "" : "Output: ") + device_name(s.device, s.name, inv);
   }
@@ -298,15 +332,52 @@ bool popup_channels(NSPopUpButton* p, unsigned* first, bool* mono) {
   return true;
 }
 
-// Output device popup: Default, then every device; a configured one that is
-// not there stays, marked. Item id = device id.
-void fill_devices(NSPopUpButton* p, const Inventory* inv, const std::string& cur, const std::string& cur_name) {
+// Single channels, for interface inputs / outputs (a run of channels from
+// there). Item id: "<first>:0", as fill_channels.
+void fill_first_channel(NSPopUpButton* p, unsigned count, const std::vector<std::string>& names, unsigned first) {
   [p removeAllItems];
-  popup_add(p, "Default output device (follows the system)", "default");
+  const bool known = count > 0;
+  if (!known) count = 128;
+  bool have = false;
+  for (unsigned f = 1; f <= count; ++f) {
+    std::string t = std::to_string(f);
+    if (f <= names.size() && !names[f - 1].empty()) t += "   (" + names[f - 1] + ")";
+    popup_add(p, t, std::to_string(f) + ":0");
+    have = have || f == first;
+  }
+  if (!have && first >= 1) popup_add(p, std::to_string(first) + (known ? "  (not available)" : ""), std::to_string(first) + ":0");
+  if (!popup_select(p, std::to_string(first) + ":0") && p.numberOfItems > 0) [p selectItemAtIndex:0];
+}
+
+// 1..n, id = the number.
+void fill_numbers(NSPopUpButton* p, unsigned n, unsigned cur) {
+  [p removeAllItems];
+  for (unsigned i = 1; i <= std::max(n, cur); ++i) popup_add(p, std::to_string(i), std::to_string(i));
+  popup_select(p, std::to_string(cur));
+}
+unsigned popup_number(NSPopUpButton* p, unsigned fallback) {
+  std::string key;
+  if (!popup_value(p, &key)) return fallback;
+  const unsigned v = unsigned(std::strtoul(key.c_str(), nullptr, 10));
+  return v ? v : fallback;
+}
+
+// Output (or, inputs = true, recording) device popup: Default, then every
+// device; a configured one that is not there stays, marked. Item id =
+// device id. counts: the device's channel count after its name.
+void fill_devices(NSPopUpButton* p, const Inventory* inv, const std::string& cur, const std::string& cur_name,
+                  bool inputs = false, bool counts = false) {
+  [p removeAllItems];
+  popup_add(p, inputs ? "Default input device (follows the system)" : "Default output device (follows the system)",
+            "default");
   bool found = cur.empty() || cur == "default";
   if (inv)
-    for (const auto& e : inv->devices) {
-      popup_add(p, e.name, e.id);
+    for (const auto& e : inputs ? inv->inputs : inv->devices) {
+      std::string t = e.name;
+      if (counts && e.channels)
+        t += "  (" + std::to_string(e.channels) + (inputs ? (e.channels == 1 ? " input)" : " inputs)")
+                                                           : (e.channels == 1 ? " output)" : " outputs)"));
+      popup_add(p, t, e.id);
       if (e.id == cur) found = true;
     }
   if (!found) popup_add(p, (cur_name.empty() ? cur : cur_name) + (inv ? "  (not connected)" : ""), cur);
@@ -321,8 +392,11 @@ bool on(NSButton* b) { return b.state == NSControlStateValueOn; }
 // ---- the source dialog ------------------------------------------------------------------------
 
 struct SourceUi {
-  NSButton *dev = nil, *app = nil, *all = nil, *refresh = nil, *mute = nil;
-  NSPopUpButton *devp = nil, *ch = nil;
+  NSButton *dev = nil, *app = nil, *all = nil, *in = nil, *refresh = nil, *mute = nil;
+  NSPopUpButton *devp = nil, *ch = nil, *inp = nil, *infirst = nil, *incount = nil, *inch = nil;
+  NSTextField* inof = nil;
+  DABlockTarget* inp_target = nil;
+  ChannelInfo chinfo;
   NSComboBox* appc = nil;
   NSTextField *apphint = nil, *gain = nil, *err = nil;
   DABlockTarget *radio_target = nil, *refresh_target = nil;
@@ -339,6 +413,18 @@ void source_enable(SourceUi& s) {
   s.refresh.enabled = app && s.caps.app_capture;
   s.app.enabled = s.caps.app_capture || app;
   s.all.enabled = s.caps.all_apps || all;
+  const bool in = on(s.in);
+  s.inp.enabled = s.infirst.enabled = s.incount.enabled = in;
+  s.inch.enabled = in;
+  s.ch.enabled = !in;
+}
+
+// "of 8 inputs" for the chosen recording device.
+void source_input_count(SourceUi& s) {
+  std::string id;
+  if (!popup_value(s.inp, &id)) id = "default";
+  const unsigned n = s.inv ? device_channels(s.inv->inputs, id) : 0;
+  s.inof.stringValue = n ? ns("of " + std::to_string(n) + (n == 1 ? " input" : " inputs")) : @"";
 }
 
 void source_fill_apps(SourceUi& s) {
@@ -375,13 +461,15 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
   s->radio_target.handler = ^(id sender) {
     auto u = weak.lock();
     if (!u) return;
-    for (NSButton* b in @[ u->dev, u->app, u->all ]) b.state = b == sender ? NSControlStateValueOn : NSControlStateValueOff;
+    for (NSButton* b in @[ u->dev, u->app, u->all, u->in ])
+      b.state = b == sender ? NSControlStateValueOn : NSControlStateValueOff;
     source_enable(*u);
   };
   const CGFloat W = 470;
   s->dev = radio("Everything an output device plays", s->radio_target);
   s->devp = popup();
-  fill_devices(s->devp, s->inv.get(), s->src.device, s->src.name);
+  const bool was_device = s->src.type == vc::DesktopAudioSource::kDevice;
+  fill_devices(s->devp, s->inv.get(), was_device ? s->src.device : "default", was_device ? s->src.name : "");
   s->app = radio("One app (with its helper processes)", s->radio_target);
   s->appc = [[NSComboBox alloc] initWithFrame:NSMakeRect(0, 0, 330, 26)];
   s->appc.completes = YES;
@@ -392,6 +480,29 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
   s->refresh = [NSButton buttonWithTitle:@"Refresh" target:s->refresh_target action:@selector(fire:)];
   s->apphint = dim(wrapping("", W - 24));
   s->all = radio("All apps except Virgil (no echo of what Virgil itself plays)", s->radio_target);
+  s->in = radio("Audio interface inputs (one transmit channel each, low latency)", s->radio_target);
+  const bool was_input = s->src.type == vc::DesktopAudioSource::kInput;
+  s->inp = popup();
+  fill_devices(s->inp, s->inv.get(), was_input ? s->src.device : "default", was_input ? s->src.name : "", true, true);
+  s->inp_target = [[DABlockTarget alloc] init];
+  s->inp_target.handler = ^(id sender) {
+    auto u = weak.lock();
+    if (!u) return;
+    for (NSButton* b in @[ u->dev, u->app, u->all, u->in ])
+      b.state = b == u->in ? NSControlStateValueOn : NSControlStateValueOff;
+    source_input_count(*u);
+    source_enable(*u);
+  };
+  s->inp.target = s->inp_target;
+  s->inp.action = @selector(fire:);
+  s->infirst = popup();
+  fill_numbers(s->infirst, vc::kMaxInterfaceInputs, s->src.first_input);
+  s->incount = popup();
+  fill_numbers(s->incount, vc::kMaxInterfaceInputs, was_input ? s->src.inputs : 2);
+  s->inof = dim(label(""));
+  s->chinfo = ch;
+  s->inch = popup();
+  fill_first_channel(s->inch, ch.tx, ch.tx_names, s->src.channel);
   s->ch = popup();
   fill_channels(s->ch, ch.tx, ch.tx_names, s->src.channel, s->src.mono);
   s->gain = [NSTextField textFieldWithString:ns(gain_field_text(s->src.gain_db))];
@@ -403,6 +514,7 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
 
   NSGridView* grid = [NSGridView gridViewWithViews:@[
     @[ label("Virgil transmit channels:"), s->ch ],
+    @[ label("Interface inputs to transmit channel:"), s->inch ],
     @[ label("Gain (dB):"), hstack(@[ s->gain, s->mute ], 12) ],
   ]];
   grid.rowSpacing = 8;
@@ -413,10 +525,16 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
   approw.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
   NSStackView* hintrow = hstack(@[ s->apphint ], 0);
   hintrow.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
-  NSStackView* v = vstack(@[ s->dev, devrow, s->app, approw, hintrow, s->all, grid, s->err ], 6);
+  NSStackView* inrow = hstack(@[ s->inp ], 0);
+  inrow.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
+  NSStackView* inrow2 =
+      hstack(@[ label("First input:"), s->infirst, label("How many:"), s->incount, s->inof ], 8);
+  inrow2.edgeInsets = NSEdgeInsetsMake(0, 20, 0, 0);
+  NSStackView* v = vstack(@[ s->dev, devrow, s->app, approw, hintrow, s->all, s->in, inrow, inrow2, grid, s->err ], 6);
   [v setCustomSpacing:12 afterView:devrow];
   [v setCustomSpacing:12 afterView:hintrow];
-  [v setCustomSpacing:14 afterView:s->all];
+  [v setCustomSpacing:12 afterView:s->all];
+  [v setCustomSpacing:14 afterView:inrow2];
   v.translatesAutoresizingMaskIntoConstraints = NO;
   [v.widthAnchor constraintEqualToConstant:W].active = YES;
   const NSSize fit = v.fittingSize;
@@ -427,9 +545,11 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
 
   NSButton* r = s->src.type == vc::DesktopAudioSource::kApp      ? s->app
                 : s->src.type == vc::DesktopAudioSource::kAllApps ? s->all
+                : s->src.type == vc::DesktopAudioSource::kInput   ? s->in
                                                                   : s->dev;
   r.state = NSControlStateValueOn;
   source_fill_apps(*s);
+  source_input_count(*s);
   source_enable(*s);
 
   desk::Engine* eng = &engine;
@@ -439,10 +559,16 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
       auto u = weak.lock();
       if (!u || !u->open) return;
       std::string cur;
-      if (!popup_value(u->devp, &cur)) cur = u->src.device;
+      const bool was_device = u->src.type == vc::DesktopAudioSource::kDevice;
+      if (!popup_value(u->devp, &cur)) cur = was_device ? u->src.device : "default";
       u->inv = inv;
-      fill_devices(u->devp, inv.get(), cur, u->src.name);
+      fill_devices(u->devp, inv.get(), cur, was_device ? u->src.name : "");
+      std::string icur;
+      if (!popup_value(u->inp, &icur)) icur = "default";
+      fill_devices(u->inp, inv.get(), icur, u->src.type == vc::DesktopAudioSource::kInput ? u->src.name : "", true,
+                   true);
       source_fill_apps(*u);
+      source_input_count(*u);
     });
   };
   s->refresh_target.handler = ^(id sender) {
@@ -482,6 +608,28 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
       res.app = key;
     } else if (on(s->all)) {
       res.type = vc::DesktopAudioSource::kAllApps;
+    } else if (on(s->in)) {
+      res.type = vc::DesktopAudioSource::kInput;
+      std::string key;
+      res.device = popup_value(s->inp, &key) ? key : std::string("default");
+      res.name = res.device == "default" ? std::string() : input_name(res.device, res.name, s->inv.get());
+      res.first_input = popup_number(s->infirst, 1);
+      res.inputs = popup_number(s->incount, 2);
+      res.mono = false;
+      const unsigned have = s->inv ? device_channels(s->inv->inputs, res.device) : 0;
+      if (have && res.first_input + res.inputs - 1 > have) {
+        s->err.stringValue = ns("The device has " + std::to_string(have) + " inputs: choose others.");
+        continue;
+      }
+      bool mono = false;
+      if (!popup_channels(s->inch, &res.channel, &mono)) {
+        s->err.stringValue = @"Choose the first transmit channel.";
+        continue;
+      }
+      if (s->chinfo.tx && res.channel + res.inputs - 1 > s->chinfo.tx) {
+        s->err.stringValue = ns("Virgil has " + std::to_string(s->chinfo.tx) + " transmit channels: choose others.");
+        continue;
+      }
     } else {
       res.type = vc::DesktopAudioSource::kDevice;
       std::string key;
@@ -489,11 +637,11 @@ bool edit_source_dialog(desk::Engine& engine, vc::DesktopAudioSource* src, std::
       res.name = res.device == "default" ? std::string() : device_name(res.device, res.name, s->inv.get());
     }
     if (res.type != vc::DesktopAudioSource::kApp) res.app.clear();
-    if (res.type != vc::DesktopAudioSource::kDevice) {
+    if (res.type != vc::DesktopAudioSource::kDevice && res.type != vc::DesktopAudioSource::kInput) {
       res.device = "default";
       res.name.clear();
     }
-    if (!popup_channels(s->ch, &res.channel, &res.mono)) {
+    if (res.type != vc::DesktopAudioSource::kInput && !popup_channels(s->ch, &res.channel, &res.mono)) {
       s->err.stringValue = @"Choose the transmit channels.";
       continue;
     }
@@ -527,7 +675,9 @@ struct Main {
   NSButton *enable = nil, *add = nil, *edit = nil, *remove = nil, *out_enable = nil;
   NSTextField *status = nil, *out_gain = nil, *out_state = nil;
   NSStepper* out_step = nil;
-  NSPopUpButton *out_ch = nil, *out_dev = nil;
+  NSPopUpButton *out_ch = nil, *out_dev = nil, *out_type = nil, *out_first = nil, *out_count = nil;
+  NSTextField *out_chl = nil, *out_of = nil;
+  NSGridView* out_grid = nil;
   NSLevelIndicator* out_meter = nil;
   NSTableView* table = nil;
   NSTimer* timer = nil;
@@ -570,7 +720,8 @@ void fill_list(Main& m) {
     const vc::DesktopAudioSource& s = m.cfg.sources[i];
     Row& r = m.rows[i];
     r.label = cell_label(source_label(s, m.inv.get()));
-    r.channels = cell_label(channels_short(s.channel, s.mono));
+    r.channels = cell_label(s.type == vc::DesktopAudioSource::kInput ? range_text(s.channel, s.inputs)
+                                                                     : channels_short(s.channel, s.mono));
     r.gain = cell_label(s.mute ? "muted" : gain_text(s.gain_db));
     r.meter = level_indicator();
     r.meter_cell = meter_box(r.meter, 90);
@@ -587,12 +738,35 @@ void set_out_gain(Main& m, double db) {
   m.out_step.doubleValue = db;
 }
 
+bool out_iface(const vc::DesktopAudioOutput& o) { return o.type == vc::DesktopAudioOutput::kInterface; }
+
+// Receive channels: a pair or one (output device), or the first of a run (interface outputs).
+void fill_out_channels(Main& m) {
+  const vc::DesktopAudioOutput& o = m.cfg.output;
+  if (out_iface(o)) fill_first_channel(m.out_ch, m.ch.rx, m.ch.rx_names, o.channel);
+  else fill_channels(m.out_ch, m.ch.rx, m.ch.rx_names, o.channel, o.mono);
+}
+
+void out_count_text(Main& m) {
+  std::string id;
+  if (!popup_value(m.out_dev, &id)) id = "default";
+  const unsigned n = m.inv ? device_channels(m.inv->devices, id) : 0;
+  m.out_of.stringValue = n ? ns("of " + std::to_string(n) + (n == 1 ? " output" : " outputs")) : @"";
+}
+
 void fill_output(Main& m) {
   m.filling = true;
   const vc::DesktopAudioOutput& o = m.cfg.output;
+  const bool iface = out_iface(o);
   m.out_enable.state = o.enabled ? NSControlStateValueOn : NSControlStateValueOff;
-  fill_channels(m.out_ch, m.ch.rx, m.ch.rx_names, o.channel, o.mono);
-  fill_devices(m.out_dev, m.inv.get(), o.device, o.name);
+  popup_select(m.out_type, iface ? "interface" : "device");
+  fill_out_channels(m);
+  fill_devices(m.out_dev, m.inv.get(), o.device, o.name, false, iface);
+  fill_numbers(m.out_first, vc::kMaxInterfaceInputs, o.first_output);
+  fill_numbers(m.out_count, vc::kMaxInterfaceInputs, o.outputs);
+  m.out_chl.stringValue = iface ? @"From receive channel:" : @"Receive channels:";
+  [m.out_grid rowAtIndex:2].hidden = !iface;
+  out_count_text(m);
   set_out_gain(m, o.gain_db);
   m.filling = false;
 }
@@ -648,17 +822,29 @@ void read_output(Main& m) {
   if (m.filling) return;
   vc::DesktopAudioOutput o = m.cfg.output;
   o.enabled = on(m.out_enable);
-  popup_channels(m.out_ch, &o.channel, &o.mono);
+  std::string type;
+  o.type = popup_value(m.out_type, &type) && type == "interface" ? vc::DesktopAudioOutput::kInterface
+                                                                  : vc::DesktopAudioOutput::kDevice;
+  const bool retyped = o.type != m.cfg.output.type;
+  if (!retyped) {
+    bool mono = o.mono;
+    popup_channels(m.out_ch, &o.channel, &mono);
+    if (!out_iface(o)) o.mono = mono;
+  }
   std::string key;
   if (popup_value(m.out_dev, &key)) {
     o.device = key;
     o.name = o.device == "default" ? std::string() : device_name(o.device, o.name, m.inv.get());
   }
+  o.first_output = popup_number(m.out_first, o.first_output);
+  o.outputs = popup_number(m.out_count, o.outputs);
   double db = o.gain_db;
   if (parse_gain(m.out_gain.stringValue, &db)) o.gain_db = db;
   set_out_gain(m, o.gain_db);
+  out_count_text(m);
   if (o == m.cfg.output) return;
   m.cfg.output = o;
+  if (retyped) fill_output(m);  // the channel list and device names differ
   if (o.enabled && !m.cfg.enabled) {
     m.cfg.enabled = true;
     m.enable.state = NSControlStateValueOn;
@@ -700,7 +886,7 @@ void tick() {
     m.ch = c;
     if (changed) {
       m.filling = true;
-      fill_channels(m.out_ch, m.ch.rx, m.ch.rx_names, m.cfg.output.channel, m.cfg.output.mono);
+      fill_out_channels(m);
       m.filling = false;
     }
   }
@@ -923,7 +1109,20 @@ void show(desk::Engine& engine, ChannelSource channels) {
   NSBox* sources = group("This Mac’s audio to Virgil’s transmit channels", sv);
 
   // Output.
-  m.out_enable = [NSButton checkboxWithTitle:@"Play receive channels" target:t action:@selector(outChanged:)];
+  m.out_enable = [NSButton checkboxWithTitle:@"Play receive channels on" target:t action:@selector(outChanged:)];
+  m.out_type = popup();
+  popup_add(m.out_type, "An output device (a pair, or one on both sides)", "device");
+  popup_add(m.out_type, "Audio interface outputs (one receive channel each, low latency)", "interface");
+  m.out_type.target = t;
+  m.out_type.action = @selector(outChanged:);
+  m.out_first = popup();
+  m.out_first.target = t;
+  m.out_first.action = @selector(outChanged:);
+  m.out_count = popup();
+  m.out_count.target = t;
+  m.out_count.action = @selector(outChanged:);
+  m.out_of = dim(label(""));
+  m.out_chl = label("Receive channels:");
   m.out_ch = popup();
   m.out_ch.target = t;
   m.out_ch.action = @selector(outChanged:);
@@ -944,17 +1143,20 @@ void show(desk::Engine& engine, ChannelSource channels) {
   m.out_dev.action = @selector(outChanged:);
   m.out_meter = level_indicator();
   m.out_state = cell_label("");
-  NSGridView* og = [NSGridView gridViewWithViews:@[
-    @[ m.out_enable, m.out_ch, label("Gain (dB):"), hstack(@[ m.out_gain, m.out_step ], 4) ],
-    @[ label("on"), m.out_dev, [NSGridCell emptyContentView], [NSGridCell emptyContentView] ],
-    @[ meter_box(m.out_meter, 120), m.out_state, [NSGridCell emptyContentView], [NSGridCell emptyContentView] ],
+  NSView* empty = [NSGridCell emptyContentView];
+  NSGridView* og = m.out_grid = [NSGridView gridViewWithViews:@[
+    @[ m.out_enable, m.out_type, empty, empty ],
+    @[ empty, m.out_dev, empty, empty ],
+    @[ label("Outputs:"), hstack(@[ m.out_first, label("How many:"), m.out_count, m.out_of ], 8), empty, empty ],
+    @[ m.out_chl, m.out_ch, label("Gain (dB):"), hstack(@[ m.out_gain, m.out_step ], 4) ],
+    @[ meter_box(m.out_meter, 120), m.out_state, empty, empty ],
   ]];
   og.rowSpacing = 8;
   og.columnSpacing = 10;
-  [og mergeCellsInHorizontalRange:NSMakeRange(1, 3) verticalRange:NSMakeRange(1, 1)];
-  [og mergeCellsInHorizontalRange:NSMakeRange(1, 3) verticalRange:NSMakeRange(2, 1)];
-  [og cellAtColumnIndex:0 rowIndex:1].xPlacement = NSGridCellPlacementTrailing;
-  NSBox* output = group("Dante receive channels to an output device", og);
+  for (NSInteger row : {0, 1, 2, 4}) [og mergeCellsInHorizontalRange:NSMakeRange(1, 3) verticalRange:NSMakeRange(row, 1)];
+  [og cellAtColumnIndex:0 rowIndex:2].xPlacement = NSGridCellPlacementTrailing;
+  [og cellAtColumnIndex:0 rowIndex:3].xPlacement = NSGridCellPlacementTrailing;
+  NSBox* output = group("Dante receive channels to an output device or audio interface", og);
 
   NSTextField* note = dim(wrapping(
       "Captured audio still plays on the device it was sent to. To hear it only through Dante, turn that device "
