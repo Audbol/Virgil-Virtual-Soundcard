@@ -1346,6 +1346,20 @@ TEST(desktop_audio_settings_roundtrip_and_robust_parsing) {
     CHECK(u.sources.size() == 1 && u.sources[0].inputs == kMaxInterfaceInputs && u.sources[0].first_input == 1);
     CHECK(u.sources[0].device == "default" && u.sources[0].api.empty() && w.size() == 3);
   }
+  {
+    DesktopAudioSettings u = s;  // receive 9-16 -> the interface's outputs 3-10 (same ASIO driver)
+    u.output.type = DesktopAudioOutput::kInterface;
+    u.output.api = "asio";
+    u.output.device = c.device;
+    u.output.first_output = 3;
+    u.output.outputs = 8;
+    u.output.buffer = 128;
+    u.output.channel = 9;
+    DesktopAudioSettings back;
+    std::vector<std::string> w;
+    CHECK(parse_desktop_audio(format_desktop_audio(u), &back, &w));
+    CHECK(w.empty() && back.output == u.output && back.output.width() == 8);
+  }
   CHECK(t.enabled);
   CHECK(t.sources.size() == 3);
   CHECK(t.sources[0].type == DesktopAudioSource::kDevice && t.sources[0].device == a.device);

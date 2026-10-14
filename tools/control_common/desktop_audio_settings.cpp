@@ -187,7 +187,12 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
       }
     } else if (section == kSource || section == kOutput) {
       const bool src = section == kSource;
-      if (src && key == "type") {
+      if (!src && key == "type") {
+        const std::string t = lower(v);
+        if (t == "device" || t.empty()) out->output.type = DesktopAudioOutput::kDevice;
+        else if (t == "interface") out->output.type = DesktopAudioOutput::kInterface;
+        else bad();
+      } else if (src && key == "type") {
         const std::string t = lower(v);
         if (t == "device" || t == "system") cur.type = DesktopAudioSource::kDevice;
         else if (t == "app" || t == "process") cur.type = DesktopAudioSource::kApp;
@@ -216,10 +221,27 @@ bool parse_desktop_audio(const std::string& text, DesktopAudioSettings* out, std
       } else if (key == "gain_db") {
         if (parse_double(v, &d)) (src ? cur.gain_db : out->output.gain_db) = std::max(kMinGainDb, std::min(kMaxGainDb, d));
         else bad();
-      } else if (src && key == "api") {
+      } else if (key == "api") {
         const std::string a = lower(v);
-        if (a == "asio" || a == "wasapi" || a.empty()) cur.api = a;
+        if (a == "asio" || a == "wasapi" || a.empty()) (src ? cur.api : out->output.api) = a;
         else bad();
+      } else if (!src && (key == "first_output" || key == "outputs")) {
+        if (!parse_uint(v, &n)) {
+          bad();
+        } else if (key == "first_output") {
+          if (n < 1 || n > 256) warn(line_no, "first_output " + v + " out of range 1-256: clamped");
+          out->output.first_output = unsigned(std::max(1L, std::min(256L, n)));
+        } else {
+          if (n < 1 || n > long(kMaxInterfaceInputs))
+            warn(line_no, "outputs " + v + " out of range 1-" + std::to_string(kMaxInterfaceInputs) + ": clamped");
+          out->output.outputs = unsigned(std::max(1L, std::min(long(kMaxInterfaceInputs), n)));
+        }
+      } else if (!src && key == "buffer") {
+        if (!parse_uint(v, &n)) bad();
+        else {
+          if (n > 8192) warn(line_no, "buffer " + v + " out of range 0-8192: clamped");
+          out->output.buffer = unsigned(std::min(8192L, n));
+        }
       } else if (src && (key == "first_input" || key == "inputs" || key == "buffer")) {
         if (!parse_uint(v, &n)) {
           bad();
@@ -279,10 +301,20 @@ std::string format_desktop_audio(const DesktopAudioSettings& s) {
   const DesktopAudioOutput& out = s.output;
   o += "\n[output]\n";
   o += std::string("enabled = ") + (out.enabled ? "true" : "false") + "\n";
-  o += "device = " + clean(out.device.empty() ? "default" : out.device) + "\n";
+  const bool iface = out.type == DesktopAudioOutput::kInterface;
+  if (iface) {
+    o += "type = interface\n";
+    if (!out.api.empty()) o += "api = " + out.api + "\n";
+  }
+  o += "device = \"" + clean(out.device.empty() ? "default" : out.device) + "\"\n";
   if (!out.name.empty()) o += "name = \"" + clean(out.name) + "\"\n";
+  if (iface) {
+    o += "first_output = " + std::to_string(out.first_output) + "\n";
+    o += "outputs = " + std::to_string(out.outputs) + "\n";
+    o += "buffer = " + std::to_string(out.buffer) + "\n";
+  }
   o += "channel = " + std::to_string(out.channel) + "\n";
-  o += std::string("mono = ") + (out.mono ? "true" : "false") + "\n";
+  if (!iface) o += std::string("mono = ") + (out.mono ? "true" : "false") + "\n";
   o += "gain_db = " + fmt_double(out.gain_db) + "\n";
   return o;
 }

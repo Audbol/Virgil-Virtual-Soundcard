@@ -47,6 +47,17 @@
 //   mono = false
 //   gain_db = 0
 //
+//   [output]                 # or: Dante receive channels -> an audio interface's outputs
+//   enabled = true
+//   type = interface         #   device (default): a stereo/mono output as above
+//   api = asio               #   Windows: asio or wasapi (as for input sources)
+//   device = "Focusrite USB ASIO"  # the same ASIO driver as an input source shares it
+//   first_output = 1         #   first output of the interface (1-based)
+//   outputs = 8              #   receive channel.. -> first_output.. one each (1-64)
+//   buffer = 0               #   ASIO buffer in frames (0 = driver default; an input
+//                            #   source on the same driver uses the same buffer)
+//   channel = 1              #   first Virgil receive channel
+//
 // Portable (no Windows APIs) so the unit tests cover the parser.
 #pragma once
 
@@ -87,15 +98,25 @@ struct DesktopAudioSource {
 };
 
 struct DesktopAudioOutput {
+  enum Type { kDevice, kInterface };
   bool enabled = false;
+  Type type = kDevice;
   std::string device = "default";
   std::string name;
   unsigned channel = 1;  // first Virgil receive channel, 1-based
-  bool mono = false;     // one receive channel on both sides
+  bool mono = false;     // kDevice: one receive channel on both sides
   double gain_db = 0;
+  // kInterface: receive channel.. -> the interface's outputs first_output.., one each.
+  std::string api;            // Windows: "asio" (default) or "wasapi"; "" elsewhere
+  unsigned first_output = 1;  // 1-based
+  unsigned outputs = 2;       // 1..kMaxInterfaceInputs
+  unsigned buffer = 0;        // ASIO buffer in frames, 0 = the driver's preferred
 
+  unsigned width() const { return type == kInterface ? outputs : mono ? 1u : 2u; }
   bool same_route(const DesktopAudioOutput& o) const {
-    return enabled == o.enabled && device == o.device && channel == o.channel && mono == o.mono;
+    return enabled == o.enabled && type == o.type && device == o.device && channel == o.channel &&
+           mono == o.mono && api == o.api && first_output == o.first_output && outputs == o.outputs &&
+           buffer == o.buffer;
   }
   bool operator==(const DesktopAudioOutput& o) const {
     return same_route(o) && name == o.name && gain_db == o.gain_db;
