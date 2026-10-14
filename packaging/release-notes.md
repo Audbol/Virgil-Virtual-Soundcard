@@ -1,4 +1,4 @@
-**Virgil** (**V**irtual **I**nterface **R**outing **G**ateway for **I**nferno-based **L**ow-latency audio) is a free, open-source virtual soundcard for Dante® networks. It appears as a device that Dante-compatible routing software can route, and your audio apps see an ordinary soundcard (ASIO, Core Audio, ALSA). Network compatibility comes from [Inferno](https://github.com/teodly/inferno), an independent open-source project. See [CHANGELOG.md](https://github.com/Audbol/Virgil-Virtual-Soundcard/blob/main/CHANGELOG.md) for what changed.
+**Virgil** (**V**irtual **I**nterface **R**outing **G**ateway for **I**nferno-based **L**ow-latency audio) is a free, open-source virtual soundcard for Dante® networks. It appears as a device that Dante-compatible routing software can route, and your audio apps see an ordinary soundcard (ASIO, Core Audio, ALSA). Network compatibility comes from [Inferno](https://github.com/teodly/inferno), an independent open-source project. See [CHANGELOG.md](https://github.com/Audbol/Virgil-Virtual-Soundcard/blob/HEAD/CHANGELOG.md) for what changed.
 
 ## Downloads
 
