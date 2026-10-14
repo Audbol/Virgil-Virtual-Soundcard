@@ -100,32 +100,35 @@ BEGIN
     PUSHBUTTON      "Close", IDCANCEL, 322, 278, 52, 15
 END
 
-IDD_DESKTOP DIALOGEX 0, 0, 330, 294
+IDD_DESKTOP DIALOGEX 0, 0, 330, 312
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Desktop audio"
 FONT 9, "Segoe UI", 400, 0, 0x1
 BEGIN
     AUTOCHECKBOX    "Send Windows audio to Dante (desktop audio)", IDC_DA_ENABLE, 7, 7, 250, 10
     LTEXT           "", IDC_DA_STATUS, 7, 20, 316, 17, SS_NOPREFIX
-    GROUPBOX        "Windows audio to Virgil's transmit channels", -1, 7, 39, 316, 129
+    GROUPBOX        "Windows audio and audio interfaces to Virgil's transmit channels", -1, 7, 39, 316, 129
     CONTROL         "", IDC_DA_LIST, "SysListView32", LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS | LVS_NOSORTHEADER | WS_BORDER | WS_TABSTOP, 14, 52, 302, 92
     PUSHBUTTON      "Add...", IDC_DA_ADD, 14, 148, 56, 14
     PUSHBUTTON      "Edit...", IDC_DA_EDIT, 74, 148, 56, 14
     PUSHBUTTON      "Remove", IDC_DA_REMOVE, 134, 148, 56, 14
-    GROUPBOX        "Dante receive channels to a Windows output device", -1, 7, 172, 316, 62
-    AUTOCHECKBOX    "Play receive channels", IDC_DA_OUT_ENABLE, 14, 186, 92, 10
-    COMBOBOX        IDC_DA_OUT_CH, 108, 184, 112, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Gain (dB):", -1, 232, 186, 40, 9
+    GROUPBOX        "Dante receive channels to Windows", -1, 7, 172, 316, 80
+    AUTOCHECKBOX    "Play receive channels on", IDC_DA_OUT_ENABLE, 14, 186, 100, 10
+    COMBOBOX        IDC_DA_OUT_TYPE, 116, 184, 110, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Gain (dB):", -1, 236, 186, 38, 9
     EDITTEXT        IDC_DA_OUT_GAIN, 276, 184, 32, 13, ES_AUTOHSCROLL
-    COMBOBOX        IDC_DA_OUT_DEV, 14, 201, 294, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    CONTROL         "", IDC_DA_OUT_METER, "msctls_progress32", PBS_SMOOTH, 14, 220, 60, 7
-    LTEXT           "", IDC_DA_OUT_STATE, 80, 219, 236, 10, SS_NOPREFIX | SS_ENDELLIPSIS
-    LTEXT           "Captured audio still plays on the device it was sent to. To hear it only through Dante, play those apps on an output you do not listen to, or turn that device down (on most PCs its volume does not change what is captured; the app's own volume does).", IDC_DA_NOTE, 7, 239, 316, 27
-    PUSHBUTTON      "Help", IDC_DA_HELP, 7, 273, 52, 15
-    DEFPUSHBUTTON   "Close", IDCANCEL, 271, 273, 52, 15
+    COMBOBOX        IDC_DA_OUT_CH, 14, 202, 98, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    COMBOBOX        IDC_DA_OUT_DEV, 116, 202, 192, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_DA_OUT_SUMMARY, 14, 204, 230, 10, SS_NOPREFIX | SS_ENDELLIPSIS | NOT WS_VISIBLE
+    PUSHBUTTON      "Interface...", IDC_DA_OUT_SETUP, 248, 201, 60, 14, NOT WS_VISIBLE
+    CONTROL         "", IDC_DA_OUT_METER, "msctls_progress32", PBS_SMOOTH, 14, 222, 60, 7
+    LTEXT           "", IDC_DA_OUT_STATE, 80, 221, 236, 26, SS_NOPREFIX
+    LTEXT           "Captured audio still plays on the device it was sent to. To hear it only through Dante, play those apps on an output you do not listen to, or turn that device down (on most PCs its volume does not change what is captured; the app's own volume does).", IDC_DA_NOTE, 7, 257, 316, 27
+    PUSHBUTTON      "Help", IDC_DA_HELP, 7, 291, 52, 15
+    DEFPUSHBUTTON   "Close", IDCANCEL, 271, 291, 52, 15
 END
 
-IDD_DA_SOURCE DIALOGEX 0, 0, 300, 192
+IDD_DA_SOURCE DIALOGEX 0, 0, 300, 270
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Desktop audio source"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -137,12 +140,48 @@ BEGIN
     PUSHBUTTON      "Refresh", IDC_DS_REFRESH, 236, 53, 54, 14
     LTEXT           "", IDC_DS_APPHINT, 22, 71, 268, 18, SS_NOPREFIX
     RADIOBUTTON     "All apps except Virgil (no echo of what Virgil itself plays)", IDC_DS_ALL, 10, 93, 280, 10
-    LTEXT           "Virgil transmit channels:", -1, 10, 114, 90, 9
-    COMBOBOX        IDC_DS_CH, 102, 112, 188, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
-    LTEXT           "Gain (dB):", -1, 10, 132, 90, 9
-    EDITTEXT        IDC_DS_GAIN, 102, 130, 36, 13, ES_AUTOHSCROLL
-    AUTOCHECKBOX    "Mute", IDC_DS_MUTE, 148, 132, 60, 10
-    LTEXT           "", IDC_DS_ERR, 10, 150, 280, 18, SS_NOPREFIX
-    DEFPUSHBUTTON   "OK", IDOK, 182, 171, 52, 15
-    PUSHBUTTON      "Cancel", IDCANCEL, 238, 171, 52, 15
+    RADIOBUTTON     "Audio interface inputs (low latency, one transmit channel each)", IDC_DS_INPUT, 10, 108, 280, 10
+    COMBOBOX        IDC_IF_API, 22, 121, 54, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    COMBOBOX        IDC_IF_DEV, 80, 121, 210, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Inputs from", IDC_IF_FIRSTLABEL, 22, 141, 40, 9
+    EDITTEXT        IDC_IF_FIRST, 64, 139, 30, 13, ES_NUMBER
+    CONTROL         "", IDC_IF_FIRST_SPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
+    LTEXT           "count", -1, 100, 141, 22, 9
+    EDITTEXT        IDC_IF_COUNT, 124, 139, 30, 13, ES_NUMBER
+    CONTROL         "", IDC_IF_COUNT_SPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
+    LTEXT           "Buffer:", -1, 166, 141, 26, 9
+    COMBOBOX        IDC_IF_BUFFER, 194, 139, 96, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_IF_INFO, 22, 157, 268, 26, SS_NOPREFIX
+    LTEXT           "Virgil transmit channels:", IDC_DS_CHLABEL, 10, 190, 90, 9
+    COMBOBOX        IDC_DS_CH, 102, 188, 188, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Gain (dB):", -1, 10, 208, 90, 9
+    EDITTEXT        IDC_DS_GAIN, 102, 206, 36, 13, ES_AUTOHSCROLL
+    AUTOCHECKBOX    "Mute", IDC_DS_MUTE, 148, 208, 60, 10
+    LTEXT           "", IDC_DS_ERR, 10, 226, 280, 18, SS_NOPREFIX
+    DEFPUSHBUTTON   "OK", IDOK, 182, 249, 52, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 238, 249, 52, 15
+END
+
+IDD_DA_IFOUT DIALOGEX 0, 0, 300, 170
+STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
+CAPTION "Receive channels to an audio interface"
+FONT 9, "Segoe UI", 400, 0, 0x1
+BEGIN
+    LTEXT           "Dante receive channels straight to the outputs of an audio interface, one each, with low latency.", -1, 10, 8, 280, 18, SS_NOPREFIX
+    COMBOBOX        IDC_IF_API, 10, 29, 54, 100, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    COMBOBOX        IDC_IF_DEV, 68, 29, 222, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "Outputs from", IDC_IF_FIRSTLABEL, 10, 49, 44, 9
+    EDITTEXT        IDC_IF_FIRST, 56, 47, 30, 13, ES_NUMBER
+    CONTROL         "", IDC_IF_FIRST_SPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
+    LTEXT           "count", -1, 92, 49, 22, 9
+    EDITTEXT        IDC_IF_COUNT, 116, 47, 30, 13, ES_NUMBER
+    CONTROL         "", IDC_IF_COUNT_SPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
+    LTEXT           "Buffer:", -1, 158, 49, 26, 9
+    COMBOBOX        IDC_IF_BUFFER, 186, 47, 104, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_IF_INFO, 10, 65, 280, 26, SS_NOPREFIX
+    LTEXT           "From receive channels:", IDC_DS_CHLABEL, 10, 98, 90, 9
+    COMBOBOX        IDC_DS_CH, 102, 96, 188, 200, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP
+    LTEXT           "", IDC_DS_ERR, 10, 116, 280, 26, SS_NOPREFIX
+    DEFPUSHBUTTON   "OK", IDOK, 182, 149, 52, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 238, 149, 52, 15
 END

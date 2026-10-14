@@ -1,5 +1,7 @@
 #include "desktop_audio.h"
 
+#include "asio_convert.h"
+#include "asio_host.h"
 #include "wasapi.h"
 
 #include <shlobj.h>
@@ -71,6 +73,13 @@ float peak_take(std::atomic<uint32_t>& a) {
   return f;
 }
 
+bool is_asio_input(const vc::DesktopAudioSource& s) {
+  return s.type == vc::DesktopAudioSource::kInput && s.api != "wasapi";
+}
+bool is_asio_output(const vc::DesktopAudioOutput& o) {
+  return o.enabled && o.type == vc::DesktopAudioOutput::kInterface && o.api != "wasapi";
+}
+
 std::wstring rate_text(unsigned rate) {
   return rate % 1000 ? fmt(L"%.1f kHz", rate / 1000.0) : fmt(L"%u kHz", rate / 1000);
 }
@@ -110,7 +119,8 @@ class Session {
     while (B_ > 16 && B_ >= ring_ / 8) B_ /= 2;
     mix_.assign(size_t(B_) * std::max(1u, txch_), 0.f);
     tmp_.assign(size_t(B_) * 2, 0.f);
-    rxbuf_.assign(size_t(B_) * 2, 0.f);
+    rxbuf_.assign(size_t(B_) * std::max(2u, cfg.output.width()), 0.f);
+    set_output_map(cfg.output.width());
     set_gains(cfg);
     quit_ev_ = CreateEventW(nullptr, TRUE, FALSE, nullptr);
   }
@@ -121,8 +131,13 @@ class Session {
 
   void start() {
     io_ = std::thread([this] { io_loop(); });
-    for (unsigned i = 0; i < cfg_.sources.size(); ++i) workers_.emplace_back([this, i] { source_loop(i); });
-    if (cfg_.output.enabled) workers_.emplace_back([this] { output_loop(); });
+    bool asio = is_asio_output(cfg_.output);
+    for (unsigned i = 0; i < cfg_.sources.size(); ++i) {
+      if (is_asio_input(cfg_.sources[i])) asio = true;  // the ASIO thread serves it
+      else workers_.emplace_back([this, i] { source_loop(i); });
+    }
+    if (cfg_.output.enabled && !is_asio_output(cfg_.output)) workers_.emplace_back([this] { output_loop(); });
+    if (asio) workers_.emplace_back([this] { asio_loop(); });
   }
   void stop() {
     quit_.store(true, std::memory_order_release);
@@ -185,7 +200,10 @@ class Session {
     s.endpoint = e;
   }
 
-  int claim_lane(unsigned source, unsigned first, unsigned width, unsigned in_rate) {
+  // target_s: the FIFO level to keep (loopback packets come every 10 ms,
+  // sometimes in bursts; an ASIO buffer every few ms).
+  int claim_lane(unsigned source, unsigned first, unsigned width, double in_rate, double target_s = 0.050,
+                 double slack_s = 0.200, double extrapolate_s = 0.030) {
     for (unsigned k = 0; k < kMaxLanes; ++k) {
       Lane& ln = lanes_[k];
       bool expected = false;
@@ -194,8 +212,9 @@ class Session {
       bc.channels = width;
       bc.in_rate = in_rate;
       bc.out_rate = rate_;
-      bc.target_s = 0.050;  // loopback packets come every 10 ms, sometimes in bursts
-      bc.slack_s = 0.200;
+      bc.target_s = target_s;
+      bc.slack_s = slack_s;
+      bc.max_extrapolate_s = extrapolate_s;
       bc.max_pull = B_;
       std::lock_guard<std::mutex> l(ln.mu);
       if (!ln.bridge.init(bc)) {
@@ -210,6 +229,20 @@ class Session {
     }
     return -1;
   }
+  // Receive channels the output carries (under out_mu_): kDevice left / right
+  // (the same one if mono), kInterface channel.. one per output.
+  void set_output_map(unsigned width) {
+    const vc::DesktopAudioOutput& o = cfg_.output;
+    out_map_.assign(std::max(1u, width), ~0u);
+    const unsigned c0 = o.channel - 1;
+    if (o.type == vc::DesktopAudioOutput::kInterface) {
+      for (unsigned k = 0; k < width; ++k) out_map_[k] = c0 + k;
+    } else {
+      out_map_.assign(2, c0);
+      if (!o.mono) out_map_[1] = c0 + 1;
+    }
+  }
+
   void release_lane(int k) {
     if (k < 0) return;
     Lane& ln = lanes_[k];
@@ -313,15 +346,17 @@ class Session {
       if (l.owns_lock() && out_live_ && t > uint64_t(B) + rx_lat_) {
         // The block that just became readable (as the ASIO driver reads it).
         const uint64_t start = t - B - rx_lat_;
-        const unsigned c0 = cfg_.output.channel - 1, c1 = cfg_.output.mono ? c0 : c0 + 1;
+        const unsigned w = unsigned(out_map_.size());
         const float g = out_.gain.load(std::memory_order_relaxed);
         float pk = 0;
         for (uint32_t f = 0; f < B; ++f) {
           const float* fr = c_.rx_frame(start + f);
-          const float lv = c0 < rxch_ ? g * fr[c0] : 0.f, rv = c1 < rxch_ ? g * fr[c1] : 0.f;
-          rxbuf_[2 * f] = lv;
-          rxbuf_[2 * f + 1] = rv;
-          pk = std::max(pk, std::max(std::fabs(lv), std::fabs(rv)));
+          for (unsigned k = 0; k < w; ++k) {
+            const unsigned ch = out_map_[k];
+            const float v = ch < rxch_ ? g * fr[ch] : 0.f;
+            rxbuf_[size_t(f) * w + k] = v;
+            pk = std::max(pk, std::fabs(v));
+          }
         }
         peak_max(out_.peak, pk);
         if (pk > kSilence) out_.sound_ns.store(due, std::memory_order_relaxed);
@@ -378,6 +413,7 @@ class Session {
       return;
     }
     if (src.type == vc::DesktopAudioSource::kDevice) device_source(i, src);
+    else if (src.type == vc::DesktopAudioSource::kInput) input_source(i, src);
     else process_source(i, src);
   }
 
@@ -427,6 +463,84 @@ class Session {
           set_text(sh, b.frames_in() == 0 || b.state() != virgil::AdaptiveBridge::kRunning
                            ? L"Nothing playing (" + rate_text(s.cap->format().rate) + L")"
                            : lane_text(s),
+                   false);
+        }
+      }
+      release_lane(s.lane);
+      s.cap->close();
+      if (s.failed) {
+        set_text(sh, wa::hr_text(s.hr) + L": retrying", true);
+        wait_quit(500);
+      }
+    }
+  }
+
+  // Inputs past Virgil's last transmit channel (a note for the status).
+  std::wstring tx_overflow(const vc::DesktopAudioSource& src, unsigned n) const {
+    if (src.channel - 1 + n <= txch_) return std::wstring();
+    return fmt(L"; Virgil has %u transmit channels: inputs past it are dropped", txch_);
+  }
+
+  // An audio interface's inputs through WASAPI (shared mode, the recording
+  // device's own channels as they are). The fallback for ASIO.
+  void input_source(unsigned i, const vc::DesktopAudioSource& src) {
+    Shared& sh = src_[i];
+    const std::wstring id = widen(src.device);
+    const bool follows_default = id.empty() || id == L"default";
+    while (!quitting()) {
+      const unsigned changes0 = watch_.changes(), defaults0 = watch_.capture_default_changes();
+      std::vector<Stream> streams(1);
+      Stream& s = streams[0];
+      s.cap.reset(new wa::Capture());
+      std::wstring err;
+      HRESULT hr = s.cap->open_input(id, &err);
+      asioconv::Range r;
+      if (SUCCEEDED(hr)) {
+        r = asioconv::select_channels(src.first_input, src.inputs, s.cap->format().channels);
+        if (r.count == 0) {
+          hr = E_INVALIDARG;
+          err = fmt(L"the device has %u input%ls: choose others", s.cap->format().channels,
+                    s.cap->format().channels == 1 ? L"" : L"s");
+        }
+      }
+      if (SUCCEEDED(hr)) {
+        s.cap->select_channels(r.first0, r.count);
+        // Packets every device period (10 ms in shared mode).
+        s.lane = claim_lane(i, src.channel - 1, r.count, s.cap->format().rate, double(B_) / rate_ + 0.025, 0.100, 0.030);
+        if (s.lane < 0) {
+          hr = E_OUTOFMEMORY;
+          err = L"too many capture streams";
+        } else if (FAILED(hr = s.cap->start())) {
+          err = L"cannot start recording: " + wa::hr_text(hr);
+        }
+      }
+      if (FAILED(hr)) {
+        release_lane(s.lane);
+        s.cap->close();
+        set_text(sh, err, true);
+        for (int k = 0; k < 30 && !quitting() && watch_.changes() == changes0; ++k) wait_quit(100);
+        continue;
+      }
+      std::wstring extra = tx_overflow(src, r.count);
+      if (r.clamped) extra += fmt(L"; the device has %u inputs", s.cap->format().channels);
+      int64_t next_text = 0;
+      unsigned defaults = defaults0;
+      while (!quitting()) {
+        pump(streams, r.count);
+        if (s.failed) break;
+        if (follows_default && watch_.capture_default_changes() != defaults) {
+          defaults = watch_.capture_default_changes();
+          if (wa::default_capture_id() != s.cap->endpoint()) break;  // follow Windows' new default
+        }
+        const int64_t now = virgil::mono_ns();
+        if (now >= next_text) {
+          next_text = now + 250000000;
+          const virgil::AdaptiveBridge& b = lanes_[s.lane].bridge;
+          const std::wstring rate = rate_text(s.cap->format().rate);
+          set_text(sh, b.state() != virgil::AdaptiveBridge::kRunning
+                           ? L"Starting (" + rate + L", WASAPI)" + extra
+                           : fmt(L"Capturing %u input%ls (%ls, WASAPI, clock %+.0f ppm)", r.count, r.count == 1 ? L"" : L"s",
+                                 rate.c_str(), b.adjust_ppm()) + extra,
                    false);
         }
       }
@@ -560,22 +674,38 @@ class Session {
     }
     const std::wstring id = widen(o.device);
     const bool follows_default = id.empty() || id == L"default";
+    // kInterface (WASAPI): receive channel.. onto the device's channels
+    // first_output.. as they are, with a shorter buffer.
+    const bool iface = o.type == vc::DesktopAudioOutput::kInterface;
+    const unsigned width = iface ? o.outputs : 2;
     std::vector<float> buf;
     while (!quitting()) {
       const unsigned changes0 = watch_.changes();
       unsigned defaults = watch_.default_changes();
       wa::Render r;
       std::wstring err;
-      HRESULT hr = r.open(id, 300000, &err);  // 30 ms
+      HRESULT hr = r.open(id, iface ? 200000 : 300000, &err);  // 20 / 30 ms
+      std::wstring extra;
+      if (SUCCEEDED(hr) && iface) {
+        const asioconv::Range rg = asioconv::select_channels(o.first_output, o.outputs, r.format().channels);
+        if (rg.count == 0) {
+          hr = E_INVALIDARG;
+          err = fmt(L"the device has %u output%ls: choose others", r.format().channels,
+                    r.format().channels == 1 ? L"" : L"s");
+        } else if (rg.clamped) {
+          extra = fmt(L"; the device has %u outputs", r.format().channels);
+        }
+      }
       if (SUCCEEDED(hr)) {
         virgil::BridgeConfig bc;
-        bc.channels = 2;
+        bc.channels = width;
         bc.in_rate = rate_;
         bc.out_rate = r.format().rate;
-        bc.target_s = 0.040;
-        bc.slack_s = 0.200;
+        bc.target_s = iface ? 0.030 : 0.040;
+        bc.slack_s = iface ? 0.100 : 0.200;
         bc.max_pull = r.buffer_frames() + 64;
         std::lock_guard<std::mutex> l(out_mu_);
+        set_output_map(width);
         out_live_ = out_bridge_.init(bc);
         if (!out_live_) {
           hr = E_OUTOFMEMORY;
@@ -583,7 +713,10 @@ class Session {
         }
       }
       if (SUCCEEDED(hr)) {
-        buf.assign(size_t(r.buffer_frames() + 64) * 2, 0.f);
+        buf.assign(size_t(r.buffer_frames() + 64) * width, 0.f);
+        // The echo check: loopback of this device (a kDevice source) would
+        // capture what plays here, interface outputs too; an interface's
+        // inputs are other channels and never echo.
         set_endpoint(out_, r.endpoint());
         hr = r.write(nullptr, 2, r.buffer_frames());  // start from a full buffer of silence
         if (SUCCEEDED(hr)) hr = r.start();
@@ -611,21 +744,30 @@ class Session {
         UINT32 n = 0;
         if (FAILED(hr = r.writable(&n))) break;
         if (n) {
-          n = std::min<UINT32>(n, UINT32(buf.size() / 2));
+          n = std::min<UINT32>(n, UINT32(buf.size() / width));
           // Filling the device buffer up each time: what it has played since
           // is what the bridge hands over now, so the wake-up time is the
           // consumption time.
           out_bridge_.pull(buf.data(), n, virgil::mono_ns());
-          if (FAILED(hr = r.write(buf.data(), 2, n))) break;
+          if (FAILED(hr = iface ? r.write_channels(buf.data(), width, o.first_output - 1, n) : r.write(buf.data(), 2, n)))
+            break;
         }
         const int64_t now = virgil::mono_ns();
         if (now >= next_text) {
           next_text = now + 250000000;
-          set_text(out_,
-                   out_bridge_.state() == virgil::AdaptiveBridge::kRunning
-                       ? fmt(L"Playing (%ls, clock %+.0f ppm)", rate_text(r.format().rate).c_str(), out_bridge_.adjust_ppm())
-                       : L"Starting\u2026",
-                   false);
+          const bool running = out_bridge_.state() == virgil::AdaptiveBridge::kRunning;
+          const std::wstring rate = rate_text(r.format().rate);
+          if (iface)
+            set_text(out_,
+                     (running ? fmt(L"Playing to %u output%ls (%ls, WASAPI, clock %+.0f ppm)", width, width == 1 ? L"" : L"s",
+                                    rate.c_str(), out_bridge_.adjust_ppm())
+                              : L"Starting (" + rate + L", WASAPI)") + extra,
+                     false);
+          else
+            set_text(out_,
+                     running ? fmt(L"Playing (%ls, clock %+.0f ppm)", rate.c_str(), out_bridge_.adjust_ppm())
+                             : L"Starting\u2026",
+                     false);
         }
       }
       {
@@ -640,6 +782,197 @@ class Session {
     }
   }
 
+  // ---- ASIO: one driver for an input source and / or the interface output --------------
+  // The host's thread calls prepare() before the driver starts and the
+  // driver's audio thread process() for every buffer (see asio_host.h).
+  struct AsioLink final : ah::Callback {
+    explicit AsioLink(Session* s) : s_(s) {}
+    bool prepare(double rate, unsigned frames, unsigned inputs, unsigned outputs) override {
+      return s_->asio_prepare(rate, frames, inputs, outputs);
+    }
+    void process(const float* in, float* out, size_t frames, int64_t end_ns) override {
+      s_->asio_process(in, out, frames, end_ns);
+    }
+    Session* s_;
+  };
+
+  bool asio_prepare(double rate, unsigned frames, unsigned inputs, unsigned outputs) {
+    // A few ms: one I/O block (the consumer's pull), two driver buffers
+    // (the producer's step plus scheduling) and 2 ms.
+    const double period = frames / rate;
+    const double target = double(B_) / rate_ + 2 * period + 0.002;
+    const double slack = std::max(0.030, target), extrapolate = std::max(0.030, 2 * period);
+    if (inputs && asio_src_ >= 0) {
+      asio_lane_ = claim_lane(unsigned(asio_src_), cfg_.sources[size_t(asio_src_)].channel - 1, inputs, rate, target,
+                              slack, extrapolate);
+      if (asio_lane_ < 0) return false;
+    }
+    if (outputs) {
+      virgil::BridgeConfig bc;
+      bc.channels = outputs;
+      bc.in_rate = rate_;
+      bc.out_rate = rate;
+      bc.target_s = target;
+      bc.slack_s = slack;
+      bc.max_pull = frames + 64;
+      std::lock_guard<std::mutex> l(out_mu_);
+      set_output_map(outputs);
+      out_live_ = out_bridge_.init(bc);
+      if (!out_live_) return false;
+      asio_out_.store(true, std::memory_order_release);
+    }
+    return true;
+  }
+
+  // The driver's audio thread: no locks, no allocation.
+  void asio_process(const float* in, float* out, size_t frames, int64_t end_ns) {
+    if (in && asio_lane_ >= 0) lanes_[asio_lane_].bridge.push(in, frames, end_ns);
+    if (out) {
+      if (asio_out_.load(std::memory_order_acquire)) out_bridge_.pull(out, frames, end_ns);
+      else std::fill(out, out + frames * out_map_.size(), 0.f);
+    }
+  }
+
+  void asio_cleanup() {
+    release_lane(asio_lane_);
+    asio_lane_ = -1;
+    asio_out_.store(false, std::memory_order_release);
+    std::lock_guard<std::mutex> l(out_mu_);
+    out_live_ = false;
+  }
+
+  void asio_loop() {
+    const vc::DesktopAudioOutput& o = cfg_.output;
+    // The first ASIO input source and the interface output share the driver.
+    int in = -1;
+    for (size_t i = 0; i < cfg_.sources.size(); ++i) {
+      const vc::DesktopAudioSource& s = cfg_.sources[i];
+      if (!is_asio_input(s)) continue;
+      if (in < 0) {
+        in = int(i);
+      } else if (s.device == cfg_.sources[size_t(in)].device) {
+        set_text(src_[i], L"Only one ASIO input source per driver: give the first one more inputs", true);
+      } else {
+        set_text(src_[i], L"only one ASIO driver at a time: \u201C" + widen(cfg_.sources[size_t(in)].device) +
+                              L"\u201D is in use by another source",
+                 true);
+      }
+    }
+    bool out = is_asio_output(o);
+    if (out && in >= 0 && o.device != cfg_.sources[size_t(in)].device) {
+      set_text(out_, L"only one ASIO driver at a time: \u201C" + widen(cfg_.sources[size_t(in)].device) +
+                         L"\u201D is in use by an input source",
+               true);
+      out = false;
+    }
+    if (in >= 0 && (cfg_.sources[size_t(in)].channel < 1 || cfg_.sources[size_t(in)].channel > txch_)) {
+      set_text(src_[size_t(in)], fmt(L"Virgil has %u transmit channels: choose others", txch_), true);
+      in = -1;
+    }
+    if (out && (o.channel < 1 || o.channel > rxch_)) {
+      set_text(out_, rxch_ ? fmt(L"Virgil has %u receive channels: choose others", rxch_)
+                           : std::wstring(L"Virgil has no receive channels (Settings)"),
+               true);
+      out = false;
+    }
+    if (in < 0 && !out) return;
+    const vc::DesktopAudioSource* src = in >= 0 ? &cfg_.sources[size_t(in)] : nullptr;
+    auto say = [&](const std::wstring& in_text, const std::wstring& out_text, bool error) {
+      if (src) set_text(src_[size_t(in)], in_text, error);
+      if (out) set_text(out_, out_text, error);
+    };
+    if (!ah::built_in()) {
+      say(ah::kNotBuiltIn, ah::kNotBuiltIn, true);
+      while (!wait_quit(1000)) {}
+      return;
+    }
+    ah::Config c;
+    c.driver = widen(src ? src->device : o.device);
+    c.rate = rate_;
+    if (src) {
+      c.first_input = src->first_input;
+      c.inputs = src->inputs;
+    }
+    if (out) {
+      c.first_output = o.first_output;
+      c.outputs = o.outputs;
+    }
+    const unsigned bin = src ? src->buffer : 0, bout = out ? o.buffer : 0;
+    c.buffer = bin ? bin : bout;
+    const std::wstring buf_note =
+        bin && bout && bin != bout ? fmt(L"; buffer %u of the input source used, not %u", bin, bout) : std::wstring();
+    AsioLink link(this);
+    asio_src_ = in;
+    while (!quitting()) {
+      ah::Host host;
+      std::wstring err;
+      asio_lane_ = -1;
+      asio_out_.store(false);
+      if (!host.open(c, &link, &err)) {
+        asio_cleanup();
+        say(err, err, true);
+        for (int k = 0; k < 30 && !quitting(); ++k) wait_quit(100);  // again in 3 s
+        continue;
+      }
+      const unsigned rate = unsigned(std::lround(host.rate()));
+      const std::wstring fmt_text =
+          rate_text(rate) + (rate != rate_ ? L", resampled" : L"") + fmt(L", ASIO buffer %u", host.buffer());
+      std::wstring in_extra = host.note().empty() ? std::wstring() : L"; " + host.note(), out_extra = in_extra;
+      in_extra += buf_note;
+      if (src) {
+        in_extra += tx_overflow(*src, host.inputs());
+        if (host.inputs_clamped()) in_extra += fmt(L"; the interface has %u inputs", host.device_inputs());
+      }
+      if (out && host.outputs_clamped()) out_extra += fmt(L"; the interface has %u outputs", host.device_outputs());
+      std::wstring why;
+      uint64_t seen = host.buffers();
+      int64_t progress = virgil::mono_ns(), next_text = 0;
+      while (!quitting()) {
+        wait_quit(100);
+        if (quitting()) break;
+        const int64_t now = virgil::mono_ns();
+        if (host.reset_requested()) {
+          why = L"The ASIO driver asked for a reset: restarting";
+          break;
+        }
+        if (host.buffers() != seen) {
+          seen = host.buffers();
+          progress = now;
+        } else if (now - progress > 2000000000LL) {
+          why = L"The ASIO driver stopped delivering audio (interface unplugged?): restarting";
+          break;
+        }
+        if (now < next_text) continue;
+        next_text = now + 250000000;
+        std::wstring it, ot;
+        if (src && asio_lane_ >= 0) {
+          const virgil::AdaptiveBridge& b = lanes_[asio_lane_].bridge;
+          const unsigned n = host.inputs();
+          it = b.state() == virgil::AdaptiveBridge::kRunning
+                   ? fmt(L"Capturing %u input%ls (%ls, clock %+.0f ppm)", n, n == 1 ? L"" : L"s", fmt_text.c_str(),
+                         b.adjust_ppm())
+                   : L"Starting (" + fmt_text + L")";
+          it += in_extra;
+        }
+        if (out) {
+          const unsigned n = host.outputs();
+          ot = out_bridge_.state() == virgil::AdaptiveBridge::kRunning
+                   ? fmt(L"Playing to %u output%ls (%ls, clock %+.0f ppm)", n, n == 1 ? L"" : L"s", fmt_text.c_str(),
+                         out_bridge_.adjust_ppm())
+                   : L"Starting (" + fmt_text + L")";
+          ot += out_extra;
+        }
+        say(it, ot, false);
+      }
+      host.close();  // no more callbacks after this
+      asio_cleanup();
+      if (!why.empty()) {
+        say(why, why, true);
+        wait_quit(why.find(L"reset") != std::wstring::npos ? 200 : 1000);
+      }
+    }
+  }
+
   virgil::Client& c_;
   const vc::DesktopAudioSettings cfg_;
   wa::DeviceWatcher& watch_;
@@ -649,6 +982,10 @@ class Session {
   Shared out_;
   std::mutex out_mu_;  // the I/O thread try-locks it per block
   bool out_live_ = false;
+  std::vector<unsigned> out_map_;  // guarded by out_mu_ (and fixed while an ASIO host runs)
+  // ASIO: set before the driver starts, read by its audio thread.
+  int asio_src_ = -1, asio_lane_ = -1;
+  std::atomic<bool> asio_out_{false};
   virgil::AdaptiveBridge out_bridge_;
   std::atomic<bool> quit_{false}, lost_{false};
   HANDLE quit_ev_ = nullptr;

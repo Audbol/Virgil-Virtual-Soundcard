@@ -143,15 +143,23 @@ elseif(WIN32)
                  tools/control_common/settings_model.cpp tools/control_common/diagnostics_model.cpp
                  tools/control_common/config_model.cpp tools/control_win/control.rc
                  tools/control_win/desktop_audio.cpp tools/control_win/desktop_audio_ui.cpp
-                 tools/control_win/wasapi.cpp tools/control_common/desktop_audio_settings.cpp)
+                 tools/control_win/wasapi.cpp tools/control_win/asio_host.cpp
+                 tools/control_common/desktop_audio_settings.cpp)
   target_include_directories(virgil-control PRIVATE tools/control_win tools/control_common branding)
+  # Audio interface sources / outputs through the interface's own ASIO driver
+  # (tools/control_win/asio_host.cpp) need the Steinberg ASIO SDK's headers;
+  # without them only WASAPI is offered for interfaces.
+  if(ASIO_SDK_DIR AND EXISTS "${ASIO_SDK_DIR}/common/asio.h")
+    target_include_directories(virgil-control PRIVATE "${ASIO_SDK_DIR}/common" "${ASIO_SDK_DIR}/host/pc")
+    target_compile_definitions(virgil-control PRIVATE VIRGIL_HAVE_ASIO_SDK)
+  endif()
   if(MINGW)
     target_link_options(virgil-control PRIVATE -municode)
   elseif(MSVC)
     target_link_options(virgil-control PRIVATE /MANIFEST:NO)  # control.rc embeds ours
   endif()
   target_link_libraries(virgil-control PRIVATE d2d1 dwrite windowscodecs dwmapi comctl32 ole32
-                        ws2_32 shell32 user32 gdi32 advapi32)
+                        ws2_32 shell32 user32 gdi32 advapi32 winmm)
   # Desktop audio (tools/control_win/desktop_audio.cpp) attaches to the
   # soundcard like a driver.
   target_link_libraries(virgil-control PRIVATE virgil_client)

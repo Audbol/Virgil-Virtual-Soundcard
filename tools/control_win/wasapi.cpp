@@ -11,6 +11,7 @@
 #include <cwchar>
 #include <map>
 
+#include "asio_convert.h"
 #include "virgil/platform.h"
 
 namespace wa {
@@ -159,18 +160,19 @@ std::wstring default_render_id() {
   return endpoint_id(d.get());
 }
 
-std::vector<Endpoint> render_endpoints(HRESULT* out_hr) {
+namespace {
+std::vector<Endpoint> list_endpoints(EDataFlow flow, HRESULT* out_hr) {
   std::vector<Endpoint> r;
   Com<IMMDeviceEnumerator> en;
   Com<IMMDeviceCollection> col;
   HRESULT hr = create_enumerator(en.put());
-  if (SUCCEEDED(hr)) hr = en->EnumAudioEndpoints(eRender, DEVICE_STATE_ACTIVE, col.put());
+  if (SUCCEEDED(hr)) hr = en->EnumAudioEndpoints(flow, DEVICE_STATE_ACTIVE, col.put());
   UINT n = 0;
   if (SUCCEEDED(hr)) hr = col->GetCount(&n);
   std::wstring def;
   if (SUCCEEDED(hr)) {
     Com<IMMDevice> d;
-    if (SUCCEEDED(en->GetDefaultAudioEndpoint(eRender, eConsole, d.put()))) def = endpoint_id(d.get());
+    if (SUCCEEDED(en->GetDefaultAudioEndpoint(flow, eConsole, d.put()))) def = endpoint_id(d.get());
   }
   for (UINT i = 0; SUCCEEDED(hr) && i < n; ++i) {
     Com<IMMDevice> d;
@@ -186,11 +188,11 @@ std::vector<Endpoint> render_endpoints(HRESULT* out_hr) {
   return r;
 }
 
-HRESULT open_render_endpoint(const std::wstring& id, IMMDevice** out) {
+HRESULT open_endpoint(EDataFlow flow, const std::wstring& id, IMMDevice** out) {
   Com<IMMDeviceEnumerator> en;
   HRESULT hr = create_enumerator(en.put());
   if (FAILED(hr)) return hr;
-  if (id.empty() || id == L"default") return en->GetDefaultAudioEndpoint(eRender, eConsole, out);
+  if (id.empty() || id == L"default") return en->GetDefaultAudioEndpoint(flow, eConsole, out);
   Com<IMMDevice> d;
   hr = en->GetDevice(id.c_str(), d.put());
   if (FAILED(hr)) return hr;
@@ -200,6 +202,38 @@ HRESULT open_render_endpoint(const std::wstring& id, IMMDevice** out) {
   *out = d.get();
   (*out)->AddRef();
   return S_OK;
+}
+}  // namespace
+
+std::vector<Endpoint> render_endpoints(HRESULT* hr) { return list_endpoints(eRender, hr); }
+std::vector<Endpoint> capture_endpoints(HRESULT* hr) { return list_endpoints(eCapture, hr); }
+HRESULT open_render_endpoint(const std::wstring& id, IMMDevice** out) { return open_endpoint(eRender, id, out); }
+HRESULT open_capture_endpoint(const std::wstring& id, IMMDevice** out) { return open_endpoint(eCapture, id, out); }
+
+std::wstring default_capture_id() {
+  Com<IMMDeviceEnumerator> en;
+  Com<IMMDevice> d;
+  if (FAILED(create_enumerator(en.put())) || FAILED(en->GetDefaultAudioEndpoint(eCapture, eConsole, d.put())))
+    return std::wstring();
+  return endpoint_id(d.get());
+}
+
+unsigned endpoint_channels(bool capture, const std::wstring& id, unsigned* rate, std::wstring* error) {
+  Com<IMMDevice> dev;
+  Com<IAudioClient> client;
+  WAVEFORMATEX* mix = nullptr;
+  HRESULT hr = open_endpoint(capture ? eCapture : eRender, id, dev.put());
+  if (SUCCEEDED(hr)) hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, client.put_void());
+  if (SUCCEEDED(hr)) hr = client->GetMixFormat(&mix);
+  unsigned ch = 0;
+  if (SUCCEEDED(hr) && mix) {
+    ch = mix->nChannels;
+    if (rate) *rate = mix->nSamplesPerSec;
+  } else if (error) {
+    *error = hr_text(hr);
+  }
+  if (mix) CoTaskMemFree(mix);
+  return ch;
 }
 
 std::wstring exe_name_of(DWORD pid) {
@@ -329,6 +363,10 @@ bool describe_format(const WAVEFORMATEX* wf, Format* f) {
   if (is_pcm && f->bits != 16 && f->bits != 24 && f->bits != 32) return false;
   if (!is_float && !is_pcm) return false;
   if (f->block != f->channels * (f->bits / 8)) return false;
+  f->sample_type = is_float ? (f->bits == 32 ? asioconv::kFloat32LSB : asioconv::kFloat64LSB)
+                   : f->bits == 16 ? asioconv::kInt16LSB
+                   : f->bits == 24 ? asioconv::kInt24LSB
+                                   : asioconv::kInt32LSB;  // 32, or 24 valid bits left-justified
 
   // Speaker position of each channel: the mask's bits in increasing order.
   const unsigned n = f->channels;
@@ -642,6 +680,40 @@ HRESULT Capture::open_device(const std::wstring& endpoint, std::wstring* error) 
   return finish_open(error);
 }
 
+HRESULT Capture::open_input(const std::wstring& endpoint, std::wstring* error) {
+  close();
+  Com<IMMDevice> dev;
+  HRESULT hr = open_capture_endpoint(endpoint, dev.put());
+  if (FAILED(hr)) {
+    if (error)
+      *error = (endpoint.empty() || endpoint == L"default" ? L"no default recording device: " : L"recording device not available: ") +
+               hr_text(hr);
+    return hr;
+  }
+  endpoint_ = endpoint_id(dev.get());
+  WAVEFORMATEX* mix = nullptr;
+  hr = dev->Activate(__uuidof(IAudioClient), CLSCTX_ALL, nullptr, client_.put_void());
+  if (SUCCEEDED(hr)) hr = client_->GetMixFormat(&mix);
+  if (SUCCEEDED(hr) && !describe_format(mix, &fmt_)) hr = AUDCLNT_E_UNSUPPORTED_FORMAT;
+  // Event driven, the shortest buffer shared mode allows (one device period).
+  if (SUCCEEDED(hr))
+    hr = client_->Initialize(AUDCLNT_SHAREMODE_SHARED, AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_NOPERSIST, 0,
+                             0, mix, nullptr);
+  if (mix) CoTaskMemFree(mix);
+  if (SUCCEEDED(hr)) {
+    event_ = CreateEventW(nullptr, FALSE, FALSE, nullptr);
+    hr = event_ ? client_->SetEventHandle(event_) : E_OUTOFMEMORY;
+  }
+  if (FAILED(hr)) {
+    if (error) *error = L"cannot record from the device: " + hr_text(hr);
+    const std::wstring keep = endpoint_;
+    close();
+    endpoint_ = keep;
+    return hr;
+  }
+  return finish_open(error);
+}
+
 HRESULT Capture::open_process(DWORD pid, bool include_tree, unsigned prefer_rate, std::wstring* error) {
   close();
   if (!process_loopback_supported()) {
@@ -721,7 +793,17 @@ bool Capture::next_packet(unsigned out_ch, Packet* p, HRESULT* out_hr) {
   const size_t need = size_t(n) * out_ch;
   if (scratch_.size() < need) scratch_.resize(need);
   if ((flags & AUDCLNT_BUFFERFLAGS_SILENT) || !data) std::fill(scratch_.begin(), scratch_.begin() + long(need), 0.f);
-  else read_frames(data, fmt_, n, scratch_.data(), out_ch);
+  else if (sel_count_) {
+    // The chosen channels as they are (out_ch == sel_count_).
+    const unsigned bps = fmt_.bits / 8;
+    for (unsigned k = 0; k < out_ch; ++k) {
+      const unsigned c = sel_first_ + k;
+      if (k < sel_count_ && c < fmt_.channels)
+        asioconv::to_float(fmt_.sample_type, data + size_t(c) * bps, fmt_.block, n, scratch_.data() + k, out_ch);
+      else
+        for (UINT32 i = 0; i < n; ++i) scratch_[size_t(i) * out_ch + k] = 0.f;
+    }
+  } else read_frames(data, fmt_, n, scratch_.data(), out_ch);
   hr = cap_->ReleaseBuffer(n);
   const int64_t now = virgil::mono_ns();
   // u64QPCPosition: the first frame's performance-counter time in 100 ns
@@ -803,6 +885,21 @@ HRESULT Render::write(const float* src, unsigned src_ch, UINT32 n) {
   return render_->ReleaseBuffer(n, src ? 0 : DWORD(AUDCLNT_BUFFERFLAGS_SILENT));
 }
 
+HRESULT Render::write_channels(const float* src, unsigned src_ch, unsigned first0, UINT32 n) {
+  if (!render_) return E_POINTER;
+  if (n == 0) return S_OK;
+  BYTE* data = nullptr;
+  HRESULT hr = render_->GetBuffer(n, &data);
+  if (FAILED(hr)) return hr;
+  if (src) {
+    std::memset(data, 0, size_t(n) * fmt_.block);
+    const unsigned bps = fmt_.bits / 8;
+    for (unsigned k = 0; k < src_ch && first0 + k < fmt_.channels; ++k)
+      asioconv::from_float(fmt_.sample_type, src + k, src_ch, n, data + size_t(first0 + k) * bps, fmt_.block);
+  }
+  return render_->ReleaseBuffer(n, src ? 0 : DWORD(AUDCLNT_BUFFERFLAGS_SILENT));
+}
+
 // ---- device changes ------------------------------------------------------------------
 
 class DeviceWatcher::Client final : public IMMNotificationClient {
@@ -828,7 +925,9 @@ class DeviceWatcher::Client final : public IMMNotificationClient {
   HRESULT STDMETHODCALLTYPE OnDeviceAdded(LPCWSTR) override { return bump(false); }
   HRESULT STDMETHODCALLTYPE OnDeviceRemoved(LPCWSTR) override { return bump(false); }
   HRESULT STDMETHODCALLTYPE OnDefaultDeviceChanged(EDataFlow flow, ERole, LPCWSTR) override {
-    return bump(flow == eRender);
+    if (DeviceWatcher* w = w_.load(std::memory_order_acquire))
+      if (flow == eCapture || flow == eAll) w->capture_default_changes_.fetch_add(1, std::memory_order_acq_rel);
+    return bump(flow == eRender || flow == eAll);
   }
   HRESULT STDMETHODCALLTYPE OnPropertyValueChanged(LPCWSTR, const PROPERTYKEY) override { return S_OK; }
   void detach() { w_.store(nullptr, std::memory_order_release); }

@@ -62,16 +62,34 @@
 #define IDC_DA_OUT_STATE 1112
 #define IDC_DA_NOTE 1113
 #define IDC_DA_HELP 1114
-// Source dialog. IDC_DS_DEV, IDC_DS_APP and IDC_DS_ALL must stay consecutive
-// (CheckRadioButton).
+#define IDC_DA_OUT_TYPE 1115
+#define IDC_DA_OUT_SETUP 1116
+#define IDC_DA_OUT_SUMMARY 1117
+// Source dialog. IDC_DS_DEV, IDC_DS_APP, IDC_DS_ALL and IDC_DS_INPUT must
+// stay consecutive (CheckRadioButton).
 #define IDC_DS_DEV 1201
 #define IDC_DS_APP 1202
 #define IDC_DS_ALL 1203
-#define IDC_DS_DEVICE 1204
-#define IDC_DS_APPNAME 1205
-#define IDC_DS_REFRESH 1206
-#define IDC_DS_APPHINT 1207
-#define IDC_DS_CH 1208
-#define IDC_DS_GAIN 1209
-#define IDC_DS_MUTE 1210
-#define IDC_DS_ERR 1211
+#define IDC_DS_INPUT 1204
+#define IDC_DS_DEVICE 1205
+#define IDC_DS_APPNAME 1206
+#define IDC_DS_REFRESH 1207
+#define IDC_DS_APPHINT 1208
+#define IDC_DS_CH 1209
+#define IDC_DS_GAIN 1210
+#define IDC_DS_MUTE 1211
+#define IDC_DS_ERR 1212
+#define IDC_DS_CHLABEL 1213
+// Audio interface controls: the same ids in the source dialog (inputs) and
+// the interface output dialog (IDD_DA_IFOUT, which also uses IDC_DS_CH and
+// IDC_DS_ERR).
+#define IDD_DA_IFOUT 112
+#define IDC_IF_API 1230
+#define IDC_IF_DEV 1231
+#define IDC_IF_FIRST 1232
+#define IDC_IF_FIRST_SPIN 1233
+#define IDC_IF_COUNT 1234
+#define IDC_IF_COUNT_SPIN 1235
+#define IDC_IF_INFO 1236
+#define IDC_IF_BUFFER 1237
+#define IDC_IF_FIRSTLABEL 1238

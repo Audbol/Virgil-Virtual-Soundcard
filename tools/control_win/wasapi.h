@@ -84,6 +84,14 @@ std::wstring default_render_id();
 // "" or "default": the default output device (console role).
 HRESULT open_render_endpoint(const std::wstring& id, IMMDevice** out);
 std::wstring endpoint_id(IMMDevice* d);
+// Recording devices (audio interface inputs), the default one flagged.
+std::vector<Endpoint> capture_endpoints(HRESULT* hr = nullptr);
+std::wstring default_capture_id();
+// "" or "default": the default recording device (console role).
+HRESULT open_capture_endpoint(const std::wstring& id, IMMDevice** out);
+// The shared-mode format's channel count and rate of an endpoint (0 if it
+// cannot be opened).
+unsigned endpoint_channels(bool capture, const std::wstring& id, unsigned* rate = nullptr, std::wstring* error = nullptr);
 std::wstring endpoint_name(IMMDevice* d);
 
 // Programs with an audio session on an active output device (one entry per
@@ -117,6 +125,7 @@ struct Format {
   float to_l[32] = {}, to_r[32] = {};
   // From stereo: per device channel, 0 = silence, 1 = left, 2 = right, 3 = (l + r) / 2.
   uint8_t from[32] = {};
+  long sample_type = 0;  // the same layout as an ASIO sample type (asio_convert.h)
 };
 // False if the format is not PCM 16/24/32 bit or float 32/64 bit, or has
 // more than 32 channels.
@@ -147,9 +156,18 @@ class Capture {
   ~Capture() { close(); }
   HRESULT open_device(const std::wstring& endpoint, std::wstring* error);
   // prefer_rate: the format to ask for (Windows converts), e.g. Virgil's rate.
+  // Shared-mode capture of a recording device (not loopback), all of its
+  // channels; "" or "default" = the default recording device.
+  HRESULT open_input(const std::wstring& endpoint, std::wstring* error);
   HRESULT open_process(DWORD pid, bool include_tree, unsigned prefer_rate, std::wstring* error);
   HRESULT start();
   void close();
+  // Packets carry `count` of the device's channels from first0 (0-based) as
+  // they are, instead of folded to mono / stereo: drain(count, ...).
+  void select_channels(unsigned first0, unsigned count) {
+    sel_first_ = first0;
+    sel_count_ = count;
+  }
   bool is_open() const { return static_cast<bool>(cap_); }
   HANDLE event() const { return event_; }  // null: poll
   const Format& format() const { return fmt_; }
@@ -177,6 +195,7 @@ class Capture {
   Format fmt_;
   std::wstring endpoint_;
   std::vector<float> scratch_;
+  unsigned sel_first_ = 0, sel_count_ = 0;
 };
 
 template <class Sink>
@@ -201,6 +220,9 @@ class Render {
   const std::wstring& endpoint() const { return endpoint_; }
   HRESULT writable(UINT32* n);
   HRESULT write(const float* src, unsigned src_ch, UINT32 n);  // nullptr = silence
+  // src_ch interleaved channels onto the device's channels first0.. as they
+  // are (an audio interface's outputs); its other channels get silence.
+  HRESULT write_channels(const float* src, unsigned src_ch, unsigned first0, UINT32 n);
 
  private:
   Com<IAudioClient> client_;
@@ -213,7 +235,7 @@ class Render {
 
 // ---- device changes ------------------------------------------------------------------
 
-// Counts output device changes (IMMNotificationClient); the audio threads
+// Counts device changes (IMMNotificationClient); the audio threads
 // compare the counters to notice them. Callbacks only touch atomics.
 class DeviceWatcher {
  public:
@@ -222,12 +244,13 @@ class DeviceWatcher {
   void stop();
   unsigned changes() const { return changes_.load(std::memory_order_acquire); }
   unsigned default_changes() const { return default_changes_.load(std::memory_order_acquire); }
+  unsigned capture_default_changes() const { return capture_default_changes_.load(std::memory_order_acquire); }
 
  private:
   class Client;
   Com<IMMDeviceEnumerator> enumerator_;
   Client* client_ = nullptr;
-  std::atomic<unsigned> changes_{0}, default_changes_{0};
+  std::atomic<unsigned> changes_{0}, default_changes_{0}, capture_default_changes_{0};
 };
 
 }  // namespace wa

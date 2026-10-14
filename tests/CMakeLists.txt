@@ -1,4 +1,4 @@
-add_executable(virgil_unit_tests unit_tests.cpp ${CMAKE_SOURCE_DIR}/src/daemon/diagnostics.cpp
+add_executable(virgil_unit_tests unit_tests.cpp asio_convert_test.cpp ${CMAKE_SOURCE_DIR}/src/daemon/diagnostics.cpp
                ${CMAKE_SOURCE_DIR}/src/daemon/remote_auth.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/api.cpp
                ${CMAKE_SOURCE_DIR}/tools/control_common/settings_model.cpp
