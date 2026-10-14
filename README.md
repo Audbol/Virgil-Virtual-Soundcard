@@ -23,7 +23,21 @@ route it like any other device, and your audio apps see an ordinary soundcard:
   any other device, with receive and transmit latency down to a few
   milliseconds.
 - **Virgil Control**, a native app on every platform (tray / menu bar icon,
-  meters, clock state, settings), plus a browser panel for headless machines.
+  meters, clock state, settings, dropout diagnostics, channel names, the
+  configuration file), plus a web panel that other computers can open too
+  (*Allow remote access*, password protected; off by default).
+- **Desktop audio**: send what your apps play (one app, everything, or all
+  but Virgil) into Dante, and listen to Dante channels on your speakers or
+  headphones, without extra drivers or virtual cables.
+- **Audio interface inputs and outputs**: route an audio interface's inputs
+  straight into Dante and Dante channels to its outputs, up to 64 each way,
+  through the interface's own ASIO driver on Windows, Core Audio on macOS, or
+  PulseAudio / PipeWire on Linux.
+- **Latency you can tune safely**: Virgil measures its own timing and
+  suggests the lowest transmit latency your computer handles; an optional
+  0.5 ms mixing tick lowers it by another millisecond.
+- Follows network changes (a new address, another Wi-Fi network, an adapter
+  plugged in) by itself, and keeps a dropout log you can save as a report.
 - Follows the Dante clock leader (PTPv1), or leads the clock itself when
   there is no Dante hardware.
 - Several apps can play at once; they are mixed.
