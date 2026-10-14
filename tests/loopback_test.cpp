@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "virgil/client.h"
+#include "virgil/config.h"
 #include "virgil/engine.h"
 #include "virgil/log.h"
 #include "virgil/media_clock.h"
@@ -21,17 +22,19 @@ using namespace virgil;
 
 static void wait_ms(int ms) { sleep_until_ns(mono_ns() + int64_t(ms) * 1000000); }
 
-// `C` channels each way (the shared memory layout has room for kMaxChannels).
-static void loopback(uint32_t C) {
+// `C` channels each way (the shared memory layout has room for kMaxChannels),
+// mixing every `tick_us`.
+static void loopback(uint32_t C, uint32_t tick_us = 1000) {
   g_log_level = kLogWarn;
   Config c;
   c.device_name = "Loop Test";
   c.interface = "127.0.0.1";
 #if defined(_WIN32)
-  c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C);
+  c.shm_name = std::string(kFallbackShmName) + "-test-" + std::to_string(process_id()) + "-" + std::to_string(C) +
+               "-" + std::to_string(tick_us);
 #else
   // macOS caps shared memory names at 31 characters: keep it short.
-  c.shm_name = "/vgl-" + std::to_string(process_id()) + "-" + std::to_string(C);
+  c.shm_name = "/vgl-" + std::to_string(process_id()) + "-" + std::to_string(C) + "-" + std::to_string(tick_us);
 #endif
   c.clock = "free";
   c.lock_memory = false;
@@ -42,6 +45,9 @@ static void loopback(uint32_t C) {
   c.latency_us = 20000;
   c.tx_latency_us = 4000;
   c.ring_frames = 16384;
+  c.tick_us = tick_us;
+  std::string err;
+  CHECK(validate_config(&c, &err));
 
   Engine e(c);
   e.set_dante_enabled(false);
@@ -137,8 +143,8 @@ static void loopback(uint32_t C) {
                     double(got[f * C + ch]), double(want));
       max_err = std::max(max_err, err);
     }
-  std::printf("  loopback max error %.3g over %u frames (round trip %llu frames), %s\n", max_err,
-              n, (unsigned long long)D, e.status_line().c_str());
+  std::printf("  loopback max error %.3g over %u frames (tick %u us, round trip %llu frames), %s\n", max_err,
+              n, tick_us, (unsigned long long)D, e.status_line().c_str());
   if (a.header()->clock_steps.load() != steps_before)
     std::printf("  note: the clock stepped during the round trip\n");
   CHECK(max_err < 1e-6);
@@ -165,5 +171,8 @@ static void loopback(uint32_t C) {
 
 TEST(soundcard_loopback_through_dante_rings) { loopback(4); }
 TEST(soundcard_loopback_128_channels) { loopback(kMaxChannels); }
+// The 0.5 ms tick Virgil Control offers: 24-frame periods at 48 kHz.
+TEST(soundcard_loopback_half_ms_tick) { loopback(8, 500); }
+TEST(soundcard_loopback_half_ms_tick_128_channels) { loopback(kMaxChannels, 500); }
 
 TEST_MAIN()

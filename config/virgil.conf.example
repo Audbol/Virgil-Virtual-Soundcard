@@ -23,10 +23,13 @@ rx_channels = 8
 # audio is buffered. 1000-2000 us on a clean gigabit LAN, more otherwise.
 latency_us = 4000
 # Transmit latency: how far ahead of the media clock playback is handed to
-# the network; at least two engine ticks + 1.5 ms (3.5 ms at tick_us = 1000).
+# the network; at least two engine ticks + 1.5 ms (3.5 ms at tick_us = 1000,
+# 2.5 ms at tick_us = 500). Dropouts and diagnostics suggests a value for
+# this computer after 30 minutes of sending.
 tx_latency_us = 4000
 # Engine tick: how often the daemon moves audio between apps and the
-# network (125-4000 us). Smaller = lower latency, more CPU.
+# network (125-4000 us; Virgil Control offers 1000 and 500). Smaller = lower
+# latency, more CPU.
 tick_us = 1000
 # Playback safety margin for drivers (0 = two ticks).
 tx_lead_us = 0

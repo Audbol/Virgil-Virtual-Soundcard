@@ -45,6 +45,27 @@ struct DiagEvent {
   std::string text;       // what happened, one sentence
 };
 
+// virgild's transmit latency suggestion ("tx_latency_suggestion"): from how
+// late its Dante sending thread woke up while audio went out, once it has
+// watched for 30 minutes.
+struct TxSuggestion {
+  bool present = false;  // the daemon sent one (older daemons do not)
+  bool ready = false;    // enough sending observed ("ready"; else "collecting")
+  std::string direction;  // "lower" | "raise" | "keep"
+  double observed_s = 0, needed_s = 0;
+  double current_ms = 0, suggested_ms = 0, min_ms = 0;
+  unsigned tick_us = 0;  // tick it was measured at
+  unsigned long long late_sends = 0;
+  double worst_lag_ms = 0;
+  std::string confidence;  // "low" | "medium" | "high" ("" while collecting)
+  std::string text;        // one sentence ("Transmit latency can be lowered to 3 ms ...")
+  // Ready and different from the setting in use: worth an "Apply suggestion".
+  bool actionable() const { return present && ready && direction != "keep" && suggested_ms > 0; }
+  // The suggested value as the latency fields show it ("3.5").
+  std::string suggested_text() const;
+};
+bool parse_tx_suggestion(const std::string& diagnostics_json, TxSuggestion* out);
+
 struct Diagnostics {
   int64_t now_ms = 0, since_ms = 0;
   unsigned long long dropouts_last_hour = 0, dropouts_total = 0;
@@ -61,6 +82,7 @@ struct Diagnostics {
   std::vector<std::string> hints;  // what to do about it, one paragraph each
   std::vector<DiagEvent> events;   // newest first (up to 300; show kDiagShownEvents)
   double rx_latency_ms = 0, tx_latency_ms = 0;
+  TxSuggestion tx_suggestion;
 };
 
 // Parses a /api/diagnostics body. Local time for the texts.

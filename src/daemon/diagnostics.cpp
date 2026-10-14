@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cinttypes>
+#include <cmath>
 #include <cstdarg>
 #include <cstdio>
 #include <ctime>
@@ -48,7 +49,89 @@ std::string clock_time(int64_t ms) {
 
 const char* plural(uint64_t n, const char* one, const char* many) { return n == 1 ? one : many; }
 
+// Up to the next 0.5 ms (a hair of slack for floating-point noise).
+double ceil_half_ms(double ms) { return std::ceil(ms * 2 - 1e-6) / 2; }
+
+std::string duration_text(double s) {
+  if (s < 3600) return fmt("%d min", int(s / 60));
+  return fmt("%.1f h", s / 3600);
+}
+
 }  // namespace
+
+const char* tx_suggestion_state_name(TxLatencySuggestion::State s) {
+  return s == TxLatencySuggestion::State::Ready ? "ready" : "collecting";
+}
+
+const char* tx_suggestion_direction_name(TxLatencySuggestion::Direction d) {
+  switch (d) {
+    case TxLatencySuggestion::Direction::Lower: return "lower";
+    case TxLatencySuggestion::Direction::Raise: return "raise";
+    default: return "keep";
+  }
+}
+
+TxLatencySuggestion suggest_tx_latency(const TxLatencyObservation& o) {
+  using S = TxLatencySuggestion;
+  S r;
+  Config c;
+  c.tick_us = o.tick_us;
+  const double send_delay_ms = c.tx_send_delay_us() / 1000.0;
+  r.observed_s = o.observed_s;
+  r.needed_s = kTxSuggestNeededS;
+  r.current_ms = o.current_ms;
+  r.min_ms = c.min_tx_latency_us() / 1000.0;
+  r.late_sends = o.late_sends;
+  r.worst_lag_ms = o.worst_lag_ms;
+  if (o.observed_s < kTxSuggestNeededS) {
+    r.text = fmt("Transmit latency suggestion: measuring, %d of %d min (counts while a Dante device receives "
+                 "Virgil's channels)",
+                 int(o.observed_s / 60), int(kTxSuggestNeededS / 60));
+    return r;
+  }
+  r.state = S::State::Ready;
+  const double hours = o.observed_s / 3600;
+  r.confidence = hours < 2 ? "low" : hours < 8 ? "medium" : "high";
+  const std::string over = fmt("over %s of sending, %s confidence", duration_text(o.observed_s).c_str(), r.confidence);
+
+  double need = send_delay_ms + o.worst_lag_ms + kTxSuggestMarginMs;
+  if (o.late_sends) {
+    // Audio was dropped: never keep (or lower) the setting that dropped it.
+    need = std::max(need, send_delay_ms + o.worst_late_ms + kTxSuggestMarginMs);
+    need = std::max(need, o.current_ms + 0.5);
+  }
+  double want = std::max(ceil_half_ms(need), ceil_half_ms(r.min_ms));
+  want = std::min(want, kTxSuggestMaxMs);
+
+  if (want > o.current_ms + 1e-6) {
+    r.direction = S::Direction::Raise;
+    r.suggested_ms = want;
+    const std::string why =
+        o.late_sends ? fmt("%" PRIu64 " late %s dropped audio", o.late_sends, plural(o.late_sends, "send", "sends"))
+                     : fmt("the sending thread woke up to %.1f ms late, leaving less than %.0f ms of margin",
+                           o.worst_lag_ms, kTxSuggestMarginMs);
+    r.text = fmt("Transmit latency should be raised to %g ms (now %g ms): %s (%s).", want, o.current_ms, why.c_str(),
+                 over.c_str());
+  } else if (o.current_ms - want >= 0.5 - 1e-6) {
+    // Only steps of at least 0.5 ms down, so the suggestion does not churn.
+    r.direction = S::Direction::Lower;
+    r.suggested_ms = want;
+    r.text = fmt("Transmit latency can be lowered to %g ms (now %g ms): the sending thread woke up at most %.1f ms "
+                 "late (%s).",
+                 want, o.current_ms, o.worst_lag_ms, over.c_str());
+  } else {
+    r.suggested_ms = o.current_ms;
+    if (o.late_sends)  // at the 40 ms maximum already
+      r.text = fmt("The sending thread woke up later than any transmit latency covers (%" PRIu64
+                   " late %s): the computer is too busy.",
+                   o.late_sends, plural(o.late_sends, "send", "sends"));
+    else
+      r.text = fmt("The transmit latency of %g ms is right for this computer: the sending thread woke up at most "
+                   "%.1f ms late (%s).",
+                   o.current_ms, o.worst_lag_ms, over.c_str());
+  }
+  return r;
+}
 
 const char* Diagnostics::kind_name(Kind k) {
   switch (k) {
@@ -171,7 +254,22 @@ void Diagnostics::reset(int64_t now) {
   worst_stall_ms_ = 0;
   worst_wakeup_lag_ms_ = 0;
   for (auto& n : send_lag_over_) n = 0;
+  reset_tx_observation_locked(tx_tick_us_);
   since_ms_ = now;
+}
+
+void Diagnostics::reset_tx_observation_locked(uint32_t tick_us) {
+  const double current = tx_obs_.current_ms;
+  tx_obs_ = TxLatencyObservation();
+  tx_obs_.tick_us = tick_us;
+  tx_obs_.current_ms = current;
+}
+
+TxLatencySuggestion Diagnostics::tx_suggestion_locked() const { return suggest_tx_latency(tx_obs_); }
+
+TxLatencySuggestion Diagnostics::tx_latency_suggestion() const {
+  std::lock_guard<std::mutex> l(m_);
+  return tx_suggestion_locked();
 }
 
 void Diagnostics::engine_started(const Config& cfg, int64_t now) {
@@ -186,10 +284,16 @@ void Diagnostics::engine_started(const Config& cfg, int64_t now) {
   period_ms_ = double(cfg.period_frames()) * 1000.0 / cfg.sample_rate;
   rx_latency_ms_ = cfg.latency_us / 1000.0;
   tx_latency_ms_ = cfg.tx_latency_us / 1000.0;
+  // The send delay depends on the tick: what was observed at another tick
+  // does not carry over. A new transmit latency keeps it.
+  tx_tick_us_ = cfg.tick_us;
+  if (tx_obs_.tick_us != cfg.tick_us) reset_tx_observation_locked(cfg.tick_us);
+  tx_obs_.current_ms = tx_latency_ms_;
   add_locked(Kind::Service, std::string(), 0, 0, now,
              fmt("Audio engine started: %.1f kHz, %u out / %u in, receive latency %.1f ms, transmit latency "
-                 "%.1f ms",
-                 cfg.sample_rate / 1000.0, cfg.tx_channels, cfg.rx_channels, rx_latency_ms_, tx_latency_ms_));
+                 "%.1f ms%s",
+                 cfg.sample_rate / 1000.0, cfg.tx_channels, cfg.rx_channels, rx_latency_ms_, tx_latency_ms_,
+                 cfg.tick_us != 1000 ? fmt(", mixing tick %g ms", cfg.tick_us / 1000.0).c_str() : ""));
 }
 
 void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now) {
@@ -266,10 +370,23 @@ void Diagnostics::sample(const EngineCounters& c, const Config& cfg, int64_t now
       add_locked(Kind::NetSendLate, std::string(), sl, lag, now, std::string());
     }
     // Sending thread near misses: a statistic for the report, not dropouts.
-    worst_wakeup_lag_ms_ = std::max(worst_wakeup_lag_ms_, c.tx_max_wakeup_lag_samples * 1000.0 / rate);
+    const double wake_lag = c.tx_max_wakeup_lag_samples * 1000.0 / rate;
+    worst_wakeup_lag_ms_ = std::max(worst_wakeup_lag_ms_, wake_lag);
     for (int i = 0; i < 4; ++i) send_lag_over_[i] += delta(c.tx_lag_over[i], prev_.tx_lag_over[i]);
     const uint64_t rs = delta(c.resyncs, prev_.resyncs);
     if (rs) add_locked(Kind::ClockJump, std::string(), rs, 0, now, std::string());
+    // Transmit latency suggestion: seconds in which packets went out. A
+    // second with a clock step or clock state change is left out (the "lag"
+    // of a clock step is not the thread waking late).
+    const bool clock_moved = rs || delta(c.tx_clock_jumps, prev_.tx_clock_jumps) || c.state != prev_.state;
+    if (cfg.tx_channels && delta(c.tx_running_wakeups, prev_.tx_running_wakeups) && !clock_moved) {
+      tx_obs_.observed_s += 1;
+      tx_obs_.worst_lag_ms = std::max(tx_obs_.worst_lag_ms, wake_lag);
+      if (sl) {
+        tx_obs_.late_sends += sl;
+        tx_obs_.worst_late_ms = std::max(tx_obs_.worst_late_ms, c.tx_max_lag_samples * 1000.0 / rate);
+      }
+    }
   }
 
   std::map<uint32_t, AppPrev> apps;
@@ -347,14 +464,22 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
                       "switch).",
                       age));
   }
+  // The transmit latency suggestion, once it has seen enough sending; with
+  // late sends the hint below names its value instead of a rough one.
+  const TxLatencySuggestion sug = tx_suggestion_locked();
+  const bool sug_ready = sug.state == TxLatencySuggestion::State::Ready;
   if (send_lag > 0) {
     static const double steps[] = {1, 2, 4, 5, 10, 20, 40};
     double want = 0;
-    for (double s : steps)
-      if (s > tx_latency_ms_ && s >= send_lag * 1.2 + 0.5) {
-        want = s;
-        break;
-      }
+    if (sug_ready && sug.direction == TxLatencySuggestion::Direction::Raise && sug.suggested_ms > tx_latency_ms_) {
+      want = sug.suggested_ms;
+    } else {
+      for (double s : steps)
+        if (s > tx_latency_ms_ && s >= send_lag * 1.2 + 0.5) {
+          want = s;
+          break;
+        }
+    }
     const std::string raise =
         want > 0 ? fmt("Raise Transmit latency to %g ms in Settings", want) : std::string("Raising Transmit latency will not cover it");
 #if defined(_WIN32)
@@ -369,6 +494,8 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
                     "to the network was dropped. %s; also %s.",
                     send_lag, tx_latency_ms_, raise.c_str(), busy));
   }
+  if (sug_ready && sug.direction != TxLatencySuggestion::Direction::Keep && !(send_lag > 0))
+    h.push_back(sug.text + " Set it in Settings; Dante receivers keep their own latency setting.");
   if (lost)
     h.push_back("Audio packets are being lost on the way. Use wired Ethernet (not Wi-Fi), check cables, and turn "
                 "off Energy-Efficient Ethernet (EEE, \"green Ethernet\") on the switch ports.");
@@ -423,6 +550,18 @@ std::string Diagnostics::json(int64_t now) const {
   j.kv("over_2ms", (unsigned long long)send_lag_over_[2]).kv("over_4ms", (unsigned long long)send_lag_over_[3]);
   j.end_obj();
   j.kv("worst_send_lag_ms", worst_send_lag_ms_);
+  {
+    const TxLatencySuggestion t = tx_suggestion_locked();
+    j.key("tx_latency_suggestion").begin_obj();
+    j.kv("state", tx_suggestion_state_name(t.state));
+    j.kv("observed_s", t.observed_s).kv("needed_s", t.needed_s);
+    j.kv("tick_us", (unsigned long long)tx_obs_.tick_us);
+    j.kv("current_ms", t.current_ms).kv("suggested_ms", t.suggested_ms).kv("min_ms", t.min_ms);
+    j.kv("direction", tx_suggestion_direction_name(t.direction));
+    j.kv("late_sends", (unsigned long long)t.late_sends).kv("worst_lag_ms", t.worst_lag_ms);
+    j.kv("confidence", t.confidence).kv("text", t.text);
+    j.end_obj();
+  }
   j.key("hints").begin_arr();
   for (const auto& s : hints_locked(now)) j.v(s);
   j.end_arr();
@@ -471,6 +610,12 @@ std::string Diagnostics::report(int64_t now) const {
              send_lag_over_[3]);
   if (worst_send_lag_ms_ > 0)
     r += fmt("  worst late send %.1f ms (transmit latency %.1f ms)\n", worst_send_lag_ms_, tx_latency_ms_);
+  {
+    const TxLatencySuggestion t = tx_suggestion_locked();
+    r += fmt("  transmit latency suggestion (tick %u us, %.0f s of sending, worst wakeup lag %.2f ms, %" PRIu64
+             " late sends): %s\n",
+             unsigned(tx_obs_.tick_us), t.observed_s, t.worst_lag_ms, t.late_sends, t.text.c_str());
+  }
   const auto hints = hints_locked(now);
   if (!hints.empty()) {
     r += "\nSuggestions\n";

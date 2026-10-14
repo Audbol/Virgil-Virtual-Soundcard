@@ -608,14 +608,14 @@ enum class JobKind { Stop, Start, Restart, LoadSettings, SaveSettings };
 struct Job {
   JobKind kind;
   std::string body;      // SaveSettings: the configuration to POST
-  vc::HttpResult r, r2, r3;  // LoadSettings: /api/config, /api/interfaces and /api/status
+  vc::HttpResult r, r2, r3, r4;  // LoadSettings: /api/config, /api/interfaces, /api/status, /api/diagnostics
 };
 
 bool run_job(int id, JobKind kind, std::string body = std::string()) {
   if (busy()) return false;
   g_pending = id;
   InvalidateRect(g_hwnd, nullptr, FALSE);
-  Job* job = new Job{kind, std::move(body), {}, {}, {}};
+  Job* job = new Job{kind, std::move(body), {}, {}, {}, {}};
   const HWND target = g_hwnd;
   const unsigned port = g_port;
   std::thread([job, target, port] {
@@ -627,6 +627,7 @@ bool run_job(int id, JobKind kind, std::string body = std::string()) {
         job->r = vc::http(port, "GET", "/api/config");
         if (job->r.status == 200) job->r2 = vc::http(port, "GET", "/api/interfaces");
         if (job->r.status == 200) job->r3 = vc::http(port, "GET", "/api/status");  // remote access URLs
+        if (job->r.status == 200) job->r4 = vc::http(port, "GET", "/api/diagnostics");  // tx latency suggestion
         break;
       case JobKind::SaveSettings: job->r = vc::http(port, "POST", "/api/config", job->body); break;
     }
@@ -952,6 +953,7 @@ struct SettingsData {
   // From /api/status "remote": the web panel listens for other computers, at these URLs.
   bool remote_listening = false;
   std::vector<std::string> remote_urls;
+  vc::TxSuggestion sug;  // from /api/diagnostics: the transmit latency suggestion
 };
 
 SettingsData* settings_data(HWND d) { return reinterpret_cast<SettingsData*>(GetWindowLongPtrW(d, DWLP_USER)); }
@@ -991,6 +993,20 @@ bool read_ms(HWND d, int id, std::string* out) {
 
 void settings_error(HWND d, const std::wstring& msg) { SetDlgItemTextW(d, IDC_ERR, msg.c_str()); }
 
+// The mixing tick chosen sets the transmit latency's presets and minimum, and
+// whether the suggestion (measured at one tick) applies.
+void settings_tick_update(HWND d, const SettingsData& data) {
+  const int sel = int(SendDlgItemMessageW(d, IDC_TICK, CB_GETCURSEL, 0, 0));
+  const unsigned tick = vc::tick_of_index(data.form, sel < 0 ? 0 : sel);
+  const std::wstring keep = get_text(d, IDC_TXLAT);  // CB_RESETCONTENT clears the edit field too
+  SendDlgItemMessageW(d, IDC_TXLAT, CB_RESETCONTENT, 0, 0);
+  for (const auto& v : vc::tx_latency_presets(tick)) combo_add(d, IDC_TXLAT, widen(v));
+  SetDlgItemTextW(d, IDC_TXLAT, keep.c_str());
+  SetDlgItemTextW(d, IDC_TXMIN, widen(vc::tx_latency_min_text(tick)).c_str());
+  SetDlgItemTextW(d, IDC_TXSUG, widen(vc::tx_suggestion_note(data.sug, tick)).c_str());
+  ShowWindow(GetDlgItem(d, IDC_TXSUG_APPLY), vc::tx_suggestion_applicable(data.sug, tick) ? SW_SHOW : SW_HIDE);
+}
+
 // The password field follows the checkbox; below them, where other computers
 // find the panel while it listens, and the warning that goes with it.
 void settings_remote_update(HWND d, const SettingsData& data) {
@@ -1028,9 +1044,11 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       SetDlgItemTextW(d, IDC_TXCH, std::to_wstring(f.tx_channels).c_str());
       SetDlgItemTextW(d, IDC_RXCH, std::to_wstring(f.rx_channels).c_str());
       for (const char* v : vc::kRxLatencies) combo_add(d, IDC_RXLAT, widen(v));
-      for (const char* v : vc::kTxLatencies) combo_add(d, IDC_TXLAT, widen(v));
       SetDlgItemTextW(d, IDC_RXLAT, widen(f.rx_latency_ms).c_str());
       SetDlgItemTextW(d, IDC_TXLAT, widen(f.tx_latency_ms).c_str());
+      for (const auto& l : vc::tick_labels(f)) combo_add(d, IDC_TICK, widen(l));
+      SendDlgItemMessageW(d, IDC_TICK, CB_SETCURSEL, WPARAM(vc::tick_index(f)), 0);
+      settings_tick_update(d, data);  // transmit latency presets, minimum and suggestion
       combo_add(d, IDC_CLOCK, L"Follow the Dante clock leader (PTP)");
       combo_add(d, IDC_CLOCK, L"Local clock only (testing)");
       SendDlgItemMessageW(d, IDC_CLOCK, CB_SETCURSEL, f.local_clock ? 1 : 0, 0);
@@ -1084,6 +1102,14 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         settings_remote_update(d, *data);
         return TRUE;
       }
+      if (LOWORD(wp) == IDC_TICK && HIWORD(wp) == CBN_SELCHANGE) {
+        settings_tick_update(d, *data);
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDC_TXSUG_APPLY) {  // into the field; Apply saves it
+        SetDlgItemTextW(d, IDC_TXLAT, widen(data->sug.suggested_text()).c_str());
+        return TRUE;
+      }
       if (LOWORD(wp) == IDCANCEL) {  // a POST in flight still completes; its result is dropped
         EndDialog(d, 0);
         return TRUE;
@@ -1100,6 +1126,13 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         }
         if (!read_ms(d, IDC_RXLAT, &f.rx_latency_ms) || !read_ms(d, IDC_TXLAT, &f.tx_latency_ms)) {
           settings_error(d, L"Enter the latency in milliseconds, for example 4 or 3.5.");
+          return TRUE;
+        }
+        f.tick_us = vc::tick_of_index(f, std::max(0, int(SendDlgItemMessageW(d, IDC_TICK, CB_GETCURSEL, 0, 0))));
+        const std::string latency_problem = vc::tx_latency_problem(f);
+        if (!latency_problem.empty()) {
+          settings_error(d, widen(latency_problem));
+          SetFocus(GetDlgItem(d, IDC_TXLAT));
           return TRUE;
         }
         f.local_clock = SendDlgItemMessageW(d, IDC_CLOCK, CB_GETCURSEL, 0, 0) == 1;
@@ -1129,7 +1162,8 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
 }
 
 // Opens the (modal) dialog with what LoadSettings fetched.
-void show_settings(const std::string& conf, const std::vector<vc::Interface>& ifaces, const std::string& status) {
+void show_settings(const std::string& conf, const std::vector<vc::Interface>& ifaces, const std::string& status,
+                   const std::string& diagnostics) {
   if (g_settings_dlg) {
     SetForegroundWindow(g_settings_dlg);
     return;
@@ -1137,6 +1171,7 @@ void show_settings(const std::string& conf, const std::vector<vc::Interface>& if
   SettingsData data;
   data.conf = conf;
   data.form = vc::load_settings(conf, ifaces);
+  vc::parse_tx_suggestion(diagnostics, &data.sug);  // none from an older service
   // An explicit 0 (direction off) is a valid setting; show it as such.
   if (vc::conf_get(conf, "device", "tx_channels") == "0") data.form.tx_channels = 0;
   if (vc::conf_get(conf, "device", "rx_channels") == "0") data.form.rx_channels = 0;
@@ -2521,7 +2556,7 @@ void job_done(std::unique_ptr<Job> job) {
         break;
       }
       // Modal: runs its own message loop until the dialog closes.
-      show_settings(job->r.body, vc::parse_interfaces(job->r2.body), job->r3.body);
+      show_settings(job->r.body, vc::parse_interfaces(job->r2.body), job->r3.body, job->r4.body);
       break;
     case JobKind::SaveSettings:
       if (g_settings_dlg) SendMessageW(g_settings_dlg, WM_APP_SAVED, 0, reinterpret_cast<LPARAM>(job.get()));

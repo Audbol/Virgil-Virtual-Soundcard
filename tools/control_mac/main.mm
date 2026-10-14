@@ -14,6 +14,7 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <memory>
@@ -298,6 +299,19 @@ RemoteInfo parse_remote(const std::string& status_body) {
 
 // ---- status view ---------------------------------------------------------------------------
 
+// Target of a settings control: runs a block (controls hold targets weakly,
+// so VCApp.settingsTargets keeps these alive while the dialog is open).
+@interface VCBlockTarget : NSObject
+@property(nonatomic, copy) void (^handler)(id sender);
+- (void)fire:(id)sender;
+@end
+
+@implementation VCBlockTarget
+- (void)fire:(id)sender {
+  if (self.handler) self.handler(sender);
+}
+@end
+
 @interface VCView : NSView
 @end
 
@@ -369,6 +383,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
 @property(strong) NSTextField* settingsError;
 @property(copy) std::string (^settingsCollect)(void);  // the form's fields as virgil.conf text
 @property(copy) std::string (^settingsProblem)(void);  // why the form cannot be saved, or ""
+@property(strong) NSArray* settingsTargets;  // VCBlockTargets of the open settings dialog
 @end
 
 @implementation VCApp
@@ -784,10 +799,13 @@ RemoteInfo parse_remote(const std::string& status_body) {
     const vc::HttpResult c = vc::http(g_port, "GET", "/api/config");
     std::vector<vc::Interface> ifs;
     RemoteInfo remote;
+    vc::TxSuggestion sug;
     if (c.status == 200) {
       ifs = vc::parse_interfaces(vc::http(g_port, "GET", "/api/interfaces").body);
       const vc::HttpResult st = vc::http(g_port, "GET", "/api/status");
       if (st.status == 200) remote = parse_remote(st.body);
+      const vc::HttpResult dg = vc::http(g_port, "GET", "/api/diagnostics");  // transmit latency suggestion
+      if (dg.status == 200) vc::parse_tx_suggestion(dg.body, &sug);
     }
     on_main(^{
       self.settingsLoading = NO;
@@ -795,7 +813,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
         alert(@"The Virgil service is not running, so its settings cannot be changed now.");
         return;
       }
-      [self openSettings:c.body interfaces:ifs remote:remote];
+      [self openSettings:c.body interfaces:ifs remote:remote suggestion:sug];
     });
   });
 }
@@ -819,6 +837,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
     self.settingsError = nil;
     self.settingsCollect = nil;
     self.settingsProblem = nil;
+    self.settingsTargets = nil;
     if (response == NSAlertThirdButtonReturn) [self showChannelNames:nil];
     if (response == NSAlertThirdButtonReturn + 1) [self openDiagnostics:nil];
     if (response == NSAlertThirdButtonReturn + 2) [self showConfigEditor:nil];
@@ -836,6 +855,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
         self.settingsError = nil;
         self.settingsCollect = nil;
         self.settingsProblem = nil;
+        self.settingsTargets = nil;
         return;
       }
       self.settingsError.stringValue = ns(e);
@@ -846,7 +866,8 @@ RemoteInfo parse_remote(const std::string& status_body) {
 
 - (void)openSettings:(const std::string&)conf
           interfaces:(const std::vector<vc::Interface>&)ifs
-              remote:(const RemoteInfo&)remote {
+              remote:(const RemoteInfo&)remote
+          suggestion:(const vc::TxSuggestion&)sug {
   const vc::SettingsForm f = vc::load_settings(conf, ifs);
 
   auto label = [](NSString* s) {
@@ -877,6 +898,51 @@ RemoteInfo parse_remote(const std::string& status_body) {
   [rxch.widthAnchor constraintEqualToConstant:50].active = YES;
   NSComboBox* rxl = combo(vc::kRxLatencies, 6, f.rx_latency_ms);
   NSComboBox* txl = combo(vc::kTxLatencies, 6, f.tx_latency_ms);
+  NSTextField* txlLabel = label(@"Transmit latency (ms, 3.5 min):");
+  NSPopUpButton* tick = popup(vc::tick_labels(f), vc::tick_index(f));
+  // The daemon's transmit latency suggestion, and a button that puts it in
+  // the field (Apply still saves it). A vertical stack drops the hidden button.
+  NSTextField* sugText = [NSTextField wrappingLabelWithString:@""];
+  sugText.preferredMaxLayoutWidth = 300;
+  sugText.textColor = [NSColor secondaryLabelColor];
+  sugText.font = [NSFont systemFontOfSize:11];
+  VCBlockTarget* sugTarget = [[VCBlockTarget alloc] init];
+  const vc::TxSuggestion suggestion = sug;  // a copy for the blocks
+  sugTarget.handler = ^(id) {
+    txl.stringValue = ns(suggestion.suggested_text());
+  };
+  NSButton* sugButton = [NSButton buttonWithTitle:ns("Apply suggestion (" + sug.suggested_text() + " ms)")
+                                           target:sugTarget
+                                           action:@selector(fire:)];
+  NSStackView* sugBox = [NSStackView stackViewWithViews:@[ sugText, sugButton ]];
+  sugBox.orientation = NSUserInterfaceLayoutOrientationVertical;
+  sugBox.alignment = NSLayoutAttributeLeading;
+  sugBox.spacing = 4;
+  // The tick sets the transmit latency's presets and minimum, and whether the
+  // suggestion (measured at one tick) applies.
+  const vc::SettingsForm f0 = f;
+  void (^tickChanged)(void) = ^{
+    const unsigned t = vc::tick_of_index(f0, int(tick.indexOfSelectedItem));
+    NSString* keep = txl.stringValue;
+    [txl removeAllItems];
+    for (const auto& v : vc::tx_latency_presets(t)) [txl addItemWithObjectValue:ns(v)];
+    txl.stringValue = keep;
+    char min[64];
+    std::snprintf(min, sizeof min, "Transmit latency (ms, %g min):", vc::min_tx_latency_ms(t));
+    txlLabel.stringValue = [NSString stringWithUTF8String:min];
+    const std::string note = vc::tx_suggestion_note(suggestion, t);
+    sugText.stringValue = ns(note);
+    sugText.hidden = note.empty();
+    sugButton.hidden = !vc::tx_suggestion_applicable(suggestion, t);
+    sugBox.hidden = sugText.hidden;
+  };
+  VCBlockTarget* tickTarget = [[VCBlockTarget alloc] init];
+  tickTarget.handler = ^(id) {
+    tickChanged();
+  };
+  tick.target = tickTarget;
+  tick.action = @selector(fire:);
+  self.settingsTargets = @[ sugTarget, tickTarget ];
   NSPopUpButton* clock =
       popup({"Follow the Dante clock leader (PTP)", "Local clock only (testing)"}, f.local_clock ? 1 : 0);
   NSButton* master = [NSButton checkboxWithTitle:@"Become clock leader when no Dante device provides one"
@@ -913,7 +979,9 @@ RemoteInfo parse_remote(const std::string& status_body) {
     @[ label(@"Sample rate:"), rate ],
     @[ label(@"Channels out / in:"), ch ],
     @[ label(@"Receive latency (ms):"), rxl ],
-    @[ label(@"Transmit latency (ms, 3.5 min):"), txl ],
+    @[ txlLabel, txl ],
+    @[ label(@"Mixing tick:"), tick ],
+    @[ [NSGridCell emptyContentView], sugBox ],
     @[ label(@"Clock:"), clock ],
     @[ [NSGridCell emptyContentView], master ],
     @[ [NSGridCell emptyContentView], remoteOn ],
@@ -925,6 +993,17 @@ RemoteInfo parse_remote(const std::string& status_body) {
   grid.columnSpacing = 10;
   [grid columnAtIndex:1].width = 300;
   grid.translatesAutoresizingMaskIntoConstraints = NO;
+
+  // Size the dialog for the longest suggestion text (it changes with the
+  // tick chosen), then show the real one.
+  {
+    const unsigned other = vc::tick_of_index(f, vc::tick_index(f) == 0 ? 1 : 0);
+    const std::string a1 = vc::tx_suggestion_note(sug, f.tick_us), a2 = vc::tx_suggestion_note(sug, other);
+    sugText.stringValue = ns(a1.size() > a2.size() ? a1 : a2);
+    sugText.hidden = !sug.present;
+    sugButton.hidden = !sug.present;
+    sugBox.hidden = !sug.present;
+  }
 
   NSAlert* a = [[NSAlert alloc] init];
   a.messageText = @"Virgil Settings";
@@ -941,6 +1020,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
   [grid.leadingAnchor constraintEqualToAnchor:box.leadingAnchor].active = YES;
   [grid.topAnchor constraintEqualToAnchor:box.topAnchor].active = YES;
   a.accessoryView = box;
+  tickChanged();
   if (@available(macOS 10.14, *)) a.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
 
   const std::string base = conf;  // a copy: blocks would capture the reference itself
@@ -957,6 +1037,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
     g.rx_channels = unsigned(std::max(0, rxch.intValue));
     g.rx_latency_ms = rxl.stringValue.UTF8String ?: "4";
     g.tx_latency_ms = txl.stringValue.UTF8String ?: "4";
+    g.tick_us = vc::tick_of_index(f0, int(tick.indexOfSelectedItem));
     g.local_clock = clock.indexOfSelectedItem == 1;
     g.master_capable = master.state == NSControlStateValueOn;
     g.remote_access = remoteOn.state == NSControlStateValueOn;
@@ -967,7 +1048,9 @@ RemoteInfo parse_remote(const std::string& status_body) {
     return vc::apply_settings(base, form());
   };
   self.settingsProblem = ^std::string(void) {
-    return vc::remote_access_problem(form());
+    const vc::SettingsForm g = form();
+    const std::string latency = vc::tx_latency_problem(g);
+    return latency.empty() ? vc::remote_access_problem(g) : latency;
   };
   [self runSettings];
 }

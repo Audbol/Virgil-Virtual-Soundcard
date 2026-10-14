@@ -315,6 +315,7 @@ pub struct VgDanteTxStats {
     lag_over_1ms: u64,
     lag_over_2ms: u64,
     lag_over_4ms: u64,
+    running_wakeups: u64,
 }
 
 /// # Safety
@@ -334,6 +335,7 @@ pub unsafe extern "C" fn vg_dante_tx_stats(out: *mut VgDanteTxStats) {
             lag_over_1ms: s.lag_over_1ms,
             lag_over_2ms: s.lag_over_2ms,
             lag_over_4ms: s.lag_over_4ms,
+            running_wakeups: s.running_wakeups,
         };
     }
 }

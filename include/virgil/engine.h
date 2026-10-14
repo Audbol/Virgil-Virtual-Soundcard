@@ -56,6 +56,9 @@ struct EngineCounters {
   // (cumulative, since the process started).
   uint64_t tx_max_wakeup_lag_samples = 0;
   uint64_t tx_lag_over[4] = {};
+  // Sending-thread wakeups with a receiver's flow running (cumulative): the
+  // lag figures only count while this grows (something was transmitted).
+  uint64_t tx_running_wakeups = 0;
   struct App {
     uint32_t slot = 0, pid = 0;
     std::string name;

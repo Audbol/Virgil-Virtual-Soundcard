@@ -57,6 +57,9 @@ typedef struct VgDanteTxStats {
   uint64_t lag_over_1ms;
   uint64_t lag_over_2ms;
   uint64_t lag_over_4ms;
+  // Wakeups that saw at least one running flow (packets going out): the
+  // lag figures above only mean something while this grows.
+  uint64_t running_wakeups;
 } VgDanteTxStats;
 
 // Starts the Dante device. Returns an opaque handle, or NULL on failure.

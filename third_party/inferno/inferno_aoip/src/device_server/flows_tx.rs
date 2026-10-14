@@ -165,6 +165,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
     let dither_24 = self.should_dither(24);
     let mut late_counted = false;
     let mut wakeup_lag: ClockDiff = 0;
+    let mut measured = false; // Virgil patch: a running flow's lag was seen
     for flow in &mut self.flows.iter_mut().filter_map(|opt| opt.as_mut()) {
       if flow.expired.load(Ordering::Relaxed) {
         continue;
@@ -179,6 +180,7 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       let jump_ms = |lag: ClockDiff| lag as i64 * 1000 / sample_rate as i64;
       if flow.running && lag >= 0 && lag <= DISCONTINUITY_THRESHOLD_SAMPLES as ClockDiff {
         wakeup_lag = wakeup_lag.max(lag);
+        measured = true;
       }
       if lag > max_lag_samples as ClockDiff {
         if !flow.running {
@@ -321,6 +323,9 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
               // commands, and let other threads run.
               warn!("blocked for {diff} samples, yielding to avoid CPU lockup");
               super::tx_stats::wakeup_lag(wakeup_lag as u64, sample_rate);
+              if measured {
+                super::tx_stats::running_wakeup();
+              }
               std::thread::yield_now();
               return;
             }
@@ -337,6 +342,9 @@ impl<P: ProxyToSamplesBuffer> FlowsTransmitterInternal<P> {
       }
     }
     super::tx_stats::wakeup_lag(wakeup_lag as u64, sample_rate);
+    if measured {
+      super::tx_stats::running_wakeup();
+    }
   }
 
   async fn run(&mut self, mut start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>) {

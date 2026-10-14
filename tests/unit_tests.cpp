@@ -1694,4 +1694,271 @@ TEST(remote_access_auth) {
   CHECK(vc::apply_settings(plain, vc::load_settings(plain, {})).find("remote") == std::string::npos);
 }
 
+// ---- transmit latency suggestion and the 0.5 ms tick ------------------------
+
+TEST(tx_latency_suggestion_logic) {
+  using S = TxLatencySuggestion;
+  TxLatencyObservation o;
+  o.tick_us = 1000;
+  o.current_ms = 6;
+  // Collecting until 30 minutes of sending.
+  o.observed_s = 29 * 60 + 59;
+  S r = suggest_tx_latency(o);
+  CHECK(r.state == S::State::Collecting && r.suggested_ms == 0 && r.needed_s == 1800);
+  CHECK(r.text.find("measuring, 29 of 30 min") != std::string::npos);
+  CHECK(std::string(tx_suggestion_state_name(r.state)) == "collecting");
+  o.observed_s = 0;
+  CHECK(suggest_tx_latency(o).text.find("0 of 30 min") != std::string::npos);
+
+  // Ready: send delay 2.5 + 0.12 + 1 = 3.62, rounded up to 4.
+  o.observed_s = 1800;
+  o.worst_lag_ms = 0.12;
+  r = suggest_tx_latency(o);
+  CHECK(r.state == S::State::Ready && r.direction == S::Direction::Lower);
+  CHECK(r.suggested_ms == 4.0 && r.min_ms == 3.5 && std::string(r.confidence) == "low");
+  CHECK(std::string(tx_suggestion_direction_name(r.direction)) == "lower");
+  CHECK(r.text.find("can be lowered to 4 ms (now 6 ms)") != std::string::npos);
+  CHECK(r.text.find("over 30 min of sending, low confidence") != std::string::npos);
+  // Exactly on a 0.5 ms step stays there.
+  o.worst_lag_ms = 0.5;
+  CHECK(suggest_tx_latency(o).suggested_ms == 4.0);
+  o.worst_lag_ms = 0.51;
+  CHECK(suggest_tx_latency(o).suggested_ms == 4.5);
+  // Never below the smallest valid setting (2.5 ms at the 0.5 ms tick).
+  o.tick_us = 500;
+  o.worst_lag_ms = 0;
+  r = suggest_tx_latency(o);
+  CHECK(r.suggested_ms == 2.5 && r.min_ms == 2.5);
+  o.worst_lag_ms = 0.5;  // 1.5 + 0.5 + 1 = 3.0
+  CHECK(suggest_tx_latency(o).suggested_ms == 3.0);
+  // Odd hand-edited tick: the minimum 2.1 ms rounds up to 2.5.
+  o.tick_us = 300;
+  o.worst_lag_ms = 0;
+  CHECK(suggest_tx_latency(o).suggested_ms == 2.5 && suggest_tx_latency(o).min_ms == 2.1);
+
+  // No churn: 4.2 -> 4.0 is less than 0.5 ms down, so keep.
+  o.tick_us = 1000;
+  o.current_ms = 4.2;
+  o.worst_lag_ms = 0.3;  // 3.8 -> 4.0
+  r = suggest_tx_latency(o);
+  CHECK(r.direction == S::Direction::Keep && r.suggested_ms == 4.2);
+  CHECK(r.text.find("The transmit latency of 4.2 ms is right") != std::string::npos);
+  o.current_ms = 4.5;  // 0.5 ms down is offered
+  CHECK(suggest_tx_latency(o).direction == S::Direction::Lower && suggest_tx_latency(o).suggested_ms == 4.0);
+  o.current_ms = 4;
+  CHECK(suggest_tx_latency(o).direction == S::Direction::Keep);
+
+  // Too little margin, no dropouts yet: raise (by any amount).
+  o.current_ms = 3.5;
+  o.worst_lag_ms = 0.8;  // 4.3 -> 4.5
+  r = suggest_tx_latency(o);
+  CHECK(r.direction == S::Direction::Raise && r.suggested_ms == 4.5);
+  CHECK(r.text.find("should be raised to 4.5 ms (now 3.5 ms): the sending thread woke up to 0.8 ms late") !=
+        std::string::npos);
+
+  // Late sends: always above the current setting.
+  o.current_ms = 4;
+  o.worst_lag_ms = 4.2;
+  o.late_sends = 3;
+  o.worst_late_ms = 4.2;  // 2.5 + 4.2 + 1 = 7.7 -> 8
+  r = suggest_tx_latency(o);
+  CHECK(r.direction == S::Direction::Raise && r.suggested_ms == 8.0 && r.late_sends == 3);
+  CHECK(r.text.find("raised to 8 ms (now 4 ms): 3 late sends dropped audio") != std::string::npos);
+  o.worst_lag_ms = 0;  // lag figures missing: still at least 0.5 ms more
+  o.worst_late_ms = 0;
+  o.late_sends = 1;
+  r = suggest_tx_latency(o);
+  CHECK(r.direction == S::Direction::Raise && r.suggested_ms == 4.5);
+  CHECK(r.text.find("1 late send dropped") != std::string::npos);
+  // Capped at 40 ms; at 40 already nothing to raise to.
+  o.worst_lag_ms = o.worst_late_ms = 50;
+  CHECK(suggest_tx_latency(o).suggested_ms == 40.0);
+  o.current_ms = 40;
+  r = suggest_tx_latency(o);
+  CHECK(r.direction == S::Direction::Keep && r.text.find("too busy") != std::string::npos);
+
+  // Confidence by hours observed.
+  o = TxLatencyObservation();
+  o.observed_s = 3 * 3600;
+  CHECK(std::string(suggest_tx_latency(o).confidence) == "medium");
+  CHECK(suggest_tx_latency(o).text.find("over 3.0 h of sending") != std::string::npos);
+  o.observed_s = 9 * 3600;
+  CHECK(std::string(suggest_tx_latency(o).confidence) == "high");
+}
+
+TEST(diagnostics_tx_latency_suggestion_observation) {
+  Config cfg;
+  cfg.tx_latency_us = 6000;
+  std::string err;
+  CHECK(validate_config(&cfg, &err));
+  Diagnostics d;
+  int64_t t = 1700000000000LL;
+  d.engine_started(cfg, t);
+  EngineCounters c;
+  c.state = kStatePtpLocked;
+  c.grandmaster = "00:1d:c1:aa:bb:cc";
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);  // grace period
+  // Nothing transmitted (no receiver): not counted, however long.
+  for (int i = 0; i < 100; ++i) d.sample(c, cfg, t += 1000);
+  CHECK(d.tx_latency_suggestion().observed_s == 0);
+  // Sending: every second with running wakeups counts.
+  auto send = [&](int seconds, uint64_t lag_samples) {
+    for (int i = 0; i < seconds; ++i) {
+      c.tx_running_wakeups += 1500;
+      c.tx_max_wakeup_lag_samples = lag_samples;
+      d.sample(c, cfg, t += 1000);
+    }
+  };
+  send(600, 4);  // 10 min, lag ~0.08 ms
+  TxLatencySuggestion s = d.tx_latency_suggestion();
+  CHECK(s.state == TxLatencySuggestion::State::Collecting && s.observed_s == 600);
+  CHECK(d.json(t).find("\"tx_latency_suggestion\":{\"state\":\"collecting\",\"observed_s\":600") !=
+        std::string::npos);
+  CHECK(d.json(t).find("measuring, 10 of 30 min") != std::string::npos);
+  // A clock step: that second's "lag" is not the thread waking late.
+  c.resyncs += 1;
+  c.tx_running_wakeups += 1500;
+  c.tx_max_wakeup_lag_samples = 48 * 30;
+  d.sample(c, cfg, t += 1000);
+  CHECK(d.tx_latency_suggestion().observed_s == 600 && d.tx_latency_suggestion().worst_lag_ms < 0.1);
+  // An engine reload with another transmit latency keeps the observation.
+  cfg.tx_latency_us = 5000;
+  CHECK(validate_config(&cfg, &err));
+  d.engine_started(cfg, t);
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  send(1200, 12);  // lag 0.25 ms
+  s = d.tx_latency_suggestion();
+  CHECK(s.state == TxLatencySuggestion::State::Ready && s.observed_s == 1800 && s.current_ms == 5);
+  // 2.5 + 0.25 + 1 = 3.75 -> 4
+  CHECK(s.direction == TxLatencySuggestion::Direction::Lower && s.suggested_ms == 4.0);
+  const std::string j = d.json(t);
+  CHECK(j.find("\"state\":\"ready\"") != std::string::npos && j.find("\"direction\":\"lower\"") != std::string::npos);
+  CHECK(j.find("\"suggested_ms\":4") != std::string::npos && j.find("\"tick_us\":1000") != std::string::npos);
+  // ... as a hint for every UI, and in the report.
+  CHECK(j.find("Transmit latency can be lowered to 4 ms (now 5 ms)") != std::string::npos);
+  CHECK(j.find("Dante receivers keep their own latency setting") != std::string::npos);
+  CHECK(d.report(t).find("transmit latency suggestion (tick 1000 us, 1800 s of sending") != std::string::npos);
+  vc::Diagnostics g;
+  CHECK(vc::parse_diagnostics(j, &g));
+  CHECK(g.tx_suggestion.present && g.tx_suggestion.ready && g.tx_suggestion.direction == "lower");
+  CHECK(g.tx_suggestion.suggested_ms == 4.0 && g.tx_suggestion.suggested_text() == "4");
+  CHECK(g.tx_suggestion.tick_us == 1000 && g.tx_suggestion.actionable());
+  vc::TxSuggestion only;
+  CHECK(vc::parse_tx_suggestion(j, &only) && only.text == g.tx_suggestion.text);
+
+  // Late sends (with an app attached they are dropouts): raise, and the
+  // dropout hint names the same value.
+  EngineCounters::App app;
+  app.pid = 7;
+  app.name = "REAPER";
+  c.apps.push_back(app);
+  d.sample(c, cfg, t += 1000);  // the app's baseline
+  c.tx_late_wakeups += 2;
+  c.tx_max_lag_samples = 48 * 6;
+  c.tx_running_wakeups += 1500;
+  c.tx_max_wakeup_lag_samples = 48 * 6;
+  d.sample(c, cfg, t += 1000);
+  s = d.tx_latency_suggestion();
+  CHECK(s.direction == TxLatencySuggestion::Direction::Raise && s.late_sends == 2);
+  CHECK(s.suggested_ms == 9.5);  // 2.5 + 6 + 1
+  CHECK(d.json(t).find("Raise Transmit latency to 9.5 ms in Settings") != std::string::npos);
+  CHECK(d.json(t).find("should be raised to 9.5 ms (now 5 ms): 2 late sends") != std::string::npos);
+
+  // A new tick starts over (the send delay depends on it) ...
+  cfg.tick_us = 500;
+  CHECK(validate_config(&cfg, &err));
+  d.engine_started(cfg, t);
+  CHECK(d.tx_latency_suggestion().observed_s == 0 && d.tx_latency_suggestion().late_sends == 0);
+  CHECK(d.json(t).find("\"tick_us\":500") != std::string::npos);
+  for (int i = 0; i < 5; ++i) d.sample(c, cfg, t += 1000);
+  send(10, 4);
+  CHECK(d.tx_latency_suggestion().observed_s == 10);
+  // ... and so does Clear.
+  d.reset(t);
+  CHECK(d.tx_latency_suggestion().observed_s == 0 && d.tx_latency_suggestion().current_ms == 5);
+  CHECK(d.tx_latency_suggestion().min_ms == 2.5);
+}
+
+TEST(config_half_ms_tick) {
+  Config c;
+  std::string err;
+  CHECK(parse_config("[device]\ntick_us = 500\ntx_latency_us = 2500\n", &c, &err));
+  CHECK(validate_config(&c, &err));
+  CHECK(c.period_frames() == 24 && c.tx_send_delay_us() == 1500 && c.min_tx_latency_us() == 2500);
+  CHECK(c.tx_lead_frames() == 48);
+  Config low;
+  parse_config("[device]\ntick_us = 500\ntx_latency_us = 2400\n", &low, &err);
+  CHECK(!validate_config(&low, &err) && err.find("at least 2.5 ms") != std::string::npos);
+  Config at1;
+  parse_config("[device]\ntx_latency_us = 2500\n", &at1, &err);
+  CHECK(!validate_config(&at1, &err) && err.find("at least 3.5 ms") != std::string::npos);
+  // Hand edits keep the full range; spin_us must stay below the tick.
+  Config fast;
+  parse_config("[device]\ntick_us = 125\ntx_latency_us = 2000\nspin_us = 50\n", &fast, &err);
+  CHECK(validate_config(&fast, &err));
+  Config bad;
+  parse_config("[device]\ntick_us = 100\n", &bad, &err);
+  CHECK(!validate_config(&bad, &err));
+  Config spin;
+  parse_config("[device]\ntick_us = 500\ntx_latency_us = 3000\nspin_us = 500\n", &spin, &err);
+  CHECK(!validate_config(&spin, &err) && err.find("spin_us") != std::string::npos);
+  CHECK(format_config(c).find("tick_us = 500") != std::string::npos);
+}
+
+TEST(control_settings_tick_and_tx_suggestion) {
+  const std::string conf = "[device]\nname = A\ntx_latency_us = 4000\ntick_us = 1000\n";
+  vc::SettingsForm f = vc::load_settings(conf, {});
+  CHECK(f.tick_us == 1000 && vc::tick_index(f) == 0 && vc::tick_labels(f).size() == 2);
+  CHECK(vc::tick_labels(f)[1] == "0.5 ms (lower latency, more CPU)");
+  CHECK(vc::load_settings("[device]\n", {}).tick_us == 1000);
+  CHECK(vc::load_settings("[device]\ntick_us = junk\n", {}).tick_us == 1000);
+  // Unchanged: left as it was (and not added to a file without it).
+  CHECK(vc::conf_get(vc::apply_settings(conf, f), "device", "tick_us") == "1000");
+  CHECK(vc::apply_settings("[device]\nname = A\n", vc::load_settings("[device]\nname = A\n", {})).find("tick") ==
+        std::string::npos);
+  // 0.5 ms: written, and the daemon reads it.
+  f.tick_us = vc::tick_of_index(f, 1);
+  f.tx_latency_ms = "2.5";
+  CHECK(vc::tx_latency_problem(f).empty());
+  const std::string out = vc::apply_settings(conf, f);
+  Config c;
+  std::string err;
+  CHECK(parse_config(out, &c, &err) && validate_config(&c, &err) && c.tick_us == 500 && c.tx_latency_us == 2500);
+  // Minimum and presets follow the tick.
+  CHECK(vc::min_tx_latency_ms(1000) == 3.5 && vc::min_tx_latency_ms(500) == 2.5);
+  CHECK(vc::tx_latency_min_text(500) == "(2.5 ms minimum)" && vc::tx_latency_min_text(1000) == "(3.5 ms minimum)");
+  const auto p1 = vc::tx_latency_presets(1000), p5 = vc::tx_latency_presets(500);
+  CHECK(p1.size() == 6 && p1[0] == "3.5" && p1[1] == "4" && p1[5] == "20");
+  for (size_t i = 0; i < p1.size(); ++i) CHECK(p1[i] == vc::kTxLatencies[i]);
+  CHECK(p5.size() == 8 && p5[0] == "2.5" && p5[1] == "3" && p5[2] == "3.5");
+  f.tick_us = 1000;
+  CHECK(vc::tx_latency_problem(f).find("at least 3.5 ms with a 1 ms mixing tick") != std::string::npos);
+  f.tx_latency_ms = "41";
+  CHECK(!vc::tx_latency_problem(f).empty());
+  f.tx_latency_ms = "x";
+  CHECK(!vc::tx_latency_problem(f).empty());
+  // A hand-edited tick is listed and kept.
+  vc::SettingsForm h = vc::load_settings("[device]\ntick_us = 250\n", {});
+  CHECK(vc::tick_index(h) == 2 && vc::tick_labels(h).size() == 3);
+  CHECK(vc::tick_labels(h)[2] == "0.25 ms (from the configuration file)" && vc::tick_of_index(h, 2) == 250);
+
+  // The note under the field.
+  vc::TxSuggestion s;
+  CHECK(vc::tx_suggestion_note(s, 1000).empty() && !vc::tx_suggestion_applicable(s, 1000));
+  s.present = true;
+  s.text = "Transmit latency suggestion: measuring, 12 of 30 min (...)";
+  s.tick_us = 1000;
+  s.direction = "keep";
+  CHECK(vc::tx_suggestion_note(s, 1000) == s.text && !vc::tx_suggestion_applicable(s, 1000));
+  s.ready = true;
+  s.direction = "lower";
+  s.suggested_ms = 3.5;
+  s.text = "Transmit latency can be lowered to 3.5 ms (now 6 ms): ...";
+  CHECK(vc::tx_suggestion_applicable(s, 1000) && s.suggested_text() == "3.5");
+  CHECK(vc::tx_suggestion_note(s, 1000).find("Dante receivers keep their own latency setting") != std::string::npos);
+  // Another tick chosen in the dialog: the suggestion does not apply to it.
+  CHECK(!vc::tx_suggestion_applicable(s, 500));
+  CHECK(vc::tx_suggestion_note(s, 500).find("Measured at the 1 ms tick") != std::string::npos);
+}
+
 TEST_MAIN()

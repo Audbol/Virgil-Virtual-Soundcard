@@ -16,10 +16,17 @@ int64_t realtime_ns();
 // Sleep until mono_ns() >= deadline. The final `spin_ns` are busy-waited to
 // shave scheduler wake-up jitter off the deadline.
 void sleep_until_ns(int64_t deadline_ns, int64_t spin_ns = 0);
+// Whether sleep_until_ns wakes within a fraction of a millisecond. False only
+// on Windows without high-resolution waitable timers (before Windows 10
+// 1803): sleeps then end on the 1 ms timer interrupt, too coarse for a
+// 0.5 ms tick.
+bool precise_sleep_available();
 
 // Put the calling thread in the OS's real-time / pro-audio class.
 // `period_ns` is the expected wake-up period (used by macOS time-constraint
-// policy). Returns false if the OS refused (e.g. missing RLIMIT_RTPRIO).
+// policy: computation a quarter of it, at least 100 us, constraint half of
+// it, so a 0.5 ms or shorter period stays within what the kernel accepts).
+// Returns false if the OS refused (e.g. missing RLIMIT_RTPRIO).
 // On Windows also: MMCSS "Pro Audio", time-critical priority, and the thread
 // opted out of power throttling (EcoQoS).
 bool set_realtime_priority(int priority, int64_t period_ns);

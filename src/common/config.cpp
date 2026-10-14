@@ -207,8 +207,8 @@ bool validate_config(Config* c, std::string* error) {
     return fail("receive latency (latency_us) must be between 0.5 ms and 40 ms");
   if (c->tx_latency_us < 500 || c->tx_latency_us > 40000)
     return fail("transmit latency (tx_latency_us) must be between 0.5 ms and 40 ms");
-  if (c->tx_latency_us < c->tx_send_delay_us() + 1000)
-    return fail("transmit latency (tx_latency_us) must be at least " + ms(c->tx_send_delay_us() + 1000) +
+  if (c->tx_latency_us < c->min_tx_latency_us())
+    return fail("transmit latency (tx_latency_us) must be at least " + ms(c->min_tx_latency_us()) +
                 " (two ticks + 1.5 ms)");
   if (c->clock != "ptp" && c->clock != "free") return fail("clock must be 'ptp' or 'free'");
   if (c->ports != "auto" && c->ports != "standard") {

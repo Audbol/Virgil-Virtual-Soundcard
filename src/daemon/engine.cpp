@@ -388,6 +388,10 @@ void Engine::tick_loop() {
   const int64_t period_ns = int64_t(P) * 1000000000LL / rate;
   if (!set_realtime_priority(cfg_.rt_priority, period_ns))
     VIRGIL_LOG_WARN("could not get real-time scheduling; expect higher jitter (see README)");
+  if (cfg_.tick_us < 1000 && !precise_sleep_available())
+    VIRGIL_LOG_WARN("tick_us = %u needs high-resolution timers (Windows 10 version 1803 or later); this system "
+                    "wakes the engine on the 1 ms timer, so expect late ticks: use tick_us = 1000",
+                    cfg_.tick_us);
 
   const uint32_t ring = cfg_.ring_frames;
   const uint64_t mask = ring - 1;
@@ -752,6 +756,7 @@ EngineCounters Engine::counters() {
     c.tx_lag_over[1] = ts.lag_over_1ms;
     c.tx_lag_over[2] = ts.lag_over_2ms;
     c.tx_lag_over[3] = ts.lag_over_4ms;
+    c.tx_running_wakeups = ts.running_wakeups;
   }
   for (uint32_t i = 0; i < kMaxTxClients; ++i) {
     const ClientSlot& s = hdr_->clients[i];

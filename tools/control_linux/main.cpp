@@ -744,8 +744,10 @@ constexpr int kResponseConfig = 3;
 // which may finish after the dialog was closed.
 struct SettingsUi {
   GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *remote, *password, *err;
+  GtkWidget *tick, *txl_label, *sug_label, *sug_button;
   std::vector<GtkWidget*> more;  // Dropouts and diagnostics…, Channel names…, Edit configuration…
   vc::SettingsForm f;
+  vc::TxSuggestion sug;  // the daemon's transmit latency suggestion
   std::string conf;
   bool applying = false;
 };
@@ -755,6 +757,24 @@ void settings_buttons(SettingsUi& ui, bool on) {
   for (int r : {int(GTK_RESPONSE_CANCEL), int(GTK_RESPONSE_APPLY)})
     gtk_dialog_set_response_sensitive(GTK_DIALOG(ui.d), r, on);
   for (GtkWidget* b : ui.more) gtk_widget_set_sensitive(b, on);
+}
+
+// The tick chosen in the dialog sets the transmit latency's minimum and
+// presets, and whether the suggestion (measured at one tick) applies.
+void settings_tick_changed(SettingsUi& ui) {
+  const unsigned tick = vc::tick_of_index(ui.f, gtk_combo_box_get_active(GTK_COMBO_BOX(ui.tick)));
+  GtkEntry* entry = GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui.txl)));
+  const std::string keep = gtk_entry_get_text(entry);
+  gtk_combo_box_text_remove_all(GTK_COMBO_BOX_TEXT(ui.txl));
+  for (const auto& v : vc::tx_latency_presets(tick)) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(ui.txl), v.c_str());
+  gtk_entry_set_text(entry, keep.c_str());
+  char min[64];
+  std::snprintf(min, sizeof min, "Transmit (ms, %g minimum):", vc::min_tx_latency_ms(tick));
+  gtk_label_set_text(GTK_LABEL(ui.txl_label), min);
+  const std::string note = vc::tx_suggestion_note(ui.sug, tick);
+  gtk_label_set_text(GTK_LABEL(ui.sug_label), note.c_str());
+  gtk_widget_set_visible(ui.sug_label, !note.empty());
+  gtk_widget_set_visible(ui.sug_button, vc::tx_suggestion_applicable(ui.sug, tick));
 }
 
 void on_settings_response(GtkDialog*, int response, gpointer) {
@@ -778,16 +798,18 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
   f.rx_channels = unsigned(gtk_spin_button_get_value_as_int(GTK_SPIN_BUTTON(ui->rxch)));
   f.rx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui->rxl))));
   f.tx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui->txl))));
+  f.tick_us = vc::tick_of_index(f, gtk_combo_box_get_active(GTK_COMBO_BOX(ui->tick)));
   f.local_clock = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->clock)) == 1;
   f.master_capable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->master));
   f.remote_access = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->remote));
   f.remote_password = gtk_entry_get_text(GTK_ENTRY(ui->password));
-  const std::string problem = vc::remote_access_problem(f);
+  const std::string latency_problem = vc::tx_latency_problem(f);
+  const std::string problem = latency_problem.empty() ? vc::remote_access_problem(f) : latency_problem;
   if (!problem.empty()) {
     char* m = g_markup_printf_escaped("<span foreground='#D2553F'>%s</span>", problem.c_str());
     gtk_label_set_markup(GTK_LABEL(ui->err), m);
     g_free(m);
-    gtk_widget_grab_focus(ui->password);
+    gtk_widget_grab_focus(latency_problem.empty() ? ui->password : ui->txl);
     return;
   }
   gtk_label_set_text(GTK_LABEL(ui->err), "Applying…");
@@ -819,9 +841,10 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
       });
 }
 
-void build_settings(const std::string& conf, const std::vector<vc::Interface>& ifs) {
+void build_settings(const std::string& conf, const std::vector<vc::Interface>& ifs, const vc::TxSuggestion& sug) {
   auto ui = std::make_shared<SettingsUi>();
   ui->conf = conf;
+  ui->sug = sug;
   ui->f = vc::load_settings(conf, ifs);
   const vc::SettingsForm& f = ui->f;
 
@@ -883,10 +906,41 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
   gtk_grid_attach(GTK_GRID(grid), label("Receive (ms):"), 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), rxl, 1, row++, 1, 1);
   GtkWidget* txl = ui->txl = gtk_combo_box_text_new_with_entry();
-  for (const char* v : vc::kTxLatencies) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(txl), v);
   gtk_entry_set_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(txl))), f.tx_latency_ms.c_str());
-  gtk_grid_attach(GTK_GRID(grid), label("Transmit (ms, 3.5 minimum):"), 0, row, 1, 1);
+  ui->txl_label = label("Transmit (ms, 3.5 minimum):");  // presets and minimum: settings_tick_changed
+  gtk_grid_attach(GTK_GRID(grid), ui->txl_label, 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), txl, 1, row++, 1, 1);
+  GtkWidget* tick = ui->tick = gtk_combo_box_text_new();
+  for (const auto& l : vc::tick_labels(f)) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(tick), l.c_str());
+  gtk_combo_box_set_active(GTK_COMBO_BOX(tick), vc::tick_index(f));
+  gtk_grid_attach(GTK_GRID(grid), label("Mixing tick:"), 0, row, 1, 1);
+  gtk_grid_attach(GTK_GRID(grid), tick, 1, row++, 1, 1);
+  // The daemon's suggestion for the transmit latency, and a button that puts
+  // it in the field (Apply still saves it).
+  GtkWidget* sugbox = gtk_box_new(GTK_ORIENTATION_HORIZONTAL, 8);
+  GtkWidget* sug_label = ui->sug_label = gtk_label_new("");
+  gtk_label_set_line_wrap(GTK_LABEL(sug_label), TRUE);
+  gtk_label_set_max_width_chars(GTK_LABEL(sug_label), 52);
+  gtk_label_set_xalign(GTK_LABEL(sug_label), 0);
+  gtk_style_context_add_class(gtk_widget_get_style_context(sug_label), "dim-label");
+  gtk_box_pack_start(GTK_BOX(sugbox), sug_label, TRUE, TRUE, 0);
+  GtkWidget* sug_button = ui->sug_button = gtk_button_new_with_label(
+      ("Apply suggestion (" + sug.suggested_text() + " ms)").c_str());
+  gtk_widget_set_valign(sug_button, GTK_ALIGN_CENTER);
+  gtk_widget_set_no_show_all(sug_button, TRUE);
+  gtk_widget_set_no_show_all(sug_label, TRUE);
+  gtk_box_pack_start(GTK_BOX(sugbox), sug_button, FALSE, FALSE, 0);
+  gtk_grid_attach(GTK_GRID(grid), sugbox, 0, row++, 2, 1);
+  g_signal_connect(sug_button, "clicked", G_CALLBACK(+[](GtkButton*, gpointer) {
+                     if (!g_settings || !g_settings->d) return;
+                     gtk_entry_set_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(g_settings->txl))),
+                                        g_settings->sug.suggested_text().c_str());
+                   }),
+                   nullptr);
+  g_signal_connect(tick, "changed", G_CALLBACK(+[](GtkComboBox*, gpointer) {
+                     if (g_settings && g_settings->d) settings_tick_changed(*g_settings);
+                   }),
+                   nullptr);
 
   heading("Clock");
   GtkWidget* clock = ui->clock = gtk_combo_box_text_new();
@@ -979,6 +1033,7 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
                    }),
                    nullptr);
   g_settings = ui;
+  settings_tick_changed(*ui);
   gtk_widget_show_all(d);
 }
 
@@ -992,6 +1047,7 @@ void show_settings() {
     int status = 0;
     std::string conf;
     std::vector<vc::Interface> ifs;
+    vc::TxSuggestion sug;
   };
   const unsigned port = g_port;
   run_async<Loaded>(
@@ -1001,6 +1057,7 @@ void show_settings() {
         l.status = c.status;
         l.conf = c.body;
         if (c.status == 200) l.ifs = vc::parse_interfaces(vc::http(port, "GET", "/api/interfaces").body);
+        if (c.status == 200) vc::parse_tx_suggestion(vc::http(port, "GET", "/api/diagnostics").body, &l.sug);
         return l;
       },
       [](const Loaded& l) {
@@ -1010,7 +1067,7 @@ void show_settings() {
           return;
         }
         if (g_settings && g_settings->d) gtk_window_present(GTK_WINDOW(g_settings->d));
-        else build_settings(l.conf, l.ifs);
+        else build_settings(l.conf, l.ifs, l.sug);
       });
 }
 

@@ -1,5 +1,6 @@
 #include "virgil/platform.h"
 
+#include <algorithm>
 #include <chrono>
 #include <thread>
 
@@ -63,12 +64,27 @@ int64_t realtime_ns() {
   return (int64_t(u.QuadPart) - 116444736000000000LL) * 100;  // 1601 -> 1970
 }
 
+namespace {
+HANDLE high_resolution_timer() {
+  return CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS);
+}
+}  // namespace
+
+bool precise_sleep_available() {
+  static const bool ok = [] {
+    HANDLE h = high_resolution_timer();
+    if (h) CloseHandle(h);
+    return h != nullptr;
+  }();
+  return ok;
+}
+
 void sleep_until_ns(int64_t deadline, int64_t spin_ns) {
-  // A high-resolution waitable timer gets ~0.5 ms granularity on Win10 1803+;
-  // the spin covers the rest.
+  // A high-resolution waitable timer (Win10 1803+) wakes within a fraction
+  // of a millisecond, so it also suits a 0.5 ms tick; the spin covers the
+  // rest. Without it (older Windows) sleeps end on the 1 ms timer interrupt.
   thread_local HANDLE timer = [] {
-    HANDLE h = CreateWaitableTimerExW(nullptr, nullptr, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,
-                                      TIMER_ALL_ACCESS);
+    HANDLE h = high_resolution_timer();
     if (!h) h = CreateWaitableTimerW(nullptr, TRUE, nullptr);
     return h;
   }();
@@ -224,6 +240,8 @@ static inline void cpu_relax() {
 #endif
 }
 
+bool precise_sleep_available() { return true; }
+
 void sleep_until_ns(int64_t deadline, int64_t spin_ns) {
   int64_t wake = deadline - spin_ns;
 #if defined(__APPLE__)
@@ -244,10 +262,16 @@ bool set_realtime_priority(int priority, int64_t period_ns) {
 #if defined(__APPLE__)
   const auto& tb = timebase();
   auto to_abs = [&](int64_t ns) { return uint32_t(double(ns) * tb.denom / tb.numer); };
+  // The kernel refuses a computation under its minimum real-time quantum
+  // (50 us) or above the constraint. A quarter of a 0.5 ms tick (125 us) is
+  // fine; shorter ticks get 100 us (within the 125 us minimum tick), and the
+  // constraint is never below the computation.
+  const int64_t computation = std::max<int64_t>(period_ns / 4, 100000);
+  const int64_t constraint = std::max(period_ns / 2, computation);
   thread_time_constraint_policy_data_t pol;
   pol.period = to_abs(period_ns);
-  pol.computation = to_abs(period_ns / 4);
-  pol.constraint = to_abs(period_ns / 2);
+  pol.computation = to_abs(computation);
+  pol.constraint = to_abs(constraint);
   pol.preemptible = 1;
   (void)priority;
   return thread_policy_set(pthread_mach_thread_np(pthread_self()), THREAD_TIME_CONSTRAINT_POLICY,

@@ -473,8 +473,10 @@ vc::DesktopAudioSettings input_settings(const std::string& device, unsigned firs
 
 }  // namespace
 
-TEST(desktop_audio_mixes_maps_and_plays) {
-  Virgil v(test_shm("m"));
+// The whole path at Virgil's tick (`tick_us`; Virgil Control offers 1000 and 500).
+static void mixes_maps_and_plays(unsigned tick_us) {
+  Virgil v(test_shm(tick_us == 1000 ? "m" : "m5"));
+  v.c.tick_us = tick_us;
   CHECK(v.start());
   if (!v.e) return;
   auto* fake = new FakeBackend;
@@ -582,6 +584,9 @@ TEST(desktop_audio_mixes_maps_and_plays) {
   CHECK(eventually(1000, [&] { return eng.status().phase == desk::Status::kOff; }));
   eng.shutdown();
 }
+
+TEST(desktop_audio_mixes_maps_and_plays) { mixes_maps_and_plays(1000); }
+TEST(desktop_audio_mixes_maps_and_plays_half_ms_tick) { mixes_maps_and_plays(500); }
 
 TEST(desktop_audio_waits_for_virgil_and_reconnects) {
   const std::string shm = test_shm("r");

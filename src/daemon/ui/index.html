@@ -87,6 +87,8 @@ textarea { font-family: var(--mono); font-size: 12.5px; min-height: 260px; resiz
 .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin-top: 14px; }
 .msg { font-size: 13px; } .msg.err { color: var(--bad); } .msg.ok { color: var(--ok); }
 details summary { cursor: pointer; color: var(--muted); margin-top: 14px; font-size: 13px; }
+.txsug { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted); margin-top: -4px; }
+.txsug button { flex: none; }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--text); grid-column: 1 / -1; }
 label.check input { width: auto; margin: 0; }
 .inline-num { width: 70px; display: inline-block; padding: 4px 6px; }
@@ -198,7 +200,11 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
       <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="128"></label>
       <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="128"></label>
       <label>Receive latency (ms)<input id="f-lat" data-key="latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
-      <label>Transmit latency (ms)<input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
+      <label>Transmit latency (ms) <span id="txlat-min"></span><input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="3.5" max="40" step="0.5"></label>
+      <label>Mixing tick<select id="f-tick" data-key="tick_us">
+        <option value="1000">1 ms (default)</option><option value="500">0.5 ms (lower latency, more CPU)</option></select></label>
+      <div class="txsug" id="txsug" hidden><span id="txsug-text"></span>
+        <button id="txsug-apply" type="button" hidden>Apply suggestion</button></div>
       <label>Clock<select id="f-clock" data-key="clock">
         <option value="ptp">PTP (follow the Dante clock leader)</option><option value="free">Local clock only (testing)</option></select></label>
       <label class="check"><input id="f-master" type="checkbox" data-key="master_capable" data-section="ptp" data-conv="bool">
@@ -436,9 +442,42 @@ function render(st) {
 }
 
 // ---------- settings form <-> config text ----------
-const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-clock", "f-master", "f-remote", "f-rpw"];
-const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", master_capable: "false",
-                   remote_access: "false", remote_password: "" };
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-tick", "f-clock", "f-master", "f-remote", "f-rpw"];
+const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", tick_us: "1000",
+                   master_capable: "false", remote_access: "false", remote_password: "" };
+// Mixing tick: the smallest transmit latency is two ticks + 1.5 ms (3.5 ms at
+// 1 ms, 2.5 ms at 0.5 ms), as the daemon checks it.
+const formTick = () => Number($("f-tick").value) || 1000;
+const minTxMs = tick => (2 * tick + 1500) / 1000;
+function tickOptions(v) {
+  const sel = $("f-tick");
+  sel.querySelectorAll("option[data-custom]").forEach(o => o.remove());
+  if (v && v !== "1000" && v !== "500" && /^\d+$/.test(v))
+    sel.insertAdjacentHTML("beforeend", `<option value="${esc(v)}" data-custom>${+v / 1000} ms (from the configuration file)</option>`);
+}
+// The transmit latency suggestion (diagnostics) under the field.
+function renderSug() {
+  const tick = formTick(), min = minTxMs(tick);
+  $("txlat-min").textContent = `(${min} ms minimum)`;
+  $("f-txlat").min = String(min);
+  const g = S.sug, box = $("txsug");
+  box.hidden = !(g && g.text);
+  if (box.hidden) return;
+  const ready = g.state === "ready", actionable = ready && g.direction !== "keep" && g.suggested_ms > 0;
+  let text = g.text;
+  const otherTick = g.tick_us && g.tick_us !== tick;
+  if (otherTick) text += ` Measured at the ${g.tick_us / 1000} ms tick: measuring starts again once the new tick is applied.`;
+  else if (actionable) text += " Dante receivers keep their own latency setting.";
+  $("txsug-text").textContent = text;
+  const btn = $("txsug-apply");
+  btn.hidden = !(actionable && !otherTick);
+  btn.textContent = `Apply suggestion (${g.suggested_ms} ms)`;
+}
+$("txsug-apply").addEventListener("click", () => {
+  if (!S.sug) return;
+  const el = $("f-txlat"); el.value = String(S.sug.suggested_ms);
+  el.dispatchEvent(new Event("input"));
+});
 // Remote access settings can only be changed on the Virgil computer itself.
 function remoteFields(st) {
   const r = st && st.remote; if (!r) return;
@@ -471,11 +510,13 @@ function fillForm() {
     const el = $(id);
     if (id === "f-interface") { el.value = S.ifaces.find(i => i.address === cur)?.name ?? cur; continue; }
     const v = getKey(t, el.dataset.section || "device", el.dataset.key);
+    if (id === "f-tick") tickOptions(v);
     if (v !== null) toField(el, v);
     else if (DEFAULTS[el.dataset.key] !== undefined) toField(el, DEFAULTS[el.dataset.key]);
   }
   $("cfgtext").value = t;
   fillNames();
+  renderSug();
 }
 const isDirty = () => S.cfg !== S.savedCfg;
 function markDirty() {
@@ -487,6 +528,7 @@ FIELDS.forEach(id => $(id).addEventListener($(id).type === "checkbox" ? "change"
   S.cfg = setKey(S.cfg, e.target.dataset.section || "device", e.target.dataset.key, fromField(e.target));
   $("cfgtext").value = S.cfg; markDirty();
   if (/_channels$/.test(e.target.dataset.key)) fillNames();
+  if (e.target.id === "f-tick") renderSug();
 }));
 $("cfgtext").addEventListener("input", e => { S.cfg = e.target.value; fillFormFromText(); markDirty(); });
 function fillFormFromText() { const keep = $("cfgtext").value; fillForm(); $("cfgtext").value = keep; }
@@ -505,6 +547,8 @@ async function fetchConfig() {
 }
 
 $("apply").addEventListener("click", async () => {
+  const tx = Number($("f-txlat").value), min = minTxMs(formTick());
+  if (tx > 0 && tx < min) { say("err", `The transmit latency must be at least ${min} ms with a ${formTick() / 1000} ms mixing tick.`); return; }
   $("apply").disabled = true; say("", "Saving…");
   try {
     // Apply only what was changed here onto the file as it is now (Stop,
@@ -602,6 +646,7 @@ function renderDiag(g) {
   }
   $("d-chart").innerHTML = cols.join("");
   $("d-hints").innerHTML = g.hints.map(h => `<li>${esc(h)}</li>`).join("");
+  S.sug = g.tx_latency_suggestion || null; renderSug();
   $("d-events").innerHTML = g.events.length ? g.events.slice(0, 100).map(e => {
     const dur = e.end_ms - e.start_ms >= 1000 ? ` <span class="sub">(${Math.round((e.end_ms - e.start_ms) / 1000)} s)</span>` : "";
     return `<tr class="${e.severity}"><td>${esc(fmtDay(e.start_ms))}</td><td>${esc(e.text)}${dur}</td></tr>`;

@@ -16,6 +16,40 @@
 
 namespace virgil {
 
+// Transmit latency suggestion. The Dante sending thread sends frame f at
+// media time f + send delay (two ticks + 0.5 ms) and stamps it f + transmit
+// latency; the difference is the room it has to wake up late. From the worst
+// wakeup lag seen while audio went out: send delay + worst lag + 1 ms,
+// rounded up to 0.5 ms, between the smallest valid setting and 40 ms.
+struct TxLatencyObservation {
+  double observed_s = 0;     // seconds the transmit side ran (packets went out)
+  uint32_t tick_us = 1000;   // tick the observation was made with
+  double worst_lag_ms = 0;   // worst sending-thread wakeup lag
+  uint64_t late_sends = 0;   // wakeups after the transmit latency (audio dropped)
+  double worst_late_ms = 0;  // worst of those
+  double current_ms = 4;     // transmit latency in use
+};
+struct TxLatencySuggestion {
+  enum class State { Collecting, Ready };
+  enum class Direction { Keep, Lower, Raise };
+  State state = State::Collecting;
+  Direction direction = Direction::Keep;
+  double observed_s = 0, needed_s = 0;
+  double current_ms = 0;
+  double suggested_ms = 0;  // == current_ms unless Lower / Raise (0 while collecting)
+  double min_ms = 0;        // smallest valid setting at this tick
+  uint64_t late_sends = 0;
+  double worst_lag_ms = 0;
+  const char* confidence = "";  // "low" | "medium" | "high" ("" while collecting)
+  std::string text;             // one sentence for the settings and the hints
+};
+constexpr double kTxSuggestNeededS = 30 * 60;  // only offered after this much sending
+constexpr double kTxSuggestMarginMs = 1.0;     // on top of the worst lag
+constexpr double kTxSuggestMaxMs = 40.0;       // validate_config's maximum
+TxLatencySuggestion suggest_tx_latency(const TxLatencyObservation& o);
+const char* tx_suggestion_state_name(TxLatencySuggestion::State s);       // "collecting" | "ready"
+const char* tx_suggestion_direction_name(TxLatencySuggestion::Direction d);  // "keep" | "lower" | "raise"
+
 class Diagnostics {
  public:
   enum class Kind {
@@ -45,6 +79,9 @@ class Diagnostics {
   uint64_t recent_dropouts(int64_t wall_ms, int64_t seconds = 3600) const;
   // Plain-text section of the support report (events, totals, hints).
   std::string report(int64_t wall_ms) const;
+  // The transmit latency suggestion from what was observed since the last
+  // reset (or the last change of tick_us).
+  TxLatencySuggestion tx_latency_suggestion() const;
 
  private:
   struct Event {
@@ -69,6 +106,8 @@ class Diagnostics {
                   const std::string& text, double extra = 0);
   void bump_minute_locked(Kind k, int64_t now);
   std::vector<std::string> hints_locked(int64_t now) const;
+  TxLatencySuggestion tx_suggestion_locked() const;
+  void reset_tx_observation_locked(uint32_t tick_us);
   static const char* kind_name(Kind k);
   static std::string event_text(const Event& e, double period_ms, double rx_latency_ms, double tx_latency_ms);
 
@@ -88,6 +127,12 @@ class Diagnostics {
   uint64_t send_lag_over_[4] = {};  // wakeups later than 0.5 / 1 / 2 / 4 ms (since reset)
   int64_t last_stall_ms_ = 0;  // an engine stall was seen in this sample (wall ms)
   double worst_send_lag_ms_ = 0;  // since reset
+  // Transmit latency suggestion: what the sending thread did while packets
+  // went out, since reset or the last change of tick_us (the send delay
+  // depends on it). Engine reloads and other settings changes keep it; so
+  // does changing the transmit latency (the lag does not depend on it).
+  TxLatencyObservation tx_obs_;
+  uint32_t tx_tick_us_ = 1000;  // tick of the engine running now
   std::deque<Event> events_;
   std::deque<Minute> minutes_;
   std::map<Kind, uint64_t> totals_;  // dropout events by kind

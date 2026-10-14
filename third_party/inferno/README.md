@@ -96,7 +96,9 @@ Changes for Virgil:
       counted (`send_errors`) instead of retried in a tight loop, logged at
       most once a second; the 5 ms "blocked" guard no longer sleeps 2 ms.
     * `tx_stats` also records the worst lag of every wakeup and counts
-      wakeups later than 0.5 / 1 / 2 / 4 ms (near misses).
+      wakeups later than 0.5 / 1 / 2 / 4 ms (near misses), and the wakeups
+      that saw a running flow (`running_wakeups`), so Virgil's transmit
+      latency suggestion only counts time in which packets went out.
     * Windows: real-time threads join MMCSS "Pro Audio" at
       AVRT_PRIORITY_CRITICAL and their priority is not overridden by
       SetThreadPriority afterwards (that replaced the MMCSS boost with

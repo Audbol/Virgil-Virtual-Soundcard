@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <chrono>
 #include <cmath>
+#include <cstdio>
 #include <ctime>
 #include <map>
 
@@ -82,6 +83,40 @@ std::string format_local_time(int64_t wall_ms, const char* f) {
   return std::string(b, n);
 }
 
+std::string TxSuggestion::suggested_text() const {
+  char b[32];
+  std::snprintf(b, sizeof b, "%g", suggested_ms);
+  return b;
+}
+
+namespace {
+TxSuggestion tx_suggestion_of(const Json& t) {
+  TxSuggestion x;
+  if (t.type != Json::Object) return x;
+  x.present = true;
+  x.ready = t["state"].str() == "ready";
+  x.direction = t["direction"].str("keep");
+  x.observed_s = t["observed_s"].num();
+  x.needed_s = t["needed_s"].num();
+  x.current_ms = t["current_ms"].num();
+  x.suggested_ms = t["suggested_ms"].num();
+  x.min_ms = t["min_ms"].num();
+  x.tick_us = unsigned(std::max(0.0, t["tick_us"].num()));
+  x.late_sends = (unsigned long long)std::max(0.0, t["late_sends"].num());
+  x.worst_lag_ms = t["worst_lag_ms"].num();
+  x.confidence = t["confidence"].str();
+  x.text = valid_utf8(t["text"].str());
+  return x;
+}
+}  // namespace
+
+bool parse_tx_suggestion(const std::string& body, TxSuggestion* out) {
+  Json j;
+  if (!parse_json(body, &j) || j.type != Json::Object) return false;
+  *out = tx_suggestion_of(j["tx_latency_suggestion"]);
+  return true;
+}
+
 bool parse_diagnostics(const std::string& body, Diagnostics* out) {
   Json j;
   if (!parse_json(body, &j) || j.type != Json::Object) return false;
@@ -93,6 +128,7 @@ bool parse_diagnostics(const std::string& body, Diagnostics* out) {
   d.dropouts_total = (unsigned long long)std::max(0.0, j["dropouts_total"].num());
   d.rx_latency_ms = j["rx_latency_ms"].num();
   d.tx_latency_ms = j["tx_latency_ms"].num();
+  d.tx_suggestion = tx_suggestion_of(j["tx_latency_suggestion"]);
 
   const unsigned long long n = d.dropouts_last_hour;
   d.headline_severity = n ? Severity::Warn : Severity::Ok;

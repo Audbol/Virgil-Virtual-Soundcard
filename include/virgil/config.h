@@ -23,7 +23,9 @@ struct Config {
 #else
   uint32_t tx_latency_us = 4000;
 #endif
-  uint32_t tick_us = 1000;         // internal mixing period
+  // Internal mixing period. Virgil Control offers 1000 (default) and 500
+  // (lower transmit latency, more CPU); 125..4000 for hand edits.
+  uint32_t tick_us = 1000;
   uint32_t tx_lead_us = 0;         // drivers' playback margin; 0 = two ticks
   uint32_t ring_frames = 0;        // 0 = auto
   int rt_priority = 80;
@@ -67,7 +69,13 @@ struct Config {
   // How long after its media time a mixed frame is handed to the network:
   // the tick that mixes it ends one tick later, plus room for one packet and
   // scheduling jitter. tx_latency_us must cover this plus the network.
+  // At 48 kHz a packet holds up to 32 frames (0.67 ms): with a 0.5 ms tick
+  // the 1.5 ms delay covers the tick, one packet and ~0.3 ms of jitter.
   uint32_t tx_send_delay_us() const { return 2 * tick_us + 500; }
+  // Smallest transmit latency validate_config accepts: the send delay plus
+  // 1 ms for the sending thread to wake late (3.5 ms at a 1 ms tick, 2.5 ms
+  // at 0.5 ms).
+  uint32_t min_tx_latency_us() const { return tx_send_delay_us() + 1000; }
   uint32_t tx_lead_frames() const {
     return tx_lead_us ? us_to_frames(tx_lead_us) : 2 * period_frames();
   }

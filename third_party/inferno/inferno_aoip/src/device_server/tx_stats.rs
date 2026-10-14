@@ -14,6 +14,7 @@ static LAG_OVER_0_5MS: AtomicU64 = AtomicU64::new(0);
 static LAG_OVER_1MS: AtomicU64 = AtomicU64::new(0);
 static LAG_OVER_2MS: AtomicU64 = AtomicU64::new(0);
 static LAG_OVER_4MS: AtomicU64 = AtomicU64::new(0);
+static RUNNING_WAKEUPS: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Clone, Copy, Debug, Default)]
 pub struct TxStats {
@@ -39,6 +40,9 @@ pub struct TxStats {
   pub lag_over_1ms: u64,
   pub lag_over_2ms: u64,
   pub lag_over_4ms: u64,
+  /// Wakeups that measured the lag of at least one running flow (packets
+  /// were going out): tells "no lag" apart from "nothing was sent".
+  pub running_wakeups: u64,
 }
 
 /// A running flow woke `lag_samples` late and skipped `dropped_samples`.
@@ -77,6 +81,12 @@ pub(crate) fn wakeup_lag(lag_samples: u64, sample_rate: u32) {
   }
 }
 
+/// A wakeup measured the lag of at least one running flow (call once per
+/// wakeup, after wakeup_lag).
+pub(crate) fn running_wakeup() {
+  RUNNING_WAKEUPS.fetch_add(1, Ordering::Relaxed);
+}
+
 /// Totals since start; the `max_*` fields since the previous call.
 pub fn take() -> TxStats {
   TxStats {
@@ -90,6 +100,7 @@ pub fn take() -> TxStats {
     lag_over_1ms: LAG_OVER_1MS.load(Ordering::Relaxed),
     lag_over_2ms: LAG_OVER_2MS.load(Ordering::Relaxed),
     lag_over_4ms: LAG_OVER_4MS.load(Ordering::Relaxed),
+    running_wakeups: RUNNING_WAKEUPS.load(Ordering::Relaxed),
   }
 }
 
@@ -110,12 +121,14 @@ mod tests {
     late_wakeup(300, 320, true);
     clock_jump();
     send_error();
+    running_wakeup();
     let after = take();
     assert_eq!(after.late_wakeups - before.late_wakeups, 2);
     assert_eq!(after.dropped_samples - before.dropped_samples, 512 + 320);
     assert_eq!(after.max_lag_samples, 700);
     assert_eq!(after.clock_jumps - before.clock_jumps, 1);
     assert_eq!(after.send_errors - before.send_errors, 1);
+    assert_eq!(after.running_wakeups - before.running_wakeups, 1);
     assert_eq!(take().max_lag_samples, 0); // reset by take()
   }
 

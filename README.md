@@ -74,6 +74,8 @@ time whatever their own latency (even 0.25 ms on hardware). Playback through
 Virgil therefore reaches the network `tx_latency_us` plus the receiver's
 latency after the app plays it. Lower
 both on a clean, wired gigabit network. Raise them if you hear dropouts.
+Virgil suggests a transmit latency for your computer after watching it for
+half an hour, see [Transmit latency and the mixing tick](#transmit-latency-and-the-mixing-tick).
 
 Network ports (allow them through the firewall; the Windows installer does):
 UDP 319/320 (PTP), 5353 (mDNS), 4440, 4455, 8700 and 8800 (Dante control),
@@ -210,8 +212,73 @@ keeping Virgil's engine waiting, and the clock leader being lost or the clock
 jumping. *Dropouts…* (also in the tray menu as *Dropouts and diagnostics*)
 opens the list in the control panel, with a chart of the last hour and
 suggestions, such as the receive latency that would have covered the late
-audio. *Download report* saves a text file with the setup, the events and the
+audio, and the transmit latency this computer needs (see below). *Download report* saves a text file with the setup, the events and the
 recent log, to attach to a bug report.
+
+### Transmit latency and the mixing tick
+
+Virgil's sending thread hands each frame to the network a *send delay* after
+its media time (two mixing ticks + 0.5 ms: 2.5 ms at the default 1 ms tick)
+and stamps it *transmit latency* ahead. What is left over is the room the
+thread has to wake up late; when it wakes later than that, audio to the
+network is dropped (*Dropouts and diagnostics* lists it). Hence the minimum:
+two ticks + 1.5 ms, i.e. 3.5 ms at the 1 ms tick.
+
+**How to choose.** Start with the default (4 ms; 6 ms on Windows) and use the
+computer as you normally do, with a Dante device receiving Virgil's channels.
+While packets go out, Virgil records the latest wakeup of its sending thread.
+After 30 minutes of sending, Settings (next to *Transmit latency*, in every
+Virgil Control app and the web panel) and *Dropouts and diagnostics* show a
+suggestion: send delay + the latest wakeup seen + 1 ms of margin, rounded up
+to 0.5 ms, between the minimum and 40 ms:
+
+* *can be lowered to X ms*: *Apply suggestion* puts it in the field; press
+  *Apply* to save it. It only suggests going down by 0.5 ms or more.
+* *should be raised to X ms*: the thread came within 1 ms of the limit, or
+  audio was dropped (the number of late sends is given). Raise it.
+* *the transmit latency of X ms is right*: nothing to do.
+
+Before that it shows how far it is (*measuring, 12 of 30 min*); only time with
+a receiver subscribed counts. The confidence grows with the time watched (low
+under 2 hours, high after 8): the worst wakeup of a day is what matters, so
+leave it running through a typical session (and a busy one) before trusting a
+lower value. The observation is kept when settings are applied (also when you
+change the transmit latency itself), and starts over with *Clear* in
+*Dropouts and diagnostics*, when the mixing tick changes, and when the service
+restarts. The diagnostics report has a line with the figures behind it
+(`transmit latency suggestion (tick 1000 us, 7200 s of sending, worst wakeup
+lag 0.31 ms, 0 late sends): …`); `/api/diagnostics` has them as
+`tx_latency_suggestion`.
+
+Dante receivers keep their own latency setting: Virgil stamps its audio a
+transmit latency ahead, so a receiver at any latency gets it in time, and audio
+played through Virgil reaches the receiver's output after Virgil's transmit
+latency plus the receiver's latency.
+
+**Mixing tick.** *Mixing tick* in Settings (`tick_us` in `[device]`) is how
+often Virgil moves audio between the apps and the network: *1 ms (default)* or
+*0.5 ms (lower latency, more CPU)*. At 0.5 ms the send delay is 1.5 ms and the
+minimum transmit latency 2.5 ms, so a fast computer can go down to 2.5–3 ms.
+The cost:
+
+* CPU: the engine wakes twice as often and busy-waits `spin_us` (50 us) before
+  each tick. Measured with `virgild` free-running (no Dante receiver, one
+  playing app) on a 2.1 GHz Xeon VM: 8×8 channels about 3.3 % of one core at
+  1 ms and 7 % at 0.5 ms; 64×64 about 5 % and 9 %.
+* Apps' margin: drivers write two ticks ahead (`tx_lead_us = 0`), 1 ms instead
+  of 2 ms at the 0.5 ms tick, so an ASIO / Core Audio / ALSA app that is late
+  now and then is caught sooner (an *app did not keep up* dropout). Setting
+  `tx_lead_us = 2000` gives the 2 ms back (it adds to the apps' output
+  latency, not to the network's).
+* Jitter: a packet holds up to 32 frames (0.67 ms at 48 kHz), so at 0.5 ms
+  the engine itself may wake only about 0.3 ms late before the network gets a
+  gap (0.8 ms at the 1 ms tick). On a busy computer stay at 1 ms.
+* Windows needs Windows 10 version 1803 or later (high-resolution timers; the
+  log warns otherwise).
+
+Changing the tick restarts the audio engine; apps reconnect (the soundcard
+layout changes). Other values from 125 to 4000 us can still be set in the
+configuration file.
 
 ### Channel names
 
@@ -544,7 +611,7 @@ Configuration reference: [`config/virgil.conf.example`](config/virgil.conf.examp
 |---|---|
 | Dante (Inferno) path | `tests/e2e_netns.sh`: two `virgild` instances in separate network namespaces, one as clock leader. The [netaudio](https://pypi.org/project/netaudio/) Dante CLI, standing in for Dante Controller, discovers both and subscribes B's receive channels to A's transmit channels. A 1 kHz tone played into A arrives at B sample-accurately, 168 frames (3.5 ms) later, with no dropouts. A probe asks for the clock status the way Dante Controller does. In use on Windows 11 with Dante Controller, a Behringer WING (clock leader) and an AVIO USB adapter |
 | PTPv1 clock | Unit tests: message encoding, leader/follower lock, servo in simulation. Across namespaces the follower locks within about 10 µs |
-| Engine, config | Unit tests; loopback through the Dante rings is bit-exact (24-bit) |
+| Engine, config | Unit tests; loopback through the Dante rings is bit-exact (24-bit), at the 1 ms and the 0.5 ms tick (4 and 128 channels); the desktop audio engine test also runs at both ticks; the transmit latency suggestion (rounding, minimum, raising after late sends, no churn) |
 | ALSA driver | Real `aplay`/`arecord` through the daemon, 64-frame periods |
 | Linux packages | `.deb` installed in a container; portable tarball used as a user would |
 | Windows installer | In use on Windows 11; also run silently under Wine in development |

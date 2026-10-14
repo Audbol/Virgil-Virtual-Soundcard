@@ -20,6 +20,10 @@
 #define IDC_REMOTE_PW 1016
 #define IDC_REMOTE_INFO 1017
 #define IDC_EDITCONF 1018
+#define IDC_TICK 1020
+#define IDC_TXMIN 1021
+#define IDC_TXSUG 1022
+#define IDC_TXSUG_APPLY 1023
 
 // Dropouts and diagnostics, channel names and configuration editor windows
 // (main.cpp).
