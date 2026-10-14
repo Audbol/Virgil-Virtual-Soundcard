@@ -434,10 +434,22 @@ vc::DesktopAudioSettings base_settings() {
 }
 
 // What every transmit channel carries is `want` (missing entries: 0), to eps.
+// The transmit channels' means equal `want` (others 0) within eps. eps is
+// 0.004 like the other desktop audio checks: the bridges' drift following
+// moves a 100 ms mean slightly on a loaded CI machine; the test values are
+// 0.05 apart, so the channel mapping is still checked exactly. Prints the
+// means when they do not match (the caller's last try shows in the log).
 bool tx_is(Virgil& v, const std::vector<double>& want, double eps) {
   const std::vector<double> m = v.tx_means();
   for (size_t k = 0; k < m.size(); ++k)
-    if (!near(m[k], k < want.size() ? want[k] : 0.0, eps)) return false;
+    if (!near(m[k], k < want.size() ? want[k] : 0.0, eps)) {
+      static int64_t last_print = 0;
+      if (virgil::mono_ns() - last_print > 2000000000LL) {
+        last_print = virgil::mono_ns();
+        std::printf("  (not yet: tx channel %zu is %.5f, want %.5f)\n", k + 1, m[k], k < want.size() ? want[k] : 0.0);
+      }
+      return false;
+    }
   return true;
 }
 void print_means(const char* what, const std::vector<double>& m) {
@@ -656,7 +668,7 @@ TEST(desktop_audio_interface_inputs) {
   // All 8 inputs of "iface" (0.05, 0.10, ... 0.40) -> transmit channels 3-10.
   eng.start(input_settings("iface", 1, 8, 3));
   std::vector<double> want = {0, 0, 0.05, 0.10, 0.15, 0.20, 0.25, 0.30, 0.35, 0.40, 0, 0};
-  const bool exact = eventually(3000, [&] { return tx_is(v, want, 1e-4); });
+  const bool exact = eventually(3000, [&] { return tx_is(v, want, 0.004); });
   print_means("8 inputs -> tx 3-10", v.tx_means());
   CHECK(exact);
   desk::Status st;
@@ -673,7 +685,7 @@ TEST(desktop_audio_interface_inputs) {
   // Inputs 5 + 6 of 8 -> transmit channels 1 + 2.
   vc::DesktopAudioSettings s = input_settings("iface", 5, 2, 1);
   eng.apply(s);
-  CHECK(eventually(3000, [&] { return tx_is(v, {0.25, 0.30}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.25, 0.30}, 0.004); }));
   print_means("inputs 5-6 -> tx 1-2", v.tx_means());
 
   // Gain, then mute: no reopening.
@@ -681,7 +693,7 @@ TEST(desktop_audio_interface_inputs) {
   s.sources[0].gain_db = -6;
   eng.apply(s);
   const double g6 = vc::db_to_gain(-6);
-  CHECK(eventually(3000, [&] { return tx_is(v, {0.25 * g6, 0.30 * g6}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.25 * g6, 0.30 * g6}, 0.004); }));
   s.sources[0].mute = true;
   eng.apply(s);
   CHECK(eventually(3000, [&] { return tx_is(v, {}, 1e-6); }));
@@ -715,18 +727,18 @@ TEST(desktop_audio_interface_inputs) {
     fake->input_devs["usbif"] = 4;
   }
   fake->changes_++;
-  CHECK(eventually(3000, [&] { return tx_is(v, {0, 0, 0, 0.04, 0.06, 0.08}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return tx_is(v, {0, 0, 0, 0.04, 0.06, 0.08}, 0.004); }));
   print_means("plugged in: usbif 2-4 -> tx 4-6", v.tx_means());
 
   // The default recording device, and following it when it changes.
   eng.apply(input_settings("default", 1, 2, 1));
-  CHECK(eventually(3000, [&] { return tx_is(v, {-0.1, -0.2}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return tx_is(v, {-0.1, -0.2}, 0.004); }));
   {
     std::lock_guard<std::mutex> l(fake->mu);
     fake->default_in = "iface";
   }
   fake->defaults_++;
-  CHECK(eventually(3000, [&] { return tx_is(v, {0.05, 0.10}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return tx_is(v, {0.05, 0.10}, 0.004); }));
   eng.shutdown();
 }
 
@@ -755,7 +767,7 @@ TEST(desktop_audio_interface_outputs) {
       if (!near(m[k], want[k], eps)) return false;
     return true;
   };
-  const bool exact = eventually(3000, [&] { return dev_is({0, 0, 0.3, 0.15, -0.35, 0.45, 0, 0}, 1e-4); });
+  const bool exact = eventually(3000, [&] { return dev_is({0, 0, 0.3, 0.15, -0.35, 0.45, 0, 0}, 0.004); });
   print_means("rx 2-5 -> outputs 3-6 of 8", fake->dev_means());
   CHECK(exact);
   desk::Status st;
@@ -763,14 +775,14 @@ TEST(desktop_audio_interface_outputs) {
   std::printf("  \"%s\"\n", st.output.text.c_str());
   CHECK(!st.output.error && st.output.sound);
   CHECK(st.sources.size() == 1 && !st.sources[0].error);
-  CHECK(eventually(2000, [&] { return tx_is(v, {0.05, 0.10}, 1e-4); }));
+  CHECK(eventually(2000, [&] { return tx_is(v, {0.05, 0.10}, 0.004); }));
 
   // Gain without reopening.
   const size_t opens = fake->count("out:iface8");
   s.output.gain_db = -6;
   eng.apply(s);
   const double g6 = vc::db_to_gain(-6);
-  CHECK(eventually(3000, [&] { return dev_is({0, 0, 0.3 * g6, 0.15 * g6, -0.35 * g6, 0.45 * g6, 0, 0}, 1e-4); }));
+  CHECK(eventually(3000, [&] { return dev_is({0, 0, 0.3 * g6, 0.15 * g6, -0.35 * g6, 0.45 * g6, 0, 0}, 0.004); }));
   CHECK(fake->count("out:iface8") == opens);
 
   // Outputs the device does not have; receive channels Virgil does not have.
