@@ -319,6 +319,8 @@ say "  on this Pi:     http://127.0.0.1:8480/"
 say "  from a computer on the same network:"
 say "                  ssh -L 8480:127.0.0.1:8480 $user@$host.local"
 say "                  then open http://127.0.0.1:8480/ in that computer's browser"
+say "  or turn on 'Allow remote access' (with a password) in the panel's Settings,"
+say "                  then open http://$host.local:8480/ from any computer on the network"
 say ""
 say "Uninstall: sudo apt remove virgil   (sudo apt purge virgil also deletes the settings and Dante routes)"
 exit 0

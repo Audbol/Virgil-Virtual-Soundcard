@@ -15,7 +15,9 @@
 | Raspberry Pi, package only | `virgil_*_arm64.deb` | `sudo apt install ./virgil_*_arm64.deb` (no automatic setup). |
 | Raspberry Pi / arm64, no install | `Virgil-*-linux-arm64.tar.gz` | As for the Linux tarball. |
 
-Windows and the Raspberry Pi are in daily use. The macOS build (driver and Virgil Control) passes its automated tests but has not yet been run on a real Mac, so reports are welcome.
+Windows and the Raspberry Pi are in daily use, and macOS users run it too. The newest features are less proven: audio interface inputs and outputs (ASIO on Windows, Core Audio on macOS), desktop audio on macOS and Linux, the 0.5 ms mixing tick and the app windows that replace the browser pages pass their automated tests but have seen little real-world use yet, so reports are welcome (Settings › Dropouts and diagnostics… › Save report…).
+
+**Updating:** install the new version on every computer that runs Virgil; its drivers and service must be the same version.
 
 Then, in your routing software, subscribe Virgil's receive channels to your transmitters (and other devices to Virgil's transmit channels).
 
