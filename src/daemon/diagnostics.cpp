@@ -457,8 +457,8 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
     if (want > 40)
       h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old; receive "
                       "latency %.1f ms). Packets that late come from Wi-Fi or an overloaded network path: use "
-                      "wired Ethernet if you can, otherwise raise Receive latency to %g ms and turn on Wi-Fi "
-                      "network in Settings.",
+                      "wired Ethernet if you can, otherwise raise Receive latency to %g ms (and on Wi-Fi turn on Wi-Fi "
+                      "network) in Settings.",
                       age, rx_latency_ms_, want));
     else if (want > 0)
       h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old; receive "

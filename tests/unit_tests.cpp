@@ -738,7 +738,10 @@ TEST(config_wifi_latencies) {
   parse_config("[device]\nsample_rate = 96000\nlatency_us = 40000\ntx_latency_us = 40000\n", &forty, &err);
   CHECK(validate_config(&forty, &err));
   CHECK(ok.ring_frames == forty.ring_frames);
-  CHECK(forty.dante_rx_ring_frames() == forty.ring_frames && forty.dante_tx_ring_frames() == forty.ring_frames);
+  CHECK(forty.dante_tx_ring_frames() == forty.ring_frames);
+  // The receive ring always has room for a sender stamping 200 ms ahead
+  // (another Virgil's transmit latency) on top of the receive latency.
+  CHECK(forty.dante_rx_ring_frames() / 2 > forty.us_to_frames(40000 + kMaxLatencyUs));
   // ...while the Dante rings hold the latency with room to spare.
   for (uint32_t r : {ok.dante_rx_ring_frames(), ok.dante_tx_ring_frames()}) {
     CHECK((r & (r - 1)) == 0 && r >= ok.ring_frames);
@@ -1027,7 +1030,7 @@ TEST(engine_rx_second_copy_and_lost_late_audio) {
   sleep_until_ns(mono_ns() + 50000000LL);
   ShmHeader* h = e.header();
   const uint32_t P = cfg.period_frames(), ch = cfg.rx_channels;
-  const uint64_t mask = cfg.ring_frames - 1;
+  const uint64_t mask = cfg.ring_frames - 1, dmask = cfg.dante_rx_ring_frames() - 1;
   auto& drx = e.dante_rx_ring();
   const float* cap = rx_ring_at(h, cfg.ring_frames, cfg.tx_channels);
   const int32_t v = 0x10000000;
@@ -1038,7 +1041,7 @@ TEST(engine_rx_second_copy_and_lost_late_audio) {
     const uint64_t n = wait_next_tick(h);
     if (!n) break;
     for (uint64_t f = n - 2 * P; f < n - P; ++f)
-      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & mask) * ch + c] = v;
+      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & dmask) * ch + c] = v;
     if (h->now_frames.load() != n) continue;  // too slow: tick n+P may be done
     sleep_until_ns(mono_ns() + 5000000LL);
     saved = true;
@@ -1054,7 +1057,7 @@ TEST(engine_rx_second_copy_and_lost_late_audio) {
     if (!n) break;
     sleep_until_ns(mono_ns() + 100000LL);  // tick n has finished its copies
     for (uint64_t f = n - 3 * P; f < n - 2 * P; ++f)
-      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & mask) * ch + c] = v;
+      for (uint32_t c = 0; c < ch; ++c) drx[size_t(f & dmask) * ch + c] = v;
     sleep_until_ns(mono_ns() + 5000000LL);
     lost = e.counters().rx_lost_late_samples;
     if (lost != lost0) {

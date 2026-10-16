@@ -350,7 +350,7 @@ struct Virgil {
     sim_run = true;
     sim = std::thread([this] {
       auto& rx = e->dante_rx_ring();
-      const uint64_t dmask = c.ring_frames - 1;
+      const uint64_t dmask = c.dante_rx_ring_frames() - 1;
       uint64_t done = 0;
       while (sim_run) {
         wait_ms(1);
@@ -384,7 +384,7 @@ struct Virgil {
     const unsigned T = c.tx_channels;
     std::vector<double> m(T, 0.0);
     auto& tx = e->dante_tx_ring();
-    const uint64_t dmask = c.ring_frames - 1;
+    const uint64_t dmask = c.dante_tx_ring_frames() - 1;
     const uint64_t now = e->header()->now_frames.load();
     const uint64_t n = 4800, from = now - n - 96;
     uint64_t counted = 0;

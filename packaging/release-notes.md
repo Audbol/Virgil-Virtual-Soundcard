@@ -15,7 +15,7 @@
 | Raspberry Pi, package only | `virgil_*_arm64.deb` | `sudo apt install ./virgil_*_arm64.deb` (no automatic setup). |
 | Raspberry Pi / arm64, no install | `Virgil-*-linux-arm64.tar.gz` | As for the Linux tarball. |
 
-Windows and the Raspberry Pi are in daily use, and macOS users run it too. The newest features are less proven: audio interface inputs and outputs (ASIO on Windows, Core Audio on macOS), desktop audio on macOS and Linux, the 0.5 ms mixing tick and the app windows that replace the browser pages pass their automated tests but have seen little real-world use yet, so reports are welcome (Settings › Dropouts and diagnostics… › Save report…).
+Windows and the Raspberry Pi are in daily use, and macOS users run it too. The newest features are less proven: audio interface inputs and outputs (ASIO on Windows, Core Audio on macOS), desktop audio on macOS and Linux, the 0.5 ms mixing tick, the app windows that replace the browser pages, and the Wi-Fi settings (latencies up to 200 ms, the Wi-Fi clock filter; see *Dante over Wi-Fi* in the README) pass their automated tests but have seen little real-world use yet, so reports are welcome (Settings › Dropouts and diagnostics… › Save report…).
 
 **Updating:** install the new version on every computer that runs Virgil; its drivers and service must be the same version.
 

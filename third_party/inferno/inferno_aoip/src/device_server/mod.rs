@@ -258,7 +258,9 @@ impl DeviceServer {
       self.mdns_client.clone(),
       self.mcast_tx.clone(),
       channels_buffering,
-      self.tx_latency_ns, /* FIXME should be RX latency */
+      // Virgil patch: the receive latency (was the transmit latency, so a
+      // raised receive latency never reached the receive flows).
+      self.self_info.latency_ns.try_into().unwrap_or(u32::MAX),
       self.state_storage.clone(),
       srx2,
       self.ref_instant,

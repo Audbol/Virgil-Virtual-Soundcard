@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.8.0
+Includes everything in 0.7.2 and 0.7.1 below (both were test builds only).
+- **Fix: the receive latency now applies.** Inferno handed its receive flows the transmit latency instead of the receive latency, so a receive latency set differently from the transmit latency (now up to 200 ms for Wi-Fi) was ignored. Checked with two Inferno instances: a 200 ms receive latency now gives the flow 200 ms (it was 4 ms).
+- **Fix: a Virgil with a long receive latency no longer forces it on its receivers.** Virgil advertised its receive latency as the minimum its receivers must use: set to 200 ms, every device receiving from it buffered 200 ms, more than some can (and another Virgil's receive ring could wrap, playing audio at the wrong time or as late). It now advertises at most 4 ms, the default it always advertised; its packets are stamped its transmit latency ahead anyway.
+- The receive ring always has room for senders that stamp their audio up to 200 ms ahead (another Virgil's transmit latency) on top of the receive latency: 32768 frames at 48 kHz instead of 8192 (16 MB at 128 channels).
+- **Faster resampling for audio interfaces** with 5 or more channels (desktop audio): 1.8x at 8 channels, 4.4x at 64 (from about 19 % to 4 % of a core per 64-channel interface), with identical output.
+- The Wi-Fi hint for late audio no longer tells you to turn on Wi-Fi network when you may already have.
+
 ## 0.7.2
 - **Wi-Fi settings** (see *Dante over Wi-Fi* in the README). Dante is made for wired Ethernet; these make Virgil usable over Wi-Fi for monitoring and playback.
   - **Receive latency up to 200 ms** (was 40 ms). Only Inferno's own receive ring grows with it (128 channels at 96 kHz and 200 ms: about 67 MB); the shared memory the drivers use stays the size of a 40 ms setting, so the drivers don't change. *Dropouts and diagnostics* suggests up to 200 ms when audio arrived too late, and says that late packets point to Wi-Fi.

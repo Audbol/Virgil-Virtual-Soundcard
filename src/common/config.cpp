@@ -278,14 +278,16 @@ uint32_t pow2_at_least(uint64_t n, uint32_t floor) {
 }
 }  // namespace
 
-// Inferno writes received audio at its media time + the receive latency, up
-// to that far ahead of the engine reading it, plus however early senders
-// stamp their packets (another Virgil: up to its transmit latency, counted
-// as 40 ms). The engine silences half a ring ahead, so the ring is 4x that.
+// Inferno writes received audio at its stamp + the receive latency, so up to
+// that far ahead of the engine reading it, plus however early its sender
+// stamped it: another Virgil stamps its transmit latency ahead, up to
+// kMaxLatencyUs. The engine silences half a ring ahead: the write must stay
+// within half a ring (with a few ticks to spare), or a packet wraps and plays
+// at the wrong time or is counted late.
 uint32_t Config::dante_rx_ring_frames() const {
-  if (latency_us <= 40000) return ring_frames;  // ring_frames covers it
-  return pow2_at_least(4ull * (uint64_t(us_to_frames(latency_us)) + us_to_frames(40000) + 4ull * period_frames()),
-                       ring_frames);
+  return pow2_at_least(
+      2ull * (uint64_t(us_to_frames(latency_us)) + us_to_frames(kMaxLatencyUs) + 8ull * period_frames()),
+      ring_frames);
 }
 
 // Inferno sends samples up to the transmit latency late (after a stall) and

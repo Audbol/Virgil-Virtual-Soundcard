@@ -337,7 +337,7 @@ int loop_mode(const Args& a) {
   wait_ms(50);
   const uint64_t L = c.us_to_frames(c.tx_send_delay_us()), RL = c.us_to_frames(c.latency_us);
   const uint64_t D = c.us_to_frames(c.tx_latency_us) + RL;
-  const uint64_t dmask = c.ring_frames - 1;
+  const uint64_t txmask = c.dante_tx_ring_frames() - 1, rxmask = c.dante_rx_ring_frames() - 1;
   const unsigned C = 4;
   std::printf("Virgil loop: tx -> rx in %llu frames (%.1f ms) at %u Hz, clock %+.0f ppm\n", (unsigned long long)D,
               D * 1000.0 / c.sample_rate, c.sample_rate, a.ppm);
@@ -357,8 +357,8 @@ int loop_mode(const Args& a) {
       float pk = tx_peak.load();
       for (; done < sent_until; ++done)
         for (uint32_t ch = 0; ch < C; ++ch) {
-          const int32_t v = tx[size_t(done & dmask) * C + ch];
-          rx[size_t((done + D) & dmask) * C + ch] = v;
+          const int32_t v = tx[size_t(done & txmask) * C + ch];
+          rx[size_t((done + D) & rxmask) * C + ch] = v;
           pk = std::max(pk, std::fabs(float(v) / 2147483648.f));
         }
       tx_peak.store(pk);
@@ -619,7 +619,7 @@ int outputs_mode(const Args& a) {
     return 1;
   }
   const unsigned R = c.rx_channels, rate = c.sample_rate;
-  const uint64_t dmask = c.ring_frames - 1;
+  const uint64_t dmask = c.dante_rx_ring_frames() - 1;
   std::atomic<bool> sim_run{true};
   std::thread sim([&] {
     auto& rx = ve.dante_rx_ring();
