@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.2
 - **Wi-Fi settings** (see *Dante over Wi-Fi* in the README). Dante is made for wired Ethernet; these make Virgil usable over Wi-Fi for monitoring and playback.
   - **Receive latency up to 200 ms** (was 40 ms). Only Inferno's own receive ring grows with it (128 channels at 96 kHz and 200 ms: about 67 MB); the shared memory the drivers use stays the size of a 40 ms setting, so the drivers don't change. *Dropouts and diagnostics* suggests up to 200 ms when audio arrived too late, and says that late packets point to Wi-Fi.
   - **Wi-Fi network** clock filter (`[ptp] wifi = true`, a checkbox in Settings): the clock is judged over 16 Sync messages (4 s) instead of 4, realigns only for errors above 10 ms that 8 windows agree on (instead of 1 ms and 5), counts as locked within 2 ms, and waits 10 s instead of 4 before deciding the leader is gone. In a simulation of Wi-Fi timing (Sync messages 0.1-1 ms late, bursts of 5+ ms) the wired filter realigned the clock dozens of times in an hour, each a short gap in the audio; the Wi-Fi filter never did and stayed within 0.5 ms of the leader. It takes about four minutes to show the clock as locked.
