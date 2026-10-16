@@ -6,7 +6,7 @@
 IDI_VIRGIL ICON "virgil.ico"
 1 RT_MANIFEST "control.manifest"
 
-IDD_SETTINGS DIALOGEX 0, 0, 290, 392
+IDD_SETTINGS DIALOGEX 0, 0, 290, 430
 STYLE DS_SHELLFONT | DS_MODALFRAME | DS_CENTER | WS_POPUP | WS_CAPTION | WS_SYSMENU
 CAPTION "Virgil Settings"
 FONT 9, "Segoe UI", 400, 0, 0x1
@@ -26,7 +26,7 @@ BEGIN
     CONTROL         "", IDC_RXSPIN, "msctls_updown32", UDS_SETBUDDYINT | UDS_ALIGNRIGHT | UDS_AUTOBUDDY | UDS_ARROWKEYS | UDS_NOTHOUSANDS, 0, 0, 0, 0
     PUSHBUTTON      "Channel names...", IDC_NAMES, 204, 69, 70, 15
 
-    GROUPBOX        "Latency", -1, 7, 90, 276, 116
+    GROUPBOX        "Latency", -1, 7, 90, 276, 142
     LTEXT           "Receive (ms):", -1, 16, 106, 96, 9
     COMBOBOX        IDC_RXLAT, 118, 104, 50, 100, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP
     LTEXT           "Transmit (ms):", -1, 16, 122, 96, 9
@@ -34,25 +34,27 @@ BEGIN
     LTEXT           "(3.5 ms minimum)", IDC_TXMIN, 176, 122, 100, 9
     LTEXT           "Mixing tick:", -1, 16, 138, 96, 9
     COMBOBOX        IDC_TICK, 118, 136, 156, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-    LTEXT           "", IDC_TXSUG, 16, 153, 258, 34, SS_NOPREFIX
-    PUSHBUTTON      "Apply suggestion", IDC_TXSUG_APPLY, 200, 188, 74, 14, NOT WS_VISIBLE
+    LTEXT           "", IDC_TXWARN, 16, 153, 258, 24, SS_NOPREFIX
+    LTEXT           "", IDC_TXSUG, 16, 179, 258, 34, SS_NOPREFIX
+    PUSHBUTTON      "Apply suggestion", IDC_TXSUG_APPLY, 200, 214, 74, 14, NOT WS_VISIBLE
 
-    GROUPBOX        "Clock", -1, 7, 210, 276, 46
-    COMBOBOX        IDC_CLOCK, 16, 224, 258, 60, CBS_DROPDOWNLIST | WS_TABSTOP
-    AUTOCHECKBOX    "Become clock leader when no Dante device provides one", IDC_MASTER, 16, 240, 258, 10
+    GROUPBOX        "Clock", -1, 7, 236, 276, 58
+    COMBOBOX        IDC_CLOCK, 16, 250, 258, 60, CBS_DROPDOWNLIST | WS_TABSTOP
+    AUTOCHECKBOX    "Become clock leader when no Dante device provides one", IDC_MASTER, 16, 266, 258, 10
+    AUTOCHECKBOX    "Wi-Fi network (steadier clock; takes a few minutes to lock)", IDC_WIFI, 16, 279, 258, 10
 
-    GROUPBOX        "Remote access", -1, 7, 260, 276, 70
-    AUTOCHECKBOX    "Allow remote access from other computers (web browser)", IDC_REMOTE, 16, 273, 258, 10
-    LTEXT           "Password:", -1, 16, 289, 96, 9
-    EDITTEXT        IDC_REMOTE_PW, 118, 287, 156, 13, ES_PASSWORD | ES_AUTOHSCROLL
-    LTEXT           "", IDC_REMOTE_INFO, 16, 303, 258, 24, SS_NOPREFIX
+    GROUPBOX        "Remote access", -1, 7, 298, 276, 70
+    AUTOCHECKBOX    "Allow remote access from other computers (web browser)", IDC_REMOTE, 16, 311, 258, 10
+    LTEXT           "Password:", -1, 16, 327, 96, 9
+    EDITTEXT        IDC_REMOTE_PW, 118, 325, 156, 13, ES_PASSWORD | ES_AUTOHSCROLL
+    LTEXT           "", IDC_REMOTE_INFO, 16, 341, 258, 24, SS_NOPREFIX
 
-    LTEXT           "", IDC_ERR, 7, 334, 276, 16
-    LTEXT           "", IDC_CONFPATH, 7, 356, 188, 9, SS_PATHELLIPSIS | SS_NOPREFIX
-    PUSHBUTTON      "Edit configuration...", IDC_EDITCONF, 200, 353, 83, 15
-    PUSHBUTTON      "Dropouts and diagnostics...", IDC_DIAGBTN, 7, 372, 100, 15
-    DEFPUSHBUTTON   "Apply", IDOK, 172, 372, 52, 15
-    PUSHBUTTON      "Cancel", IDCANCEL, 230, 372, 52, 15
+    LTEXT           "", IDC_ERR, 7, 372, 276, 16
+    LTEXT           "", IDC_CONFPATH, 7, 394, 188, 9, SS_PATHELLIPSIS | SS_NOPREFIX
+    PUSHBUTTON      "Edit configuration...", IDC_EDITCONF, 200, 391, 83, 15
+    PUSHBUTTON      "Dropouts and diagnostics...", IDC_DIAGBTN, 7, 410, 100, 15
+    DEFPUSHBUTTON   "Apply", IDOK, 172, 410, 52, 15
+    PUSHBUTTON      "Cancel", IDCANCEL, 230, 410, 52, 15
 END
 
 // Resizable windows: main.cpp lays their controls out on WM_SIZE; the

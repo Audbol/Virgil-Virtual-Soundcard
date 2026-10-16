@@ -9,8 +9,8 @@ namespace vc {
 
 const char* const kRates[4] = {"44100", "48000", "88200", "96000"};
 const char* const kRateLabels[4] = {"44100 Hz", "48000 Hz", "88200 Hz", "96000 Hz"};
-const char* const kRxLatencies[6] = {"1", "2", "4", "5", "10", "20"};
-const char* const kTxLatencies[6] = {"3.5", "4", "5", "6", "10", "20"};
+const char* const kRxLatencies[9] = {"1", "2", "4", "5", "10", "20", "50", "100", "200"};
+const char* const kTxLatencies[7] = {"3.5", "4", "5", "6", "10", "20", "40"};
 const unsigned kTicks[2] = {1000, 500};
 const char* const kTickLabels[2] = {"1 ms (default)", "0.5 ms (lower latency, more CPU)"};
 
@@ -86,7 +86,7 @@ double min_tx_latency_ms(unsigned tick_us) { return (2.0 * tick_us + 500 + 1000)
 std::vector<std::string> tx_latency_presets(unsigned tick_us) {
   const double min = min_tx_latency_ms(tick_us);
   std::vector<std::string> out{g_text(min)};
-  for (double v : {3.0, 3.5, 4.0, 5.0, 6.0, 10.0, 20.0})
+  for (double v : {3.0, 3.5, 4.0, 5.0, 6.0, 10.0, 20.0, 40.0})
     if (v > min + 1e-9) out.push_back(g_text(v));
   return out;
 }
@@ -101,8 +101,14 @@ std::string tx_latency_problem(const SettingsForm& f) {
   if (v + 1e-9 < min)
     return "The transmit latency must be at least " + g_text(min) + " ms with a " + g_text(f.tick_us / 1000.0) +
            " ms mixing tick.";
-  if (v > 40 + 1e-9) return "The transmit latency can be at most 40 ms.";
+  if (v > 200 + 1e-9) return "The transmit latency can be at most 200 ms.";
   return "";
+}
+
+std::string tx_latency_warning(const SettingsForm& f) {
+  if (!(std::strtod(f.tx_latency_ms.c_str(), nullptr) > 40 + 1e-9)) return "";
+  return "Above 40 ms is experimental: the receiving Dante devices must buffer audio that arrives this early, and "
+         "some drop it. Test with your devices.";
 }
 
 std::string tx_suggestion_note(const TxSuggestion& s, unsigned form_tick_us) {
@@ -155,6 +161,7 @@ SettingsForm load_settings(const std::string& c, const std::vector<Interface>& a
   f.tick_us = conf_tick(c);
   f.local_clock = lower(conf_get(c, "device", "clock")) == "free";
   f.master_capable = truthy(conf_get(c, "ptp", "master_capable"));
+  f.wifi = truthy(conf_get(c, "ptp", "wifi"));
   f.remote_access = truthy(conf_get(c, "device", "remote_access"));
   f.remote_password = conf_get(c, "device", "remote_password");
   return f;
@@ -175,6 +182,7 @@ std::string apply_settings(const std::string& conf, const SettingsForm& f) {
   if (f.tick_us != conf_tick(conf)) c = conf_set(c, "device", "tick_us", std::to_string(f.tick_us));
   c = conf_set(c, "device", "clock", f.local_clock ? "free" : "ptp");
   c = conf_set(c, "ptp", "master_capable", f.master_capable ? "true" : "false");
+  c = conf_set(c, "ptp", "wifi", f.wifi ? "true" : "false");
   // Written only when used, so files that never had them stay as they are.
   if (f.remote_access || !conf_get(conf, "device", "remote_access").empty())
     c = conf_set(c, "device", "remote_access", f.remote_access ? "true" : "false");

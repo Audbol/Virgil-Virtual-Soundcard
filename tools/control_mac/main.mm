@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -309,6 +310,25 @@ RemoteInfo parse_remote(const std::string& status_body) {
 @implementation VCBlockTarget
 - (void)fire:(id)sender {
   if (self.handler) self.handler(sender);
+}
+@end
+
+// Delegate of a combo box: runs a block with its text as it is typed or
+// picked from the list (kept alive like VCBlockTarget).
+@interface VCComboWatcher : NSObject <NSComboBoxDelegate>
+@property(nonatomic, copy) void (^handler)(NSString* text);
+@end
+
+@implementation VCComboWatcher
+- (void)controlTextDidChange:(NSNotification*)n {
+  NSComboBox* cb = n.object;
+  if (self.handler) self.handler(cb.stringValue);
+}
+- (void)comboBoxSelectionDidChange:(NSNotification*)n {
+  // Sent before the field shows the item picked.
+  NSComboBox* cb = n.object;
+  if (self.handler && cb.indexOfSelectedItem >= 0)
+    self.handler([NSString stringWithFormat:@"%@", [cb itemObjectValueAtIndex:cb.indexOfSelectedItem]]);
 }
 @end
 
@@ -896,31 +916,47 @@ RemoteInfo parse_remote(const std::string& status_body) {
   NSStackView* ch = [NSStackView stackViewWithViews:@[ txch, [NSTextField labelWithString:@"/"], rxch ]];
   [txch.widthAnchor constraintEqualToConstant:50].active = YES;
   [rxch.widthAnchor constraintEqualToConstant:50].active = YES;
-  NSComboBox* rxl = combo(vc::kRxLatencies, 6, f.rx_latency_ms);
-  NSComboBox* txl = combo(vc::kTxLatencies, 6, f.tx_latency_ms);
+  NSComboBox* rxl = combo(vc::kRxLatencies, int(std::size(vc::kRxLatencies)), f.rx_latency_ms);
+  NSComboBox* txl = combo(vc::kTxLatencies, int(std::size(vc::kTxLatencies)), f.tx_latency_ms);
   NSTextField* txlLabel = label(@"Transmit latency (ms, 3.5 min):");
   NSPopUpButton* tick = popup(vc::tick_labels(f), vc::tick_index(f));
-  // The daemon's transmit latency suggestion, and a button that puts it in
-  // the field (Apply still saves it). A vertical stack drops the hidden button.
+  // Above 40 ms, a note on the transmit latency typed; then the daemon's
+  // suggestion, and a button that puts it in the field (Apply still saves
+  // it). A vertical stack drops the hidden ones.
+  NSTextField* txlWarn = [NSTextField wrappingLabelWithString:@""];
+  txlWarn.preferredMaxLayoutWidth = 300;
+  txlWarn.font = [NSFont systemFontOfSize:11];
   NSTextField* sugText = [NSTextField wrappingLabelWithString:@""];
   sugText.preferredMaxLayoutWidth = 300;
   sugText.textColor = [NSColor secondaryLabelColor];
   sugText.font = [NSFont systemFontOfSize:11];
   VCBlockTarget* sugTarget = [[VCBlockTarget alloc] init];
   const vc::TxSuggestion suggestion = sug;  // a copy for the blocks
-  sugTarget.handler = ^(id) {
-    txl.stringValue = ns(suggestion.suggested_text());
-  };
   NSButton* sugButton = [NSButton buttonWithTitle:ns("Apply suggestion (" + sug.suggested_text() + " ms)")
                                            target:sugTarget
                                            action:@selector(fire:)];
-  NSStackView* sugBox = [NSStackView stackViewWithViews:@[ sugText, sugButton ]];
+  NSStackView* sugBox = [NSStackView stackViewWithViews:@[ txlWarn, sugText, sugButton ]];
   sugBox.orientation = NSUserInterfaceLayoutOrientationVertical;
   sugBox.alignment = NSLayoutAttributeLeading;
   sugBox.spacing = 4;
+  const vc::SettingsForm f0 = f;
+  void (^txlChanged)(NSString*) = ^(NSString* text) {
+    vc::SettingsForm g = f0;
+    g.tx_latency_ms = text.UTF8String ?: "";
+    const std::string warning = vc::tx_latency_warning(g);
+    txlWarn.stringValue = ns(warning);
+    txlWarn.hidden = warning.empty();
+    sugBox.hidden = sugText.hidden && txlWarn.hidden;
+  };
+  VCComboWatcher* txlWatcher = [[VCComboWatcher alloc] init];
+  txlWatcher.handler = txlChanged;
+  txl.delegate = txlWatcher;
+  sugTarget.handler = ^(id) {
+    txl.stringValue = ns(suggestion.suggested_text());
+    txlChanged(txl.stringValue);
+  };
   // The tick sets the transmit latency's presets and minimum, and whether the
   // suggestion (measured at one tick) applies.
-  const vc::SettingsForm f0 = f;
   void (^tickChanged)(void) = ^{
     const unsigned t = vc::tick_of_index(f0, int(tick.indexOfSelectedItem));
     NSString* keep = txl.stringValue;
@@ -934,7 +970,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
     sugText.stringValue = ns(note);
     sugText.hidden = note.empty();
     sugButton.hidden = !vc::tx_suggestion_applicable(suggestion, t);
-    sugBox.hidden = sugText.hidden;
+    sugBox.hidden = sugText.hidden && txlWarn.hidden;
   };
   VCBlockTarget* tickTarget = [[VCBlockTarget alloc] init];
   tickTarget.handler = ^(id) {
@@ -942,13 +978,17 @@ RemoteInfo parse_remote(const std::string& status_body) {
   };
   tick.target = tickTarget;
   tick.action = @selector(fire:);
-  self.settingsTargets = @[ sugTarget, tickTarget ];
+  self.settingsTargets = @[ sugTarget, tickTarget, txlWatcher ];
   NSPopUpButton* clock =
       popup({"Follow the Dante clock leader (PTP)", "Local clock only (testing)"}, f.local_clock ? 1 : 0);
   NSButton* master = [NSButton checkboxWithTitle:@"Become clock leader when no Dante device provides one"
                                           target:nil
                                           action:nil];
   master.state = f.master_capable ? NSControlStateValueOn : NSControlStateValueOff;
+  NSButton* wifi = [NSButton checkboxWithTitle:@"Wi-Fi network (steadier clock; takes a few minutes to lock)"
+                                        target:nil
+                                        action:nil];
+  wifi.state = f.wifi ? NSControlStateValueOn : NSControlStateValueOff;
   // The web panel from other computers ([device] remote_access / remote_password).
   NSButton* remoteOn = [NSButton checkboxWithTitle:@"Allow remote access from other computers (web browser)"
                                             target:nil
@@ -984,6 +1024,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
     @[ [NSGridCell emptyContentView], sugBox ],
     @[ label(@"Clock:"), clock ],
     @[ [NSGridCell emptyContentView], master ],
+    @[ [NSGridCell emptyContentView], wifi ],
     @[ [NSGridCell emptyContentView], remoteOn ],
     @[ label(@"Remote password:"), password ],
     @[ [NSGridCell emptyContentView], remoteInfo ],
@@ -995,14 +1036,18 @@ RemoteInfo parse_remote(const std::string& status_body) {
   grid.translatesAutoresizingMaskIntoConstraints = NO;
 
   // Size the dialog for the longest suggestion text (it changes with the
-  // tick chosen), then show the real one.
+  // tick chosen) and the note above 40 ms, then show the real ones.
   {
     const unsigned other = vc::tick_of_index(f, vc::tick_index(f) == 0 ? 1 : 0);
     const std::string a1 = vc::tx_suggestion_note(sug, f.tick_us), a2 = vc::tx_suggestion_note(sug, other);
     sugText.stringValue = ns(a1.size() > a2.size() ? a1 : a2);
     sugText.hidden = !sug.present;
     sugButton.hidden = !sug.present;
-    sugBox.hidden = !sug.present;
+    vc::SettingsForm high = f;
+    high.tx_latency_ms = "200";
+    txlWarn.stringValue = ns(vc::tx_latency_warning(high));
+    txlWarn.hidden = NO;
+    sugBox.hidden = NO;
   }
 
   NSAlert* a = [[NSAlert alloc] init];
@@ -1021,6 +1066,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
   [grid.topAnchor constraintEqualToAnchor:box.topAnchor].active = YES;
   a.accessoryView = box;
   tickChanged();
+  txlChanged(txl.stringValue);
   if (@available(macOS 10.14, *)) a.window.appearance = [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua];
 
   const std::string base = conf;  // a copy: blocks would capture the reference itself
@@ -1040,6 +1086,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
     g.tick_us = vc::tick_of_index(f0, int(tick.indexOfSelectedItem));
     g.local_clock = clock.indexOfSelectedItem == 1;
     g.master_capable = master.state == NSControlStateValueOn;
+    g.wifi = wifi.state == NSControlStateValueOn;
     g.remote_access = remoteOn.state == NSControlStateValueOn;
     g.remote_password = password.stringValue.UTF8String ?: "";
     return g;

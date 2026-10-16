@@ -26,6 +26,7 @@
 * { box-sizing: border-box; }
 html, body { margin: 0; background: var(--bg); color: var(--text);
   font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, Ubuntu, sans-serif; }
+[hidden] { display: none !important; }  /* also for elements styled display: flex */
 header { position: sticky; top: 0; z-index: 5; display: flex; align-items: center; gap: 14px;
   padding: 12px 24px; background: var(--panel); border-bottom: 1px solid var(--line); }
 .logo { width: 38px; height: 38px; flex: none; display: block; }
@@ -89,6 +90,7 @@ textarea { font-family: var(--mono); font-size: 12.5px; min-height: 260px; resiz
 details summary { cursor: pointer; color: var(--muted); margin-top: 14px; font-size: 13px; }
 .txsug { grid-column: 1 / -1; display: flex; align-items: center; gap: 12px; font-size: 12.5px; color: var(--muted); margin-top: -4px; }
 .txsug button { flex: none; }
+.txwarn { grid-column: 1 / -1; font-size: 12.5px; margin: -4px 0 0; }
 label.check { display: flex; align-items: center; gap: 8px; color: var(--text); grid-column: 1 / -1; }
 label.check input { width: auto; margin: 0; }
 .inline-num { width: 70px; display: inline-block; padding: 4px 6px; }
@@ -199,16 +201,19 @@ footer { color: var(--muted); font-size: 12px; text-align: center; }
         <option>44100</option><option>48000</option><option>88200</option><option>96000</option></select></label>
       <label>Playback channels (Dante transmit)<input id="f-txch" data-key="tx_channels" type="number" min="0" max="128"></label>
       <label>Capture channels (Dante receive)<input id="f-rxch" data-key="rx_channels" type="number" min="0" max="128"></label>
-      <label>Receive latency (ms)<input id="f-lat" data-key="latency_us" data-conv="ms" type="number" min="0.5" max="40" step="0.5"></label>
-      <label>Transmit latency (ms) <span id="txlat-min"></span><input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="3.5" max="40" step="0.5"></label>
+      <label>Receive latency (ms)<input id="f-lat" data-key="latency_us" data-conv="ms" type="number" min="0.5" max="200" step="0.5"></label>
+      <label>Transmit latency (ms) <span id="txlat-min"></span><input id="f-txlat" data-key="tx_latency_us" data-conv="ms" type="number" min="3.5" max="200" step="0.5"></label>
       <label>Mixing tick<select id="f-tick" data-key="tick_us">
         <option value="1000">1 ms (default)</option><option value="500">0.5 ms (lower latency, more CPU)</option></select></label>
+      <p class="txwarn" id="txwarn" hidden></p>
       <div class="txsug" id="txsug" hidden><span id="txsug-text"></span>
         <button id="txsug-apply" type="button" hidden>Apply suggestion</button></div>
       <label>Clock<select id="f-clock" data-key="clock">
         <option value="ptp">PTP (follow the Dante clock leader)</option><option value="free">Local clock only (testing)</option></select></label>
       <label class="check"><input id="f-master" type="checkbox" data-key="master_capable" data-section="ptp" data-conv="bool">
         Become clock leader when no Dante device provides one</label>
+      <label class="check"><input id="f-wifi" type="checkbox" data-key="wifi" data-section="ptp" data-conv="bool">
+        Wi-Fi network (steadier clock; takes a few minutes to lock)</label>
       <label class="check"><input id="f-remote" type="checkbox" data-key="remote_access" data-conv="bool">
         Allow remote access: open this page from other computers (needs a password)</label>
       <label>Remote access password (8 or more characters)<input id="f-rpw" data-key="remote_password" type="password" autocomplete="new-password"></label>
@@ -442,9 +447,9 @@ function render(st) {
 }
 
 // ---------- settings form <-> config text ----------
-const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-tick", "f-clock", "f-master", "f-remote", "f-rpw"];
+const FIELDS = ["f-name", "f-interface", "f-rate", "f-txch", "f-rxch", "f-lat", "f-txlat", "f-tick", "f-clock", "f-master", "f-wifi", "f-remote", "f-rpw"];
 const DEFAULTS = { sample_rate: "48000", clock: "ptp", latency_us: "4000", tx_latency_us: "4000", tick_us: "1000",
-                   master_capable: "false", remote_access: "false", remote_password: "" };
+                   master_capable: "false", wifi: "false", remote_access: "false", remote_password: "" };
 // Mixing tick: the smallest transmit latency is two ticks + 1.5 ms (3.5 ms at
 // 1 ms, 2.5 ms at 0.5 ms), as the daemon checks it.
 const formTick = () => Number($("f-tick").value) || 1000;
@@ -472,6 +477,13 @@ function renderSug() {
   const btn = $("txsug-apply");
   btn.hidden = !(actionable && !otherTick);
   btn.textContent = `Apply suggestion (${g.suggested_ms} ms)`;
+}
+// Above 40 ms the transmit latency is allowed (up to 200 ms), with a note.
+function renderTxWarn() {
+  const w = $("txwarn");
+  w.hidden = !(Number($("f-txlat").value) > 40);
+  w.textContent = w.hidden ? "" : "Above 40 ms is experimental: the receiving Dante devices must buffer audio that " +
+    "arrives this early, and some drop it. Test with your devices.";
 }
 $("txsug-apply").addEventListener("click", () => {
   if (!S.sug) return;
@@ -517,6 +529,7 @@ function fillForm() {
   $("cfgtext").value = t;
   fillNames();
   renderSug();
+  renderTxWarn();
 }
 const isDirty = () => S.cfg !== S.savedCfg;
 function markDirty() {
@@ -529,6 +542,7 @@ FIELDS.forEach(id => $(id).addEventListener($(id).type === "checkbox" ? "change"
   $("cfgtext").value = S.cfg; markDirty();
   if (/_channels$/.test(e.target.dataset.key)) fillNames();
   if (e.target.id === "f-tick") renderSug();
+  if (e.target.id === "f-txlat") renderTxWarn();
 }));
 $("cfgtext").addEventListener("input", e => { S.cfg = e.target.value; fillFormFromText(); markDirty(); });
 function fillFormFromText() { const keep = $("cfgtext").value; fillForm(); $("cfgtext").value = keep; }

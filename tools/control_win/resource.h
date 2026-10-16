@@ -24,6 +24,8 @@
 #define IDC_TXMIN 1021
 #define IDC_TXSUG 1022
 #define IDC_TXSUG_APPLY 1023
+#define IDC_WIFI 1024
+#define IDC_TXWARN 1025
 
 // Dropouts and diagnostics, channel names and configuration editor windows
 // (main.cpp).

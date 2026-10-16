@@ -743,8 +743,8 @@ constexpr int kResponseConfig = 3;
 // The open settings dialog (one at a time). Shared with an Apply in flight,
 // which may finish after the dialog was closed.
 struct SettingsUi {
-  GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *remote, *password, *err;
-  GtkWidget *tick, *txl_label, *sug_label, *sug_button;
+  GtkWidget *d = nullptr, *name, *iface, *rate, *txch, *rxch, *rxl, *txl, *clock, *master, *wifi, *remote, *password, *err;
+  GtkWidget *tick, *txl_label, *txl_warn, *sug_label, *sug_button;
   std::vector<GtkWidget*> more;  // Dropouts and diagnostics…, Channel names…, Edit configuration…
   vc::SettingsForm f;
   vc::TxSuggestion sug;  // the daemon's transmit latency suggestion
@@ -777,6 +777,15 @@ void settings_tick_changed(SettingsUi& ui) {
   gtk_widget_set_visible(ui.sug_button, vc::tx_suggestion_applicable(ui.sug, tick));
 }
 
+// The note under the transmit latency field above 40 ms.
+void settings_txl_changed(SettingsUi& ui) {
+  vc::SettingsForm f = ui.f;
+  f.tx_latency_ms = gtk_entry_get_text(GTK_ENTRY(gtk_bin_get_child(GTK_BIN(ui.txl))));
+  const std::string warning = vc::tx_latency_warning(f);
+  gtk_label_set_text(GTK_LABEL(ui.txl_warn), warning.c_str());
+  gtk_widget_set_visible(ui.txl_warn, !warning.empty());
+}
+
 void on_settings_response(GtkDialog*, int response, gpointer) {
   const std::shared_ptr<SettingsUi> ui = g_settings;
   if (!ui || !ui->d || ui->applying) return;  // closing waits for Apply to finish
@@ -801,6 +810,7 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
   f.tick_us = vc::tick_of_index(f, gtk_combo_box_get_active(GTK_COMBO_BOX(ui->tick)));
   f.local_clock = gtk_combo_box_get_active(GTK_COMBO_BOX(ui->clock)) == 1;
   f.master_capable = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->master));
+  f.wifi = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->wifi));
   f.remote_access = gtk_toggle_button_get_active(GTK_TOGGLE_BUTTON(ui->remote));
   f.remote_password = gtk_entry_get_text(GTK_ENTRY(ui->password));
   const std::string latency_problem = vc::tx_latency_problem(f);
@@ -910,6 +920,16 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
   ui->txl_label = label("Transmit (ms, 3.5 minimum):");  // presets and minimum: settings_tick_changed
   gtk_grid_attach(GTK_GRID(grid), ui->txl_label, 0, row, 1, 1);
   gtk_grid_attach(GTK_GRID(grid), txl, 1, row++, 1, 1);
+  GtkWidget* txl_warn = ui->txl_warn = gtk_label_new("");  // settings_txl_changed
+  gtk_label_set_line_wrap(GTK_LABEL(txl_warn), TRUE);
+  gtk_label_set_max_width_chars(GTK_LABEL(txl_warn), 52);
+  gtk_label_set_xalign(GTK_LABEL(txl_warn), 0);
+  gtk_widget_set_no_show_all(txl_warn, TRUE);
+  gtk_grid_attach(GTK_GRID(grid), txl_warn, 1, row++, 1, 1);
+  g_signal_connect(txl, "changed", G_CALLBACK(+[](GtkComboBox*, gpointer) {
+                     if (g_settings && g_settings->d) settings_txl_changed(*g_settings);
+                   }),
+                   nullptr);
   GtkWidget* tick = ui->tick = gtk_combo_box_text_new();
   for (const auto& l : vc::tick_labels(f)) gtk_combo_box_text_append_text(GTK_COMBO_BOX_TEXT(tick), l.c_str());
   gtk_combo_box_set_active(GTK_COMBO_BOX(tick), vc::tick_index(f));
@@ -952,6 +972,10 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
       gtk_check_button_new_with_label("Become clock leader when no Dante device provides one");
   gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(master), f.master_capable);
   gtk_grid_attach(GTK_GRID(grid), master, 0, row++, 2, 1);
+  GtkWidget* wifi = ui->wifi =
+      gtk_check_button_new_with_label("Wi-Fi network (steadier clock; takes a few minutes to lock)");
+  gtk_toggle_button_set_active(GTK_TOGGLE_BUTTON(wifi), f.wifi);
+  gtk_grid_attach(GTK_GRID(grid), wifi, 0, row++, 2, 1);
 
   // The web control panel from other computers (only this computer may change it).
   heading("Remote access");
@@ -1034,6 +1058,7 @@ void build_settings(const std::string& conf, const std::vector<vc::Interface>& i
                    nullptr);
   g_settings = ui;
   settings_tick_changed(*ui);
+  settings_txl_changed(*ui);
   gtk_widget_show_all(d);
 }
 

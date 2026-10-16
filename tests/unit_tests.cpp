@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <iterator>
 #include <memory>
 #include <random>
 
@@ -663,6 +664,7 @@ TEST(control_conf_aliases_and_last_wins) {
   CHECK(f.master_capable && f.local_clock);
   CHECK(vc::load_settings("[device]\n", {}).tx_channels == 8);
   CHECK(!vc::load_settings("[ptp]\nmaster_capable = off\n", {}).master_capable);
+  CHECK(!f.wifi && vc::load_settings("[ptp]\nwifi = on\n", {}).wifi);
 
   // Saving changes every occurrence, so the daemon reads the new value.
   vc::SettingsForm g = f;
@@ -673,6 +675,15 @@ TEST(control_conf_aliases_and_last_wins) {
   CHECK(parse_config(out, &d, &err));
   CHECK(d.tx_channels == 3 && d.latency_us == 5000 && d.rx_channels == 0);
   CHECK(out.find("playback_channels = 3") != std::string::npos);
+  // The Wi-Fi clock filter, read back as the daemon reads it.
+  g.wifi = true;
+  const std::string on = vc::apply_settings(t, g);
+  CHECK(parse_config(on, &d, &err) && d.ptp_wifi && vc::load_settings(on, {}).wifi);
+  g.wifi = false;
+  const std::string off = vc::apply_settings(on, g);
+  CHECK(parse_config(off, &d, &err) && !d.ptp_wifi && !vc::load_settings(off, {}).wifi);
+  // Receive latency presets up to the daemon's maximum.
+  CHECK(std::string(vc::kRxLatencies[std::size(vc::kRxLatencies) - 1]) == std::to_string(kMaxLatencyUs / 1000));
   // A key that is not there yet goes into [device], or [network] without one.
   CHECK(vc::conf_set("[network]\nname = B\n", "device", "interface", "eth0") ==
         "[network]\nname = B\ninterface = eth0\n");
@@ -1996,13 +2007,24 @@ TEST(control_settings_tick_and_tx_suggestion) {
   CHECK(vc::min_tx_latency_ms(1000) == 3.5 && vc::min_tx_latency_ms(500) == 2.5);
   CHECK(vc::tx_latency_min_text(500) == "(2.5 ms minimum)" && vc::tx_latency_min_text(1000) == "(3.5 ms minimum)");
   const auto p1 = vc::tx_latency_presets(1000), p5 = vc::tx_latency_presets(500);
-  CHECK(p1.size() == 6 && p1[0] == "3.5" && p1[1] == "4" && p1[5] == "20");
+  CHECK(p1.size() == 7 && p1[0] == "3.5" && p1[1] == "4" && p1[5] == "20" && p1[6] == "40");
+  CHECK(p1.size() == std::size(vc::kTxLatencies));
   for (size_t i = 0; i < p1.size(); ++i) CHECK(p1[i] == vc::kTxLatencies[i]);
-  CHECK(p5.size() == 8 && p5[0] == "2.5" && p5[1] == "3" && p5[2] == "3.5");
+  CHECK(p5.size() == 9 && p5[0] == "2.5" && p5[1] == "3" && p5[2] == "3.5");
   f.tick_us = 1000;
   CHECK(vc::tx_latency_problem(f).find("at least 3.5 ms with a 1 ms mixing tick") != std::string::npos);
+  // Up to 200 ms; past 40 ms with a warning (receivers must buffer it).
+  f.tx_latency_ms = "40";
+  CHECK(vc::tx_latency_problem(f).empty() && vc::tx_latency_warning(f).empty());
   f.tx_latency_ms = "41";
-  CHECK(!vc::tx_latency_problem(f).empty());
+  CHECK(vc::tx_latency_problem(f).empty() && vc::tx_latency_warning(f).find("Above 40 ms") != std::string::npos);
+  f.tx_latency_ms = "200";
+  CHECK(vc::tx_latency_problem(f).empty() && !vc::tx_latency_warning(f).empty());
+  Config c200;
+  CHECK(parse_config(vc::apply_settings(conf, f), &c200, &err) && validate_config(&c200, &err) &&
+        c200.tx_latency_us == 200000);
+  f.tx_latency_ms = "201";
+  CHECK(vc::tx_latency_problem(f) == "The transmit latency can be at most 200 ms.");
   f.tx_latency_ms = "x";
   CHECK(!vc::tx_latency_problem(f).empty());
   // A hand-edited tick is listed and kept.

@@ -24,6 +24,7 @@ struct SettingsForm {
   unsigned tick_us = 1000;
   bool local_clock = false;  // clock = free
   bool master_capable = false;
+  bool wifi = false;  // [ptp] wifi: the clock filter for Wi-Fi networks
   // Web panel from other computers ([device] remote_access / remote_password).
   // Only this computer may change these (the daemon refuses remote clients).
   bool remote_access = false;
@@ -35,8 +36,8 @@ struct SettingsForm {
 
 extern const char* const kRates[4];
 extern const char* const kRateLabels[4];
-extern const char* const kRxLatencies[6];
-extern const char* const kTxLatencies[6];  // at the 1 ms tick (tx_latency_presets(1000))
+extern const char* const kRxLatencies[9];
+extern const char* const kTxLatencies[7];  // at the 1 ms tick (tx_latency_presets(1000))
 
 // Mixing tick choices: 1 ms (default) and 0.5 ms (lower latency, more CPU).
 extern const unsigned kTicks[2];
@@ -51,12 +52,15 @@ unsigned tick_of_index(const SettingsForm& f, int index);
 // ticks + 1.5 ms (3.5 ms at 1 ms, 2.5 ms at 0.5 ms; virgil::Config::
 // min_tx_latency_us).
 double min_tx_latency_ms(unsigned tick_us);
-// Transmit latency menu entries for a tick, from its minimum up to 20 ms.
+// Transmit latency menu entries for a tick, from its minimum up to 40 ms.
 std::vector<std::string> tx_latency_presets(unsigned tick_us);
 // "(3.5 ms minimum)".
 std::string tx_latency_min_text(unsigned tick_us);
 // Why f.tx_latency_ms cannot be saved at f.tick_us, or "".
 std::string tx_latency_problem(const SettingsForm& f);
+// The note for a transmit latency above 40 ms (allowed, up to 200 ms, but
+// not every receiver buffers that much), or "".
+std::string tx_latency_warning(const SettingsForm& f);
 
 // The line under the transmit latency field: the daemon's suggestion (or
 // its progress), "" without one. `form_tick_us` is the tick chosen in the

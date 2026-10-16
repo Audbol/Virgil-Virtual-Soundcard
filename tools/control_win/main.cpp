@@ -1007,6 +1007,15 @@ void settings_tick_update(HWND d, const SettingsData& data) {
   ShowWindow(GetDlgItem(d, IDC_TXSUG_APPLY), vc::tx_suggestion_applicable(data.sug, tick) ? SW_SHOW : SW_HIDE);
 }
 
+// The note under the transmit latency above 40 ms. `text` is the field's
+// text (on CBN_SELCHANGE the edit field does not show the item picked yet).
+void settings_txwarn_update(HWND d, const SettingsData& data, std::wstring text) {
+  std::replace(text.begin(), text.end(), L',', L'.');  // as read_ms takes it
+  vc::SettingsForm f = data.form;
+  f.tx_latency_ms = narrow(text);
+  SetDlgItemTextW(d, IDC_TXWARN, widen(vc::tx_latency_warning(f)).c_str());
+}
+
 // The password field follows the checkbox; below them, where other computers
 // find the panel while it listens, and the warning that goes with it.
 void settings_remote_update(HWND d, const SettingsData& data) {
@@ -1049,10 +1058,12 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       for (const auto& l : vc::tick_labels(f)) combo_add(d, IDC_TICK, widen(l));
       SendDlgItemMessageW(d, IDC_TICK, CB_SETCURSEL, WPARAM(vc::tick_index(f)), 0);
       settings_tick_update(d, data);  // transmit latency presets, minimum and suggestion
+      settings_txwarn_update(d, data, get_text(d, IDC_TXLAT));
       combo_add(d, IDC_CLOCK, L"Follow the Dante clock leader (PTP)");
       combo_add(d, IDC_CLOCK, L"Local clock only (testing)");
       SendDlgItemMessageW(d, IDC_CLOCK, CB_SETCURSEL, f.local_clock ? 1 : 0, 0);
       CheckDlgButton(d, IDC_MASTER, f.master_capable ? BST_CHECKED : BST_UNCHECKED);
+      CheckDlgButton(d, IDC_WIFI, f.wifi ? BST_CHECKED : BST_UNCHECKED);
       CheckDlgButton(d, IDC_REMOTE, f.remote_access ? BST_CHECKED : BST_UNCHECKED);
       SendDlgItemMessageW(d, IDC_REMOTE_PW, EM_LIMITTEXT, 128, 0);
       SetDlgItemTextW(d, IDC_REMOTE_PW, widen(f.remote_password).c_str());
@@ -1106,8 +1117,21 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         settings_tick_update(d, *data);
         return TRUE;
       }
+      if (LOWORD(wp) == IDC_TXLAT && HIWORD(wp) == CBN_EDITCHANGE) {
+        settings_txwarn_update(d, *data, get_text(d, IDC_TXLAT));
+        return TRUE;
+      }
+      if (LOWORD(wp) == IDC_TXLAT && HIWORD(wp) == CBN_SELCHANGE) {
+        const LRESULT i = SendDlgItemMessageW(d, IDC_TXLAT, CB_GETCURSEL, 0, 0);
+        wchar_t item[64] = L"";
+        if (i != CB_ERR && SendDlgItemMessageW(d, IDC_TXLAT, CB_GETLBTEXTLEN, WPARAM(i), 0) < 64)
+          SendDlgItemMessageW(d, IDC_TXLAT, CB_GETLBTEXT, WPARAM(i), reinterpret_cast<LPARAM>(item));
+        settings_txwarn_update(d, *data, item);
+        return TRUE;
+      }
       if (LOWORD(wp) == IDC_TXSUG_APPLY) {  // into the field; Apply saves it
         SetDlgItemTextW(d, IDC_TXLAT, widen(data->sug.suggested_text()).c_str());
+        settings_txwarn_update(d, *data, get_text(d, IDC_TXLAT));
         return TRUE;
       }
       if (LOWORD(wp) == IDCANCEL) {  // a POST in flight still completes; its result is dropped
@@ -1137,6 +1161,7 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
         }
         f.local_clock = SendDlgItemMessageW(d, IDC_CLOCK, CB_GETCURSEL, 0, 0) == 1;
         f.master_capable = IsDlgButtonChecked(d, IDC_MASTER) == BST_CHECKED;
+        f.wifi = IsDlgButtonChecked(d, IDC_WIFI) == BST_CHECKED;
         f.remote_access = IsDlgButtonChecked(d, IDC_REMOTE) == BST_CHECKED;
         f.remote_password = narrow(get_text(d, IDC_REMOTE_PW));
         const std::string remote_problem = vc::remote_access_problem(f);
