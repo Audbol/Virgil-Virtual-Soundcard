@@ -228,16 +228,24 @@ class FakeBackend : public desk::Backend {
     played_dev.insert(played_dev.end(), d, d + frames * ch);
     if (played_dev.size() > 24000 * ch) played_dev.erase(played_dev.begin(), played_dev.end() - 24000 * ch);
   }
-  // Mean of each device output over the last 100 ms (empty: not enough yet).
+  // Mean of each device output over the last 100 ms (empty: not enough yet),
+  // leaving out frames silent on every output (see Virgil::tx_means).
   std::vector<double> dev_means() {
     std::lock_guard<std::mutex> l(mu);
     const unsigned ch = played_dev_ch;
     const size_t n = 4800;
     if (!ch || played_dev.size() < n * ch) return {};
     std::vector<double> m(ch, 0.0);
-    for (size_t f = played_dev.size() / ch - n; f < played_dev.size() / ch; ++f)
+    size_t counted = 0;
+    for (size_t f = played_dev.size() / ch - n; f < played_dev.size() / ch; ++f) {
+      bool any = false;
+      for (unsigned k = 0; k < ch; ++k) any |= played_dev[f * ch + k] != 0.f;
+      if (!any) continue;
+      ++counted;
       for (unsigned k = 0; k < ch; ++k) m[k] += played_dev[f * ch + k];
-    for (double& v : m) v /= double(n);
+    }
+    if (counted)
+      for (double& v : m) v /= double(counted);
     return m;
   }
   size_t count(const std::string& what) {
@@ -367,6 +375,11 @@ struct Virgil {
     e.reset();
   }
   // Mean of each transmit channel over the last 100 ms the engine mixed.
+  // Mean of each transmit channel over the last 100 ms, leaving out frames
+  // silent on every channel: these tests check levels and channel mapping,
+  // and on a loaded CI machine (macOS runners) the fake sound card's thread
+  // wakes late, so an interface's small bridge runs dry now and then and
+  // the gaps pulled the means down (to 0.75 of the level, say).
   std::vector<double> tx_means() {
     const unsigned T = c.tx_channels;
     std::vector<double> m(T, 0.0);
@@ -374,9 +387,17 @@ struct Virgil {
     const uint64_t dmask = c.ring_frames - 1;
     const uint64_t now = e->header()->now_frames.load();
     const uint64_t n = 4800, from = now - n - 96;
-    for (uint64_t f = from; f < from + n; ++f)
-      for (unsigned ch = 0; ch < T; ++ch) m[ch] += double(tx[size_t(f & dmask) * T + ch]) / 2147483648.0;
-    for (double& v : m) v /= double(n);
+    uint64_t counted = 0;
+    for (uint64_t f = from; f < from + n; ++f) {
+      const int32_t* fr = &tx[size_t(f & dmask) * T];
+      bool any = false;
+      for (unsigned ch = 0; ch < T; ++ch) any |= fr[ch] != 0;
+      if (!any) continue;
+      ++counted;
+      for (unsigned ch = 0; ch < T; ++ch) m[ch] += double(fr[ch]) / 2147483648.0;
+    }
+    if (counted)
+      for (double& v : m) v /= double(counted);
     return m;
   }
   int slot(const char* name) {
