@@ -6,6 +6,9 @@ Wants=network-online.target
 [Service]
 ExecStart=@CMAKE_INSTALL_FULL_BINDIR@/virgild -c /etc/virgil/virgil.conf
 Restart=on-failure
+# A crashed daemon's heartbeat stays young for a moment and would make the
+# restart refuse as "another virgild is running"; wait it out.
+RestartSec=2
 # Low-latency audio: real-time scheduling, locked memory, PTP ports < 1024.
 LimitRTPRIO=95
 LimitMEMLOCK=infinity

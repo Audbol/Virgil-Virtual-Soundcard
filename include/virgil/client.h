@@ -31,7 +31,8 @@ class Client {
   // stopped during a settings reload that keeps the layout.
   bool heartbeat_fresh(int64_t timeout_ns) const;
   // Zero this client's playback ring from the horizon on, so a restart does
-  // not replay audio written before the last stop.
+  // not replay audio written before the last stop. Only the part the daemon
+  // could still mix (three quarters of the ring), not the whole ring.
   void clear_pending_tx();
 
   const ShmHeader* header() const { return hdr_; }

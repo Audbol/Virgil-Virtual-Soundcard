@@ -13,6 +13,7 @@
 //   cmake -DASIO_SDK_DIR=C:/path/to/asiosdk ...
 // Register:   regsvr32 VirgilAsio.dll     (as administrator)
 #include <windows.h>
+#include <mmsystem.h>
 #include <objbase.h>
 #include <olectl.h>
 
@@ -51,6 +52,21 @@ namespace {
 void to_asio64(int64_t v, unsigned long* hi, unsigned long* lo) {
   *hi = static_cast<unsigned long>(uint64_t(v) >> 32);
   *lo = static_cast<unsigned long>(uint64_t(v) & 0xffffffffu);
+}
+
+// ASIO system times are timeGetTime() in ns; our clock is mono_ns() (QPC).
+// Offset from one to the other, taken right after timeGetTime() ticks over
+// (its default resolution can be several ms), bounded to 20 ms of spinning.
+int64_t asio_systime_offset_ns() {
+  const DWORD t0 = timeGetTime();
+  const int64_t until = virgil::mono_ns() + 20000000;
+  DWORD t = t0;
+  int64_t now = virgil::mono_ns();
+  while (t == t0 && now < until) {
+    t = timeGetTime();
+    now = virgil::mono_ns();
+  }
+  return int64_t(t) * 1000000 - now;
 }
 
 // Lifecycle and threading model
@@ -194,6 +210,8 @@ class VirgilAsio : public IASIO {
                                }),
                 runs_.end());
     r->previous = runs_;
+    r->gen = ++run_gen_;  // getSamplePosition: nothing until this run's first switch
+    r->systime_offset_ns = asio_systime_offset_ns();
     client_.clear_pending_tx();  // nothing from before the last stop may replay
     client_.set_tx_active(true);
     position_ = 0;
@@ -287,7 +305,9 @@ class VirgilAsio : public IASIO {
 
   // Called from the host's callback on the buffer thread: lock free.
   ASIOError getSamplePosition(ASIOSamples* pos, ASIOTimeStamp* ts) override {
-    if (!running_) return ASE_SPNotAdvancing;
+    // Not before this run's first bufferSwitch: the values would be the
+    // previous run's.
+    if (!running_ || switched_gen_.load() != run_gen_.load()) return ASE_SPNotAdvancing;
     to_asio64(position_.load(), &pos->hi, &pos->lo);
     to_asio64(switch_ns_.load(), &ts->hi, &ts->lo);
     return ASE_OK;
@@ -410,6 +430,8 @@ class VirgilAsio : public IASIO {
     std::shared_ptr<Session> session;
     std::atomic<bool> go{true};
     std::atomic<bool> exited{false};
+    uint64_t gen = 0;               // see switched_gen_
+    int64_t systime_offset_ns = 0;  // mono_ns() -> ASIO system time
     std::vector<std::shared_ptr<Run>> previous;  // must exit before our first callback
   };
   struct Worker {
@@ -575,8 +597,10 @@ class VirgilAsio : public IASIO {
           dst[f] = virgil::float_to_s32(client_.rx_frame(in_start + f)[c.channel]);
       }
 
+      const int64_t systime = deadline + r->systime_offset_ns;
       position_ = int64_t(pos);
-      switch_ns_ = deadline;
+      switch_ns_ = systime;
+      switched_gen_ = r->gen;  // after the values it vouches for
       if (s.time_info) {
         std::memset(&time_info, 0, sizeof time_info);
         AsioTimeInfo& ti = time_info.timeInfo;
@@ -584,7 +608,7 @@ class VirgilAsio : public IASIO {
         ti.speed = 1.0;
         ti.sampleRate = rate;
         to_asio64(int64_t(pos), &ti.samplePosition.hi, &ti.samplePosition.lo);
-        to_asio64(deadline, &ti.systemTime.hi, &ti.systemTime.lo);
+        to_asio64(systime, &ti.systemTime.hi, &ti.systemTime.lo);
         cb.bufferSwitchTimeInfo(&time_info, idx, ASIOTrue);
       } else {
         cb.bufferSwitch(idx, ASIOTrue);
@@ -629,7 +653,11 @@ class VirgilAsio : public IASIO {
   std::vector<std::shared_ptr<Run>> runs_;  // generations that may not have exited
   std::atomic<bool> running_{false};
   std::atomic<int64_t> position_{0};
-  std::atomic<int64_t> switch_ns_{0};
+  std::atomic<int64_t> switch_ns_{0};  // ASIO system time of that switch
+  // Run generation started last, and the one that made the last switch:
+  // a run's thread only starts calling the host once earlier ones exited.
+  std::atomic<uint64_t> run_gen_{0};
+  std::atomic<uint64_t> switched_gen_{0};
 };
 
 class ClassFactory : public IClassFactory {

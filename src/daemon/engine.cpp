@@ -117,8 +117,13 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
       SharedMemory probe;
       if (!probe.open(shm_generation_name(shm_name, gen)) || probe.size() < kShmHeaderBytes) continue;
       const auto* h = static_cast<const ShmHeader*>(probe.data());
-      if (h->magic == kShmMagic && h->state.load() != kStateStopped &&
-          mono_ns() - h->heartbeat_ns.load() < 1000000000LL) {
+      if (h->magic != kShmMagic || h->state.load() == kStateStopped) continue;
+      const int64_t beat = h->heartbeat_ns.load();
+      if (mono_ns() - beat >= 1000000000LL) continue;
+      // A daemon that just crashed leaves a young heartbeat behind: only a
+      // heartbeat that still moves means a live one (it ticks every period).
+      sleep_until_ns(mono_ns() + 100000000LL);
+      if (h->heartbeat_ns.load() != beat) {
         VIRGIL_LOG_ERROR("another virgild is running (soundcard '%s' is live); not starting a second one",
                          shm_generation_name(shm_name, gen).c_str());
         return false;
@@ -631,8 +636,12 @@ void Engine::reclaim_clients(int64_t now) {
       // Only if the slot still belongs to that process: it may have released
       // it and another app taken it meanwhile (acquiring resets `active`).
       uint32_t expected = pid;
-      if (s.pid.compare_exchange_strong(expected, 0, std::memory_order_acq_rel))
+      if (s.pid.compare_exchange_strong(expected, 0, std::memory_order_acq_rel)) {
+        // Free slots must not be mixed: the next owner's ring starts dirty
+        // until it has cleared it.
+        s.active.store(0, std::memory_order_release);
         VIRGIL_LOG_INFO("client slot %u (%s, pid %u) died; releasing", i, slot_name(s).c_str(), pid);
+      }
       client_stalled_[i] = false;
       continue;
     }

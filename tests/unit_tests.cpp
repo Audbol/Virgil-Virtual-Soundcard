@@ -2087,4 +2087,22 @@ TEST(control_settings_tick_and_tx_suggestion) {
   CHECK(vc::tx_suggestion_note(s, 500).find("Measured at the 1 ms tick") != std::string::npos);
 }
 
+TEST(shm_anchor_rejects_implausible_rate) {
+  alignas(64) static uint8_t mem[kShmHeaderBytes] = {};
+  auto* h = reinterpret_cast<ShmHeader*>(mem);
+  ClockAnchor b;
+  // The segment is writable by any local user: NaN, infinities, zero and
+  // absurd rates must not reach frame_at / host_ns_at.
+  const double bad[] = {0.0, -48000e-9, std::nan(""), INFINITY, -INFINITY, 1e-7, 1e-2};
+  for (double r : bad) {
+    publish_anchor(h, ClockAnchor{1000, 48000, r});
+    CHECK(!read_anchor(h, &b));
+  }
+  for (double hz : {44100.0, 48000.0, 96000.0, 192000.0, 384000.0}) {
+    publish_anchor(h, ClockAnchor{1000, 48000, hz * 1e-9});
+    CHECK(read_anchor(h, &b));
+    CHECK_NEAR(b.frames_per_ns, hz * 1e-9, 1e-15);
+  }
+}
+
 TEST_MAIN()

@@ -41,7 +41,8 @@ struct VirgilPcm {
   uint64_t appl = 0;         // frames written (playback) / read (capture),
                              // unwrapped mirror of io.appl_ptr (see sync_appl)
   snd_pcm_uframes_t last_appl_ptr = 0;  // io.appl_ptr that `appl` reflects
-  snd_pcm_uframes_t boundary = 0;       // wrap point of io.appl_ptr
+  snd_pcm_uframes_t boundary = 0;       // wrap point of io.appl_ptr / hw_ptr
+  snd_pcm_uframes_t sw_boundary = 0;    // pcm->boundary as sw_params reported it
   uint32_t lead = 0;         // playback: start offset ahead of the media clock
   std::vector<float> prefill;  // playback data written before start()
   uint32_t prefill_ch = 0;     // device channel count `prefill` is laid out for
@@ -84,8 +85,9 @@ uint32_t device_channels(const VirgilPcm* p) {
                                                  : p->client.rx_channels();
 }
 
-// alsa-lib wraps appl_ptr / hw_ptr at pcm->boundary, which is not exported to
-// ioplug plugins; it is derived from buffer_size the same way alsa-lib does.
+// alsa-lib wraps appl_ptr / hw_ptr at pcm->boundary, which ioplug plugins
+// only see through sw_params (virgil_sw_params records it); until then it is
+// derived from buffer_size the same way alsa-lib does.
 snd_pcm_uframes_t compute_boundary(snd_pcm_uframes_t buffer_size) {
   const snd_pcm_uframes_t lmax = snd_pcm_uframes_t(LONG_MAX);
   snd_pcm_uframes_t b = buffer_size;
@@ -209,6 +211,14 @@ void arm_timer(VirgilPcm* p) {
   timerfd_settime(p->timer_fd, 0, &its, nullptr);
 }
 
+// Enter xrun. Playback stops being mixed at once: alsa-lib does not call
+// stop() on an xrun, and start() activates the slot again.
+void set_xrun(VirgilPcm* p) {
+  if (!p->xrun && p->io.stream == SND_PCM_STREAM_PLAYBACK && p->client.is_open())
+    p->client.set_tx_active(false);
+  p->xrun = true;
+}
+
 // Advance hw from the media clock. Returns false on xrun / daemon loss.
 bool update_hw(VirgilPcm* p) {
   sync_appl(p);
@@ -219,7 +229,7 @@ bool update_hw(VirgilPcm* p) {
   // from before are meaningless, so report an xrun and let the app restart.
   // Read before the anchor (see virgil_start).
   if (p->client.clock_steps() != p->clock_steps) {
-    p->xrun = true;
+    set_xrun(p);
     return false;
   }
   if (!media_now(p, p->clock_steps, &now)) return false;
@@ -238,11 +248,11 @@ bool update_hw(VirgilPcm* p) {
     if (p->io.state == SND_PCM_STATE_DRAINING && p->appl > 0 && consumed < p->start_frame + p->appl)
       hw = std::min(hw, std::max(p->hw, p->appl - 1));
     p->hw = hw;
-    if (p->hw > p->appl) p->xrun = true;
+    if (p->hw > p->appl) set_xrun(p);
   } else {
     const uint64_t ready = now - p->client.rx_latency_frames();
     p->hw = ready > p->start_frame ? ready - p->start_frame : 0;
-    if (p->hw > p->appl && p->hw - p->appl > p->io.buffer_size) p->xrun = true;
+    if (p->hw > p->appl && p->hw - p->appl > p->io.buffer_size) set_xrun(p);
   }
   return !p->xrun;
 }
@@ -306,6 +316,11 @@ int virgil_stop(snd_pcm_ioplug_t* io) {
 snd_pcm_sframes_t virgil_pointer(snd_pcm_ioplug_t* io) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (!update_hw(p)) return -EPIPE;
+#ifdef SND_PCM_IOPLUG_FLAG_BOUNDARY_WA
+  // Up to the boundary (see the flag in the plugin entry): modulo the
+  // buffer, a whole buffer played between two calls would read as none.
+  if (p->boundary) return snd_pcm_sframes_t(p->hw % p->boundary);
+#endif
   return snd_pcm_sframes_t(p->hw % io->buffer_size);
 }
 
@@ -376,7 +391,7 @@ int virgil_prepare(snd_pcm_ioplug_t* io) {
   p->running = false;
   p->xrun = false;
   p->hw = p->appl = 0;
-  p->boundary = compute_boundary(io->buffer_size);
+  p->boundary = p->sw_boundary ? p->sw_boundary : compute_boundary(io->buffer_size);
   p->last_appl_ptr = io->appl_ptr;
   if (io->stream == SND_PCM_STREAM_PLAYBACK) {
     p->prefill_ch = p->client.tx_channels();
@@ -417,6 +432,7 @@ void hint_small_buffer(VirgilPcm* p) {
 int virgil_hw_params(snd_pcm_ioplug_t* io, snd_pcm_hw_params_t*) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
   if (io->buffer_size > max_buffer_frames(p->client)) return -EINVAL;
+  p->sw_boundary = 0;  // new geometry: the sw_params that follow report it
   hint_small_buffer(p);
   return 0;
 }
@@ -474,6 +490,8 @@ int virgil_sw_params(snd_pcm_ioplug_t* io, snd_pcm_sw_params_t* params) {
   snd_pcm_uframes_t v = 0;
   if (snd_pcm_sw_params_get_avail_min(params, &v) < 0) v = 0;
   p->avail_min = v;
+  snd_pcm_uframes_t b = 0;
+  if (snd_pcm_sw_params_get_boundary(params, &b) == 0 && b) p->sw_boundary = b;
   if (p->running) {
     sync_appl(p);
     arm_timer(p);
@@ -483,7 +501,7 @@ int virgil_sw_params(snd_pcm_ioplug_t* io, snd_pcm_sw_params_t* params) {
 
 int virgil_delay(snd_pcm_ioplug_t* io, snd_pcm_sframes_t* delay) {
   auto* p = static_cast<VirgilPcm*>(io->private_data);
-  update_hw(p);
+  if (!update_hw(p)) return -EPIPE;
   // Playback: frames until the last one written reaches its media time
   // (hw is the media clock itself, see update_hw).
   if (io->stream == SND_PCM_STREAM_PLAYBACK)
@@ -578,6 +596,10 @@ SND_PCM_PLUGIN_DEFINE_FUNC(virgil) {
   p->io.callback = &kCallbacks;
   p->io.private_data = p;
   p->io.mmap_rw = 0;
+#ifdef SND_PCM_IOPLUG_FLAG_BOUNDARY_WA
+  // pointer() reports hw modulo the boundary, not the buffer (alsa-lib >= 1.1.6).
+  p->io.flags |= SND_PCM_IOPLUG_FLAG_BOUNDARY_WA;
+#endif
 
   int err;
   p->timer_fd = timerfd_create(CLOCK_MONOTONIC, TFD_NONBLOCK | TFD_CLOEXEC);

@@ -131,7 +131,17 @@ bool Client::heartbeat_fresh(int64_t timeout_ns) const {
 
 void Client::clear_pending_tx() {
   if (!tx_) return;
-  std::memset(tx_, 0, size_t(ring_) * txch_ * sizeof(float));
+  // Only what the daemon can still mix: it zeroes each slot it consumes and
+  // again a quarter ring behind the tick, so everything from three quarters
+  // of a ring past the horizon on is silenced before its turn. Drivers write
+  // at most half a ring ahead; the extra quarter also covers audio a stream
+  // wrote on an old timeline after a clock step had cleared the rings.
+  const uint64_t first = tx_horizon();
+  const uint64_t n = uint64_t(ring_) - ring_ / 4;
+  const uint64_t a = first & mask_;
+  const uint64_t n1 = std::min<uint64_t>(n, ring_ - a);
+  std::memset(tx_ + size_t(a) * txch_, 0, size_t(n1) * txch_ * sizeof(float));
+  if (n1 < n) std::memset(tx_, 0, size_t(n - n1) * txch_ * sizeof(float));
 }
 
 bool Client::frame_now(double* out) const {
@@ -156,6 +166,9 @@ bool Client::acquire_tx_slot(const char* name) {
     ClientSlot& s = hdr_->clients[i];
     uint32_t expected = 0;
     if (!s.pid.compare_exchange_strong(expected, me, std::memory_order_acq_rel)) continue;
+    // Not mixed while the ring is cleared below (a dead owner's slot may
+    // still be marked active).
+    s.active.store(0, std::memory_order_release);
     std::memset(s.name, 0, sizeof s.name);
     if (name) {
       // At most sizeof - 1 bytes, cut on a UTF-8 character boundary.
@@ -172,7 +185,6 @@ bool Client::acquire_tx_slot(const char* name) {
     slot_ = int(i);
     tx_ = tx_ring_at(hdr_, ring_, txch_, i);
     std::memset(tx_, 0, size_t(ring_) * txch_ * sizeof(float));
-    s.active.store(0, std::memory_order_release);
     return true;
   }
   return false;

@@ -197,7 +197,9 @@ inline bool read_anchor(const ShmHeader* h, ClockAnchor* out) {
     std::atomic_thread_fence(std::memory_order_acquire);
     if (h->clock_seq.load(std::memory_order_relaxed) != s0) continue;
     std::memcpy(&a.frames_per_ns, &bits, sizeof bits);
-    if (a.frames_per_ns <= 0) return false;
+    // Rejects NaN, infinities and garbage from another local writer: any
+    // real rate lies between 1 kHz and 1 MHz.
+    if (!(a.frames_per_ns > 1e-6 && a.frames_per_ns < 1e-3)) return false;
     *out = a;
     return true;
   }
