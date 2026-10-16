@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.7.1
 - **Keeps its receive subscriptions when the network address changes.** Virgil's Dante device ID now comes from the network adapter's hardware (MAC) address instead of its IP address. With self-assigned addresses (169.254.x.x, common on Dante networks without a DHCP server) a cable or USB adapter that reconnects can come back on a different address; Virgil then showed up as a new device that had forgotten what its receive channels were subscribed to and their names, until they were patched again in Dante Controller. The state saved under the old IP-based ID is moved over on the first start, so nothing needs re-patching after updating.
 - Requests Virgil doesn't know (Yamaha consoles and Tio stage boxes send one every few seconds) are logged once each instead of filling the log with thousands of lines.
 
