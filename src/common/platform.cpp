@@ -83,11 +83,20 @@ void sleep_until_ns(int64_t deadline, int64_t spin_ns) {
   // A high-resolution waitable timer (Win10 1803+) wakes within a fraction
   // of a millisecond, so it also suits a 0.5 ms tick; the spin covers the
   // rest. Without it (older Windows) sleeps end on the 1 ms timer interrupt.
-  thread_local HANDLE timer = [] {
+  // Closed when the thread ends (each engine reload and each ASIO start
+  // runs a new thread: the handles piled up).
+  struct Timer {
+    HANDLE h;
+    ~Timer() {
+      if (h) CloseHandle(h);
+    }
+  };
+  thread_local Timer t{[] {
     HANDLE h = high_resolution_timer();
     if (!h) h = CreateWaitableTimerW(nullptr, TRUE, nullptr);
     return h;
-  }();
+  }()};
+  const HANDLE timer = t.h;
   int64_t now = mono_ns();
   int64_t sleep_ns = deadline - now - spin_ns;
   if (sleep_ns > 0 && timer) {
@@ -131,9 +140,22 @@ bool opt_out_of_thread_throttling() {
 }  // namespace
 
 bool set_realtime_priority(int, int64_t) {
-  timeBeginPeriod(1);
+  // Undone when the thread ends: the MMCSS registration and the 1 ms timer
+  // period were left behind by every audio thread (a new one per engine
+  // reload and per ASIO start).
+  struct RtState {
+    HANDLE mmcss = nullptr;
+    bool period = false;
+    ~RtState() {
+      if (mmcss) AvRevertMmThreadCharacteristics(mmcss);
+      if (period) timeEndPeriod(1);
+    }
+  };
+  thread_local RtState rt;
+  if (!rt.period) rt.period = timeBeginPeriod(1) == TIMERR_NOERROR;
   DWORD task_index = 0;
-  HANDLE h = AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+  HANDLE h = rt.mmcss ? rt.mmcss : AvSetMmThreadCharacteristicsW(L"Pro Audio", &task_index);
+  rt.mmcss = h;
   if (h) AvSetMmThreadPriority(h, AVRT_PRIORITY_CRITICAL);
   else
     sched_warn(&g_sched_warned_mmcss, "MMCSS \"Pro Audio\" scheduling refused (error " +

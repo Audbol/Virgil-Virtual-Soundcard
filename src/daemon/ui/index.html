@@ -269,7 +269,7 @@ async function api(path, opts = {}) {
 const ALIASES = { playback_channels: "tx_channels", capture_channels: "rx_channels", rx_latency_us: "latency_us" };
 const canonSec = s => s === "network" ? "device" : s;
 const canonKey = (sec, k) => sec === "device" ? (ALIASES[k] || k) : k;
-function headerOf(l) { const m = l.match(/^\s*\[([^\]]+)\]\s*$/); return m ? m[1].trim().toLowerCase() : null; }
+function headerOf(l) { const m = l.match(/^\s*\[([^\]]+)\]\s*(?:[;#].*)?$/); return m ? m[1].trim().toLowerCase() : null; }
 function parseVal(v) {
   let q = false, out = "";
   for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }

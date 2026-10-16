@@ -80,6 +80,10 @@ std::string remote_access_problem(const SettingsForm& f);
 std::string apply_settings(const std::string& conf, const SettingsForm& f);
 
 // POSTs the configuration; on failure `error` holds a message for the user.
-bool save_settings(unsigned port, const std::string& conf, std::string* error);
+// Applies the form to the configuration as it is now (fetched again, so
+// changes made elsewhere while the dialog was open, such as Stop or a channel
+// renamed in Dante Controller, are kept) and saves it; retries when it
+// changes in between.
+bool save_settings(unsigned port, const SettingsForm& f, std::string* error);
 
 }  // namespace vc

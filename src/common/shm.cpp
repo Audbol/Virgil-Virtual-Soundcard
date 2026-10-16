@@ -99,6 +99,16 @@ bool SharedMemory::create(const std::string& name, size_t size) {
     shm_unlink(name.c_str());
     return false;
   }
+#if defined(__linux__)
+  // tmpfs only checks its size limit when pages are touched: reserve them
+  // now, or a segment larger than /dev/shm (64 MB in Docker) failed later
+  // with SIGBUS in the memset below and killed the daemon.
+  if (posix_fallocate(fd, 0, off_t(size)) != 0) {
+    ::close(fd);
+    shm_unlink(name.c_str());
+    return false;
+  }
+#endif
   void* p = mmap(nullptr, size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
   ::close(fd);
   if (p == MAP_FAILED) {

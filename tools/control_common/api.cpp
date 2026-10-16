@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 
 #if defined(_WIN32)
@@ -96,9 +97,17 @@ struct Parser {
     ++p;
     return true;
   }
+  int depth = 0;
   bool value(Json* v) {
     ws();
     if (p >= end) return false;
+    // Nesting is shallow in anything the daemon sends; a deep one (another
+    // program on the port) must not overflow the stack.
+    struct Depth {
+      int& d;
+      ~Depth() { --d; }
+    } guard{++depth};
+    if (depth > 64) return false;
     if (*p == '{') {
       ++p;
       v->type = Json::Object;
@@ -141,11 +150,36 @@ struct Parser {
     if (lit("true")) return v->type = Json::Bool, v->b = true, true;
     if (lit("false")) return v->type = Json::Bool, v->b = false, true;
     if (lit("null")) return v->type = Json::Null, true;
-    char* e = nullptr;
-    v->n = std::strtod(p, &e);
-    if (e == p) return false;
-    p = e;
+    if (!number(&v->n)) return false;
     v->type = Json::Number;
+    return true;
+  }
+  // JSON numbers always use '.', whatever the locale (strtod follows
+  // LC_NUMERIC, and under a decimal-comma locale stopped at the '.').
+  bool number(double* out) {
+    const char* q = p;
+    bool neg = false;
+    if (q < end && (*q == '-' || *q == '+')) neg = *q++ == '-';
+    double m = 0;
+    int digits = 0, scale = 0;
+    for (; q < end && *q >= '0' && *q <= '9'; ++q, ++digits) m = m * 10 + (*q - '0');
+    if (q < end && *q == '.')
+      for (++q; q < end && *q >= '0' && *q <= '9'; ++q, ++digits, --scale) m = m * 10 + (*q - '0');
+    if (!digits) return false;
+    if (q < end && (*q == 'e' || *q == 'E')) {
+      const char* r = q + 1;
+      bool eneg = false;
+      if (r < end && (*r == '-' || *r == '+')) eneg = *r++ == '-';
+      int ex = 0;
+      bool any = false;
+      for (; r < end && *r >= '0' && *r <= '9'; ++r, any = true) ex = std::min(ex * 10 + (*r - '0'), 9999);
+      if (any) {
+        scale += eneg ? -ex : ex;
+        q = r;
+      }
+    }
+    *out = (neg ? -m : m) * std::pow(10.0, scale);
+    p = q;
     return true;
   }
 };
@@ -179,6 +213,12 @@ HttpResult http(unsigned port, const char* method, const std::string& path, cons
   timeval tv{1, 500000};
   setsockopt(s, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
   setsockopt(s, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+#ifdef SO_NOSIGPIPE
+  // The daemon may close before reading a large body (413): an error, not
+  // a SIGPIPE that ends the app (Linux uses MSG_NOSIGNAL below).
+  const int one = 1;
+  setsockopt(s, SOL_SOCKET, SO_NOSIGPIPE, &one, sizeof one);
+#endif
 #endif
   sockaddr_in sa{};
   sa.sin_family = AF_INET;
@@ -192,7 +232,11 @@ HttpResult http(unsigned port, const char* method, const std::string& path, cons
     req += "\r\n" + body;
     size_t sent = 0;
     while (sent < req.size()) {
-      const int n = send(s, req.data() + sent, int(req.size() - sent), 0);
+#ifdef MSG_NOSIGNAL
+      const int n = int(send(s, req.data() + sent, int(req.size() - sent), MSG_NOSIGNAL));
+#else
+      const int n = int(send(s, req.data() + sent, int(req.size() - sent), 0));
+#endif
       if (n <= 0) break;
       sent += size_t(n);
     }
@@ -255,7 +299,8 @@ std::string http_error(const HttpResult& r) {
 namespace {
 std::vector<std::string> split_lines(const std::string& t) {
   std::vector<std::string> out;
-  size_t a = 0;
+  // A UTF-8 byte order mark (some editors add one; the daemon skips it).
+  size_t a = t.compare(0, 3, "\xEF\xBB\xBF") == 0 ? 3 : 0;
   for (;;) {
     const size_t b = t.find('\n', a);
     out.push_back(t.substr(a, b == std::string::npos ? std::string::npos : b - a));
@@ -282,9 +327,18 @@ std::string lower(std::string s) {
   for (auto& c : s) c = char(std::tolower(static_cast<unsigned char>(c)));
   return s;
 }
-// Section header name, or empty when the line is not a header.
+std::string strip_comment(const std::string& line) {
+  bool in_quotes = false;
+  for (size_t i = 0; i < line.size(); ++i) {
+    if (line[i] == '"') in_quotes = !in_quotes;
+    else if (!in_quotes && (line[i] == ';' || line[i] == '#')) return line.substr(0, i);
+  }
+  return line;
+}
+// Section header name, or empty when the line is not a header ("[ptp] ; x"
+// is one, as for the daemon).
 std::string header_of(const std::string& line) {
-  const std::string t = trim(line);
+  const std::string t = trim(strip_comment(line));
   if (t.size() >= 2 && t.front() == '[' && t.back() == ']') return lower(trim(t.substr(1, t.size() - 2)));
   return {};
 }

@@ -22,6 +22,8 @@
 #include <atomic>
 #include <chrono>
 #include <cmath>
+#include <clocale>
+#include <csignal>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -828,12 +830,11 @@ void on_settings_response(GtkDialog*, int response, gpointer) {
   ++g_busy;
   update_controls();
   const unsigned port = g_port;
-  const std::string conf = vc::apply_settings(ui->conf, f);
   using Result = std::pair<bool, std::string>;
   run_async<Result>(
-      [port, conf] {
+      [port, f] {
         std::string e;
-        const bool ok = vc::save_settings(port, conf, &e);
+        const bool ok = vc::save_settings(port, f, &e);
         return Result(ok, e);
       },
       [ui](const Result& r) {
@@ -1286,7 +1287,15 @@ int main(int argc, char** argv) {
       return 0;
     }
   }
+  // A request to a daemon that closes early (413) must not kill the app.
+  signal(SIGPIPE, SIG_IGN);
   g_app = gtk_application_new("org.virgil.Control", G_APPLICATION_HANDLES_COMMAND_LINE);
+  // GTK switches to the user's locale at startup; numbers (JSON from the
+  // daemon, latencies in ms, the configuration) are always written with a
+  // decimal point, so keep LC_NUMERIC at "C" (under de_DE "0.25" failed to
+  // parse and every status poll failed).
+  g_signal_connect(g_app, "startup", G_CALLBACK(+[](GApplication*, gpointer) { setlocale(LC_NUMERIC, "C"); }),
+                   nullptr);
   g_signal_connect(g_app, "activate", G_CALLBACK(on_activate), nullptr);
   g_signal_connect(g_app, "command-line", G_CALLBACK(on_command_line), nullptr);
   const int rc = g_application_run(G_APPLICATION(g_app), argc, argv);

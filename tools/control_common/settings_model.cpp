@@ -1,5 +1,7 @@
 #include "settings_model.h"
 
+#include "config_model.h"
+
 #include <cctype>
 #include <cstdio>
 #include <cstdlib>
@@ -199,10 +201,17 @@ std::string remote_access_problem(const SettingsForm& f) {
   return "";
 }
 
-bool save_settings(unsigned port, const std::string& conf, std::string* error) {
-  const auto r = http(port, "POST", "/api/config", conf);
-  if (r.status == 200) return true;
-  if (error) *error = http_error(r);
+bool save_settings(unsigned port, const SettingsForm& f, std::string* error) {
+  for (int attempt = 0; attempt < 4; ++attempt) {
+    ConfigText fresh;
+    if (!fetch_config(port, &fresh, error)) return false;
+    const SaveResult r = save_config_text(port, apply_settings(fresh.text, f), fresh.version);
+    if (r.ok) return true;
+    if (r.conflict) continue;  // changed meanwhile: apply again
+    if (error) *error = r.error;
+    return false;
+  }
+  if (error) *error = "The configuration keeps changing elsewhere; try again.";
   return false;
 }
 

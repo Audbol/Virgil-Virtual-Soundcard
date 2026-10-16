@@ -144,7 +144,7 @@ void HttpServer::run() {
     if (c == decltype(c)(-1)) continue;
     const uint32_t from = ntohl(peer.sin_addr.s_addr);
     // A thread per connection (bounded): one that sends nothing yet does
-    // not delay the next. At the bound, serve here as before.
+    // not delay the next. At the bound, serve here (this computer only).
     constexpr int kMaxWorkers = 8;
     if (workers_.fetch_add(1) < kMaxWorkers) {
       try {
@@ -158,7 +158,10 @@ void HttpServer::run() {
       }
     }
     workers_.fetch_sub(1);
-    serve(intptr_t(c), from);
+    // At the bound, only this computer is served here: other computers
+    // could otherwise stall the panel with a few connections that trickle
+    // their request (before they have even logged in).
+    if ((from >> 24) == 127) serve(intptr_t(c), from);
     VIRGIL_CLOSE(c);
   }
 }

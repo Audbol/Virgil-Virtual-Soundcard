@@ -118,7 +118,7 @@ class Session {
     B_ = std::max(16u, (rate_ / 200 + 15) / 16 * 16);
     while (B_ > 16 && B_ >= ring_ / 8) B_ /= 2;
     mix_.assign(size_t(B_) * std::max(1u, txch_), 0.f);
-    tmp_.assign(size_t(B_) * 2, 0.f);
+    tmp_.assign(size_t(B_) * std::max(2u, vc::kMaxInterfaceInputs), 0.f);  // a lane is up to 64 wide (interface inputs)
     rxbuf_.assign(size_t(B_) * std::max(2u, cfg.output.width()), 0.f);
     set_output_map(cfg.output.width());
     set_gains(cfg);

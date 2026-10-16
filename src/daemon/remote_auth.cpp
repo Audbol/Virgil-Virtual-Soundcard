@@ -75,8 +75,11 @@ template <typename Fn>
 std::string each_password_line(const std::string& text, Fn fn) {
   auto lines = split_lines(text);
   std::string section;
-  for (auto& line : lines) {
-    const std::string t = trim(strip_comment(line));
+  for (size_t i = 0; i < lines.size(); ++i) {
+    std::string& line = lines[i];
+    // The daemon's parser skips a UTF-8 byte order mark: so must the masking.
+    const std::string body = i == 0 && line.compare(0, 3, "\xEF\xBB\xBF") == 0 ? line.substr(3) : line;
+    const std::string t = trim(strip_comment(body));
     if (t.size() >= 2 && t.front() == '[' && t.back() == ']') {
       section = lower(trim(t.substr(1, t.size() - 2)));
       continue;
@@ -134,7 +137,9 @@ bool basic_auth_password(const std::string& authorization, std::string* password
 RemoteAuth::Result RemoteAuth::check(uint32_t peer, bool remote_enabled, const std::string& password,
                                      const std::string& authorization, int64_t now) {
   if (is_loopback(peer)) return Result::Allowed;
-  if (!remote_enabled || password.empty()) return Result::Refused;
+  // A password the configuration rejects (under 8 characters, which keeps
+  // the engine from starting) must not open the panel either.
+  if (!remote_enabled || password.size() < 8) return Result::Refused;
   std::lock_guard<std::mutex> l(m_);
   // Forget addresses that have been quiet for a while (bounded memory).
   if (peers_.size() > 1024)

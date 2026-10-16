@@ -62,7 +62,7 @@ class ControlServer {
   DaemonContext* ctx_;
   HttpServer http_;
   uint16_t port_ = 0;
-  bool remote_ = false;  // listening on every IPv4 address
+  std::atomic<bool> remote_{false};  // listening on every IPv4 address (read by request threads)
   RemoteAuth auth_;
   // Name of the adapter Virgil runs on, for the "no clock leader" notice
   // (looked up once per address; guarded by ctx_->mutex).

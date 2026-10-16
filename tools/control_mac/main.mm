@@ -401,7 +401,7 @@ RemoteInfo parse_remote(const std::string& status_body) {
 @property BOOL settingsLoading;
 @property(strong) NSAlert* settingsAlert;
 @property(strong) NSTextField* settingsError;
-@property(copy) std::string (^settingsCollect)(void);  // the form's fields as virgil.conf text
+@property(copy) vc::SettingsForm (^settingsCollect)(void);  // the form's fields
 @property(copy) std::string (^settingsProblem)(void);  // why the form cannot be saved, or ""
 @property(strong) NSArray* settingsTargets;  // VCBlockTargets of the open settings dialog
 @end
@@ -615,7 +615,9 @@ RemoteInfo parse_remote(const std::string& status_body) {
     f.size = nf.size;
     [self.window setFrame:f display:YES];
   }
-  self.item.button.toolTip = ns(vc::tray_tooltip(s));
+  // Only when it changes: this runs on every 80 ms poll.
+  NSString* tip = ns(vc::tray_tooltip(s));
+  if (![self.item.button.toolTip isEqualToString:tip]) self.item.button.toolTip = tip;
   if (g_visible) self.view.needsDisplay = YES;
   if (event == 1)
     notify(@"org.virgil.control.service", @"Virgil service stopped",
@@ -863,11 +865,11 @@ RemoteInfo parse_remote(const std::string& status_body) {
     if (response == NSAlertThirdButtonReturn + 2) [self showConfigEditor:nil];
     return;
   }
-  const std::string conf = self.settingsCollect();
+  const vc::SettingsForm form = self.settingsCollect();
   self.busy = YES;
   dispatch_async(background(), ^{
     std::string e;
-    const bool ok = vc::save_settings(g_port, conf, &e);
+    const bool ok = vc::save_settings(g_port, form, &e);
     on_main(^{
       self.busy = NO;
       if (ok) {
@@ -1091,8 +1093,8 @@ RemoteInfo parse_remote(const std::string& status_body) {
     g.remote_password = password.stringValue.UTF8String ?: "";
     return g;
   };
-  self.settingsCollect = ^std::string(void) {
-    return vc::apply_settings(base, form());
+  self.settingsCollect = ^vc::SettingsForm(void) {
+    return form();
   };
   self.settingsProblem = ^std::string(void) {
     const vc::SettingsForm g = form();

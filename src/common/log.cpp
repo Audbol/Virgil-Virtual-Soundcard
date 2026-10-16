@@ -12,17 +12,20 @@ namespace virgil {
 int g_log_level = kLogInfo;
 
 namespace {
-std::mutex g_err_mutex;
-std::string g_last_error;
-std::mutex g_recent_mutex;
-std::deque<std::string> g_recent;  // for diagnostics reports
+// Never destroyed: Inferno's log thread can still log while the process
+// exits (after main returned, static destructors had freed these and a late
+// line wrote to the freed deque).
+std::mutex& g_err_mutex = *new std::mutex;
+std::string& g_last_error = *new std::string;
+std::mutex& g_recent_mutex = *new std::mutex;
+std::deque<std::string>& g_recent = *new std::deque<std::string>;  // for diagnostics reports
 constexpr size_t kRecentLines = 400;
 
 // Log file opened by the daemon itself (--log): rotated by size so it cannot
 // grow without bound (the Windows service and the macOS launch daemon log
 // this way). Guarded by g_write_mutex, like every write to stderr here.
-std::mutex g_write_mutex;
-std::string g_log_path;
+std::mutex& g_write_mutex = *new std::mutex;
+std::string& g_log_path = *new std::string;
 long long g_log_bytes = 0;
 constexpr long long kMaxLogBytes = 5ll * 1024 * 1024;
 

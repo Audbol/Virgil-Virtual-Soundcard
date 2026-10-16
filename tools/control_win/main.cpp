@@ -607,15 +607,16 @@ void start_service() {
 enum class JobKind { Stop, Start, Restart, LoadSettings, SaveSettings };
 struct Job {
   JobKind kind;
-  std::string body;      // SaveSettings: the configuration to POST
+  vc::SettingsForm form;  // SaveSettings: applied to the configuration as it is then
   vc::HttpResult r, r2, r3, r4;  // LoadSettings: /api/config, /api/interfaces, /api/status, /api/diagnostics
+  std::string error;     // SaveSettings: why it failed
 };
 
-bool run_job(int id, JobKind kind, std::string body = std::string()) {
+bool run_job(int id, JobKind kind, const vc::SettingsForm& form = vc::SettingsForm()) {
   if (busy()) return false;
   g_pending = id;
   InvalidateRect(g_hwnd, nullptr, FALSE);
-  Job* job = new Job{kind, std::move(body), {}, {}, {}, {}};
+  Job* job = new Job{kind, form, {}, {}, {}, {}, {}};
   const HWND target = g_hwnd;
   const unsigned port = g_port;
   std::thread([job, target, port] {
@@ -629,7 +630,12 @@ bool run_job(int id, JobKind kind, std::string body = std::string()) {
         if (job->r.status == 200) job->r3 = vc::http(port, "GET", "/api/status");  // remote access URLs
         if (job->r.status == 200) job->r4 = vc::http(port, "GET", "/api/diagnostics");  // tx latency suggestion
         break;
-      case JobKind::SaveSettings: job->r = vc::http(port, "POST", "/api/config", job->body); break;
+      case JobKind::SaveSettings: {
+        std::string err;
+        job->r.status = vc::save_settings(port, job->form, &err) ? 200 : 0;
+        job->error = err;
+        break;
+      }
     }
     if (!PostMessageW(target, WM_APP_DONE, 0, reinterpret_cast<LPARAM>(job))) delete job;  // window gone
   }).detach();
@@ -1094,7 +1100,7 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
       if (job->r.status == 200) {
         EndDialog(d, 1);
       } else {
-        settings_error(d, request_error(job->r));
+        settings_error(d, widen(job->error));
         EnableWindow(GetDlgItem(d, IDOK), TRUE);
       }
       return TRUE;
@@ -1171,7 +1177,7 @@ INT_PTR CALLBACK settings_proc(HWND d, UINT msg, WPARAM wp, LPARAM lp) {
           SetFocus(GetDlgItem(d, IDC_REMOTE_PW));
           return TRUE;
         }
-        if (!run_job(ID_SETTINGS, JobKind::SaveSettings, vc::apply_settings(data->conf, f))) {
+        if (!run_job(ID_SETTINGS, JobKind::SaveSettings, f)) {
           settings_error(d, L"Virgil is busy with another request. Try again in a moment.");
           return TRUE;
         }

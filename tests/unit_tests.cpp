@@ -1,5 +1,6 @@
 #include <atomic>
 #include <cctype>
+#include <clocale>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -723,6 +724,38 @@ TEST(config_latency_errors_in_ms) {
   Config t;
   parse_config("[device]\ntx_latency_us = 1000\n", &t, &err);
   CHECK(!validate_config(&t, &err) && err.find("3.5 ms") != std::string::npos);
+}
+
+TEST(review_fixes_remote_and_config_text) {
+  // A password the configuration rejects (under 8 characters) opens nothing.
+  RemoteAuth a;
+  CHECK(a.check(0xC0000202, true, "abc", "Basic dmlyZ2lsOmFiYw==", 1000) == RemoteAuth::Result::Refused);  // virgil:abc
+  // Masked also when the file starts with a UTF-8 byte order mark.
+  const std::string bom = "\xEF\xBB\xBF[device]\nremote_password = \"secret-pw\"\n";
+  CHECK(mask_remote_password(bom).find("secret-pw") == std::string::npos);
+  // Config text editing reads files as the daemon does: a comment after a
+  // section header, and a byte order mark.
+  const std::string t = "[device] ; main\nname = Studio\n[ptp] # clock\nwifi = true\n";
+  CHECK(vc::conf_get(t, "device", "name") == "Studio" && vc::conf_get(t, "ptp", "wifi") == "true");
+  const std::string set = vc::conf_set(t, "ptp", "wifi", "false");
+  CHECK(set.find("[ptp]") == set.rfind("[ptp]") && vc::conf_get(set, "ptp", "wifi") == "false");
+  CHECK(vc::conf_get("\xEF\xBB\xBF[device]\nname = Studio\n", "device", "name") == "Studio");
+  // JSON numbers parse with a '.' whatever the locale, and deep nesting is
+  // refused instead of overflowing the stack.
+  vc::Json j;
+  CHECK(vc::parse_json("{\"a\":0.25,\"b\":-1.5e3,\"c\":7}", &j));
+  CHECK(j["a"].num() == 0.25 && j["b"].num() == -1500 && j["c"].num() == 7);
+  if (std::setlocale(LC_NUMERIC, "de_DE.UTF-8")) {
+    CHECK(vc::parse_json("{\"a\":0.5}", &j) && j["a"].num() == 0.5);
+    std::setlocale(LC_NUMERIC, "C");
+  }
+  CHECK(!vc::parse_json(std::string(200, '[') + std::string(200, ']'), &j));
+  CHECK(vc::parse_json(std::string(20, '[') + std::string(20, ']'), &j));
+  // The drivers' shared memory is capped.
+  Config big;
+  std::string err;
+  parse_config("[device]\ntx_channels = 128\nrx_channels = 128\nring_frames = 1048576\n", &big, &err);
+  CHECK(!validate_config(&big, &err) && err.find("1 GB") != std::string::npos);
 }
 
 TEST(config_wifi_latencies) {

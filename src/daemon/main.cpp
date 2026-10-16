@@ -31,6 +31,16 @@
 namespace {
 
 std::atomic<bool> g_quit{false};
+
+// Remote access only for a configuration the engine accepts (a password of
+// 8+ characters, no quotes): the panel was bound to every address, and took
+// "abc", while the engine refused to start over it.
+bool remote_allowed(const virgil::Config& c) {
+  if (!c.remote_access) return false;
+  virgil::Config v = c;
+  std::string err;
+  return virgil::validate_config(&v, &err);
+}
 void on_signal(int) { g_quit = true; }
 
 // Is `addr` assigned to one of this computer's interfaces?
@@ -129,7 +139,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
   const uint16_t control_port = uint16_t(ctx.cfg.control_port);
   bool panel_up = false;
   if (control_port) {
-    if ((panel_up = control.start(control_port, ctx.cfg.remote_access)))
+    if ((panel_up = control.start(control_port, remote_allowed(ctx.cfg))))
       VIRGIL_LOG_INFO("control panel: http://127.0.0.1:%u/", control_port);
     else
       VIRGIL_LOG_WARN("control panel: port %u is in use; panel disabled", control_port);
@@ -330,7 +340,7 @@ int run_daemon(virgil::DaemonContext& ctx, void (*on_started)()) {
       bool remote;
       {
         std::lock_guard<std::mutex> l(ctx.mutex);
-        remote = ctx.cfg.remote_access;
+        remote = remote_allowed(ctx.cfg);
       }
       if (panel_up) control.set_remote(remote);
     }

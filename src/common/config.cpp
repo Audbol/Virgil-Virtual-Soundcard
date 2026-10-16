@@ -267,6 +267,10 @@ bool validate_config(Config* c, std::string* error) {
   if (c->ring_frames < need || c->ring_frames > kMaxRing)
     return fail("ring_frames must be a power of two between " + std::to_string(need) + " and " +
                 std::to_string(kMaxRing));
+  // The drivers' shared memory: a hand-set ring_frames with many channels
+  // could ask for gigabytes.
+  if (shm_total_bytes(c->ring_frames, c->tx_channels, c->rx_channels) > (size_t(1) << 30))
+    return fail("ring_frames is too large for this many channels (the shared memory would exceed 1 GB)");
   return true;
 }
 
@@ -322,10 +326,19 @@ bool write_config_file(const std::string& path, const std::string& text, std::st
   const std::string tmp = path + ".new";
 #if defined(_WIN32)
   {
-    std::ofstream o(tmp, std::ios::binary | std::ios::trunc);
-    o << text;
-    o.flush();
-    if (!o) {
+    // Flushed to the disk itself (FlushFileBuffers) before the rename, as
+    // fsync on POSIX: the rename alone could reach the disk before the data.
+    const HANDLE h = CreateFileA(tmp.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    bool ok = h != INVALID_HANDLE_VALUE;
+    for (size_t off = 0; ok && off < text.size();) {
+      DWORD n = 0;
+      const DWORD want = DWORD(std::min<size_t>(text.size() - off, 1u << 20));
+      ok = WriteFile(h, text.data() + off, want, &n, nullptr) && n > 0;
+      off += n;
+    }
+    if (ok) ok = FlushFileBuffers(h) != 0;
+    if (h != INVALID_HANDLE_VALUE && !CloseHandle(h)) ok = false;
+    if (!ok) {
       if (error) *error = "cannot write " + tmp;
       std::remove(tmp.c_str());
       return false;
