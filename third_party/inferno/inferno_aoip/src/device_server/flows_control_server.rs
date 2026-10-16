@@ -102,6 +102,13 @@ pub async fn run_server(
             conn.respond_with_code(0x0302u16 /* ??? TODO */, &[]).await;
             continue;
           }
+          // Virgil patch: a unicast flow request must name a unicast receiver;
+          // otherwise it could take over one of our multicast flows.
+          if rx_ip.is_multicast() || rx_ip.is_broadcast() || rx_ip.is_unspecified() {
+            error!("flow request to non-unicast address {rx_ip}, returning error");
+            conn.respond_with_code(0x0302u16 /* TODO */, &[]).await;
+            continue;
+          }
           if sample_rate != self_info.sample_rate {
             error!("sample rate mismatch, returning error");
             conn.respond_with_code(FlowControlError::SampleRateMismatch as u16, &[]).await;

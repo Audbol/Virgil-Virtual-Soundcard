@@ -1,5 +1,30 @@
 # Changelog
 
+## 0.8.1
+A review of the whole code (daemon, Inferno, drivers, control apps) with memory and thread sanitizers and a network fuzzer; these are its fixes.
+- **Security: remote access with a too-short password.** With *remote access* on and a password under 8 characters, the engine refused to start, but the control panel still listened on the network and accepted that password. It now only listens remotely for a valid configuration and refuses passwords under 8 characters. Also: the password is masked for remote viewers when the file starts with a UTF-8 byte order mark (Windows Notepad), and a few slow connections from other computers can no longer stall the panel.
+- **Windows desktop audio: memory corruption with audio interface inputs.** A source with more than 2 interface inputs overwrote the heap of Virgil Control (crash or worse). Fixed.
+- **Linux Virgil Control in languages with a decimal comma** (German, French, Spanish, Italian, Russian, Portuguese...): numbers from the service failed to parse, so the window kept saying the service was not running. Fixed; numbers are read the same in every language.
+- **Linux: Virgil could stay down after a crash.** The restart refused to start while the crashed daemon's heartbeat was still young, until systemd gave up. The service now waits 2 s, and only a heartbeat that still moves counts as another running Virgil.
+- **Settings Apply no longer undoes changes made while the window was open** (Stop, a channel renamed in Dante Controller): it applies the form to the file as it is then, in all three apps.
+- **Inferno (network side):**
+  - A flow request aimed at one of Virgil's multicast flows took that flow over (wrong audio for its receivers); refused now. A changed packet size or sample format for an existing flow now gets a new flow.
+  - The receive thread no longer outlives a failed engine, keeping flows alive.
+  - A packet with a timestamp far off no longer stops gaps being filled with silence on that channel.
+  - Fewer places where a malformed request or a failed thread could stop the device.
+  - Multicast flows withdraw their announcements when stopped.
+- **Drivers:**
+  - ASIO: timestamps on the clock the ASIO standard specifies (timeGetTime), and no stale position right after a restart.
+  - ALSA: an underrun is reported by the delay call too (PulseAudio, PipeWire, mpv), playback stops being mixed after an underrun until restarted, and the pointer is right at the ring boundary.
+  - A slot taken over from a crashed app no longer plays a short burst of its old audio.
+  - Implausible clock data in the shared memory is ignored.
+- **Daemon robustness:**
+  - A shared-memory size beyond what the system allows gives an error instead of a crash (Linux tmpfs, e.g. Docker's 64 MB /dev/shm); configurations asking for more than 1 GB are refused.
+  - No use-after-free when Inferno logs during shutdown.
+  - Windows: the configuration is flushed to disk before replacing the old file, and audio threads no longer leak timer handles and scheduling registrations on each restart.
+- Configuration editing in the apps and the web panel reads comments after section headers (`[ptp] ; clock`) and byte order marks as the service does (before, a second section was appended).
+- **Faster:** the two real-time Dante threads no longer share one lock (about 2-4 % of a core at 128 channels), the receive thread reads the clock once per batch of packets, and starting ALSA playback clears less memory.
+
 ## 0.8.0
 Includes everything in 0.7.2 and 0.7.1 below (both were test builds only).
 - **Fix: the receive latency now applies.** Inferno handed its receive flows the transmit latency instead of the receive latency, so a receive latency set differently from the transmit latency (now up to 200 ms for Wi-Fi) was ignored. Checked with two Inferno instances: a 200 ms receive latency now gives the flow 200 ms (it was 4 ms).

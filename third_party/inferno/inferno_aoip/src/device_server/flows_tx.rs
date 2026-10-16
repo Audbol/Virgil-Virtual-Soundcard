@@ -568,6 +568,7 @@ struct FlowData {
   expired: Arc<AtomicBool>,
   fpp: usize,
   bytes_per_sample: usize,
+  is_multicast: bool, // Virgil patch: a unicast request may not take over a multicast flow
 }
 
 #[derive(Debug)]
@@ -737,7 +738,23 @@ impl FlowsTransmitter {
     self.check_flow_params(&flow_info.local_channel_indices, Some(fpp), Some(bytes_per_sample))?;
     let channel_indices = flow_info.local_channel_indices.clone();
     let dst_addr = SocketAddr::new(IpAddr::V4(flow_info.dst_addr), flow_info.dst_port);
-    let (flow_index, cookie) = match self.ip_port_to_id.get(&dst_addr) {
+    let mut existing_index = self.ip_port_to_id.get(&dst_addr).copied();
+    if let Some(flow_index) = existing_index {
+      // Virgil patch: a request for an existing destination may only reuse a
+      // flow of the same kind, and one with another format is re-created
+      // (the transmit thread's packet layout depends on fpp and sample size).
+      let existing = self.flows.get(&flow_index).unwrap();
+      if existing.is_multicast != is_multicast {
+        error!("refusing tx flow: destination {dst_addr} is used by a flow of another kind");
+        return Err(std::io::Error::from(std::io::ErrorKind::ResourceBusy));
+      }
+      if existing.fpp != fpp || existing.bytes_per_sample != bytes_per_sample {
+        warn!("got add flow request for existing destination {dst_addr} with another format, re-creating it");
+        self.remove_flow_internal(flow_index).await?;
+        existing_index = None;
+      }
+    }
+    let (flow_index, cookie) = match existing_index {
       None => {
         self.scan_expired().await;
         let mut counter = 0;
@@ -769,6 +786,7 @@ impl FlowsTransmitter {
           expired: Arc::new(AtomicBool::new(is_multicast)),
           fpp,
           bytes_per_sample,
+          is_multicast,
         };
 
         let socket = UdpSocket::bind(SocketAddr::new(IpAddr::V4(self.self_info.ip_address), 0))?;
@@ -798,9 +816,8 @@ impl FlowsTransmitter {
         self.flows.insert(flow_index, flow);
         (flow_index, cookie)
       }
-      Some(&flow_index) => {
+      Some(flow_index) => {
         warn!("got add flow request for already existing flow, setting channels instead");
-        // TODO FIXME what if fpp or bytes_per_sample change?
         let existing = self.flows.get(&flow_index).unwrap();
         self.check_flow_params(&channel_indices, Some(existing.fpp), Some(existing.bytes_per_sample))?;
         self
@@ -810,7 +827,7 @@ impl FlowsTransmitter {
             channel_indices: channel_indices.clone(),
           })
           .await
-          .unwrap();
+          .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?; // Virgil patch: was unwrap
         (flow_index, self.flows.get(&flow_index).unwrap().cookie)
       }
     };
@@ -847,16 +864,21 @@ impl FlowsTransmitter {
     let (id, cookie) = split_handle(handle);
     self.flows.get(&id).filter(|flow| flow.cookie == cookie).map(|flow| (id, flow))
   }
-  async fn remove_flow_internal(&mut self, index: u32) {
+  async fn remove_flow_internal(&mut self, index: u32) -> Result<(), std::io::Error> {
     if let Some(flow) = self.flows.remove(&index) {
       self.ip_port_to_id.remove(&flow.remote);
     }
     self.flows_info[index as usize] = None;
-    self.commands_sender.send(Command::RemoveFlow { index: index as usize }).await.unwrap();
+    // Virgil patch: a gone transmit thread is an error, not a panic
+    self
+      .commands_sender
+      .send(Command::RemoveFlow { index: index as usize })
+      .await
+      .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))
   }
   pub async fn remove_flow(&mut self, handle: FlowHandle) -> Result<usize, std::io::Error> {
     if let Some((id, _)) = self.get_flow(handle) {
-      self.remove_flow_internal(id).await;
+      self.remove_flow_internal(id).await?;
       Ok(id as usize)
     } else {
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
@@ -865,8 +887,7 @@ impl FlowsTransmitter {
   pub async fn remove_multicast_flow(&mut self, index: u32) -> Result<(), std::io::Error> {
     if let Some(Some(info)) = self.flows_info.get(index as usize).as_ref() {
       if info.rx_flow_name.is_none() && info.rx_hostname.is_none() {
-        self.remove_flow_internal(index).await;
-        Ok(())
+        self.remove_flow_internal(index).await
       } else {
         error!("trying to remove non-multicast flow which can be only managed using a handle");
         Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied))
@@ -891,7 +912,7 @@ impl FlowsTransmitter {
         .commands_sender
         .send(Command::SetChannels { index: index as usize, channel_indices: channel_indices.clone() })
         .await
-        .unwrap();
+        .map_err(|_| std::io::Error::from(std::io::ErrorKind::BrokenPipe))?; // Virgil patch: was unwrap
 
       self.flows_info[index as usize].as_mut().unwrap().local_channel_indices = channel_indices;
       Ok(index as usize)
@@ -915,7 +936,7 @@ impl FlowsTransmitter {
       })
       .collect_vec();
     for id in expired_ids {
-      self.remove_flow_internal(id).await;
+      self.remove_flow_internal(id).await.log_and_forget();
     }
   }
   pub fn is_empty(&self) -> bool {

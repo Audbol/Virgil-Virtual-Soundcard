@@ -32,6 +32,8 @@ use std::{
 };
 use tokio::{sync::mpsc, time::sleep, time::timeout};
 
+// Virgil patch: the std locks here are taken with unwrap_or_else(|e| e.into_inner()),
+// so a panic elsewhere with one held does not cascade into every later call.
 use super::flows_rx::{FlowInfo, FlowsReceiver};
 
 const REORDER_WAIT_SAMPLES: usize = 4800;
@@ -126,7 +128,7 @@ impl ChannelsSubscriber {
   }
   pub async fn subscribe(&self, local_channel_index: usize, tx_channel_name: &str, tx_hostname: &str) {
     // we must (TODO: really?) update subscriptions_info here because Dante Controller requests rx subscriptions list right after receiving a response to subscribe request
-    self.subscriptions_info.write().unwrap()[local_channel_index] = Some(SubscriptionInfo {
+    self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner())[local_channel_index] = Some(SubscriptionInfo {
       tx_hostname: tx_hostname.to_owned(),
       tx_channel_name: tx_channel_name.to_owned(),
       status: SubscriptionStatus::Unresolved,
@@ -151,7 +153,7 @@ impl ChannelsSubscriber {
     self.commands_sender.send(Command::Shutdown).await.log_and_forget();
   }
   pub fn channel_status(&self, channel_index: usize) -> Option<SubscriptionInfo> {
-    self.subscriptions_info.read().unwrap()[channel_index].clone()
+    self.subscriptions_info.read().unwrap_or_else(|e| e.into_inner())[channel_index].clone()
   }
   pub fn flows_info(&self) -> Arc<RwLock<Vec<Option<FlowInfo>>>> {
     self.flows_info.clone()
@@ -414,7 +416,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
           remote.channel_in_flow,
           self.flows_recv.clone(),
         );
-        match &mut self.flows.lock().unwrap()[remote.local_flow_index] {
+        match &mut self.flows.lock().unwrap_or_else(|e| e.into_inner())[remote.local_flow_index] {
           Some(flow) => {
             flow.channels_refcount[remote.channel_in_flow] -= 1;
           }
@@ -425,7 +427,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
       }
       self.channels[local_channel_index] = None;
       if remove_from_info {
-        self.subscriptions_info.write().unwrap()[local_channel_index] = None;
+        self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner())[local_channel_index] = None;
       }
       self.notify_channels_change([local_channel_index]).await;
     } else {
@@ -613,7 +615,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
     let mut futures_per_server = BTreeMap::<SocketAddr, Vec<_>>::new();
     {
       trace!("before create futures");
-      let mut flows_locked = self.flows.lock().unwrap();
+      let mut flows_locked = self.flows.lock().unwrap_or_else(|e| e.into_inner());
       trace!("acquired flows lock");
       for (flow_index, flow_opt) in flows_locked.iter().enumerate() {
         if let Some(flow) = flow_opt {
@@ -934,7 +936,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
               Ok(v) => v,
               Err(e) => {
                 error!("flow receiver socket creation failed: {e:?}");
-                flows.lock().unwrap()[flow_index] = None;
+                flows.lock().unwrap_or_else(|e| e.into_inner())[flow_index] = None;
                 return None;
               }
             };
@@ -958,13 +960,13 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
               Ok(v) => v,
               Err(e) => {
                 error!("failed to request flow from {:?}: {e:?}", first.addr);
-                let mut subinfos = subscription_info.write().unwrap();
+                let mut subinfos = subscription_info.write().unwrap_or_else(|e| e.into_inner());
                 for update in updates {
                   for chi in update.local_channel_indices {
                     subinfos[chi].as_mut().unwrap().status = SubscriptionStatus::TxFail;
                   }
                 }
-                flows.lock().unwrap()[flow_index] = None;
+                flows.lock().unwrap_or_else(|e| e.into_inner())[flow_index] = None;
                 return None;
               }
             };
@@ -980,7 +982,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                 time_arc,
               )
               .await;
-            let mut flows_locked = flows.lock().unwrap();
+            let mut flows_locked = flows.lock().unwrap_or_else(|e| e.into_inner());
             let mut source = &mut flows_locked[flow_index].as_mut().unwrap().source;
             if let FlowSource::Unicast(uf) = &mut source {
               uf.handle = Some(handle);
@@ -1018,7 +1020,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
       let mut changed_channels = vec![];
       // used only for ringbuffer positions so can be wrapping
       let now =
-        self.media_clock.write().unwrap().wrapping_now_in_timebase(self.self_info.sample_rate as u64);
+        self.media_clock.write().unwrap_or_else(|e| e.into_inner()).wrapping_now_in_timebase(self.self_info.sample_rate as u64);
       let now = match now {
         Some(v) => v,
         None => {
@@ -1030,12 +1032,12 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
         let first_index = upd.local_channel_indices[0];
         info!(
           "subscription successful, waiting for media: channel {} and {} aliases",
-          self.self_info.rx_channels[first_index].friendly_name.read().unwrap(),
+          self.self_info.rx_channels[first_index].friendly_name.read().unwrap_or_else(|e| e.into_inner()),
           upd.local_channel_indices.len() - 1
         );
         debug!("{upd:?}");
-        let mut flows = self.flows.lock().unwrap();
-        let mut subinfos = self.subscriptions_info.write().unwrap();
+        let mut flows = self.flows.lock().unwrap_or_else(|e| e.into_inner());
+        let mut subinfos = self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner());
         for chi in upd.local_channel_indices {
           let subscription = self.channels[chi].as_mut().unwrap();
           let remote = upd.remote.clone();
@@ -1095,7 +1097,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
     > = BTreeMap::new();
     let mut channels_changed = vec![];
     {
-      let mut flows = self.flows.lock().unwrap();
+      let mut flows = self.flows.lock().unwrap_or_else(|e| e.into_inner());
       let min_last_packet_time = self.ref_instant.elapsed().as_secs().saturating_sub(2) as _;
       let min_flow_creation_time = self.ref_instant.elapsed().as_secs().saturating_sub(6) as _;
       let flows_to_remove = flows
@@ -1132,7 +1134,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                             "channel subscribed to {}@{} is orphaned now",
                             chsub.tx_channel_name, chsub.tx_hostname
                           );
-                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut() {
+                          if let Some(subi) = self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner())[chi].as_mut() {
                             subi.status = SubscriptionStatus::Unresolved;
                             channels_changed.push(chi);
                           }
@@ -1143,7 +1145,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                             self.flows_recv.clone(),
                           );
                         } else if receiving {
-                          if let Some(subi) = self.subscriptions_info.write().unwrap()[chi].as_mut() {
+                          if let Some(subi) = self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner())[chi].as_mut() {
                             let (status, desc) = match flow.source {
                               FlowSource::Unicast(_) => (SubscriptionStatus::ReceivingUnicast, "unicast"),
                               FlowSource::Multicast(_) => {
@@ -1288,7 +1290,7 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
             None => None,
             Some(sub) => Some(SavedChannelState {
               local_channel_id: (index + 1) as u16,
-              local_channel_name: self.self_info.rx_channels[index].friendly_name.read().unwrap().clone(),
+              local_channel_name: self.self_info.rx_channels[index].friendly_name.read().unwrap_or_else(|e| e.into_inner()).clone(),
               tx_channel_name: sub.tx_channel_name.clone(),
               tx_hostname: sub.tx_hostname.clone(),
             }),
@@ -1325,12 +1327,12 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
         // TODO: this is actually harmful for the UX
         continue;
       }
-      self.subscriptions_info.write().unwrap()[lci] = Some(SubscriptionInfo {
+      self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner())[lci] = Some(SubscriptionInfo {
         tx_hostname: chst.tx_hostname.clone(),
         tx_channel_name: chst.tx_channel_name.clone(),
         status: SubscriptionStatus::Unresolved,
       });
-      //*self.self_info.rx_channels[lci].friendly_name.write().unwrap() = chst.local_channel_name;
+      //*self.self_info.rx_channels[lci].friendly_name.write().unwrap_or_else(|e| e.into_inner()) = chst.local_channel_name;
       self.subscribe(lci, &chst.tx_channel_name, &chst.tx_hostname).await;
     }
   }

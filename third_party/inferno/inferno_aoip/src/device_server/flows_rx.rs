@@ -98,6 +98,9 @@ struct FlowsReceiverInternal<P: ProxyToSamplesBuffer> {
   ref_instant: Instant,
   on_transfer: Option<TransferNotifier>,
   current_timestamp: Arc<AtomicUsize>,
+  // Virgil patch: keeps the waker's fd open (and registered) after the
+  // FlowsReceiver is dropped, so the wakeup its Drop sends is not lost.
+  _waker: Arc<mio::Waker>,
 }
 
 impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
@@ -115,6 +118,10 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
     // bad packets and errors are counted and skipped, never end the loop
     // (up to MAX_RECV_ERRORS of them per wakeup, in case an error repeats).
     let mut errors = 0usize;
+    // Virgil patch: the media clock is read once per wakeup, not per packet
+    // (a drain takes microseconds; it is used for latency stats and the
+    // timestamp sanity check below).
+    let now_opt = clock.wrapping_now_in_timebase(sample_rate.into());
     loop {
       match sd.socket.recv_from(&mut buf) {
         Ok((recv_size, src)) => {
@@ -127,14 +134,20 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
             .wrapping_mul(sample_rate as usize)
             .wrapping_add(u32::from_be_bytes([buf[5], buf[6], buf[7], buf[8]]) as usize)
             as Clock;
-          // TODO: add timestamp sanity checks with PTP clock
-
-          // TODO: optimize, fetching the hardware clock so often is suboptimal
-          // fetch it every n packets or use timestamped_socket and kernel-level timestamps instead
+          // Virgil patch: a packet stamped more than a second away from now (in
+          // either direction) is dropped: written, it would move the ring
+          // buffers' write position for good.
+          if let Some(now) = now_opt {
+            if wrapped_diff(now, timestamp).unsigned_abs() > sample_rate as usize {
+              super::rx_stats::recv_error();
+              Self::log_error(sd, format_args!("dropping packet with timestamp {timestamp}, now is {now}"));
+              continue;
+            }
+          }
 
           // can be wrapping because used only for latency calculation
           let mut age = None;
-          if let Some(now) = clock.wrapping_now_in_timebase(sample_rate.into()) {
+          if let Some(now) = now_opt {
             let latency = wrapped_diff(now, timestamp).clamp(0, i32::MAX as _);
             sd.actual_latency_samples.fetch_max(latency as _, Ordering::Relaxed);
             age = Some(latency as u64);
@@ -254,6 +267,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
         None
       };
       self.poll.poll(&mut events, timeout).log_and_forget();
+      // Virgil patch: a dropped FlowsReceiver (abnormal teardown, no Shutdown
+      // command) ends the thread, whether or not a waker event came.
+      if self.commands_receiver.is_closed() {
+        break;
+      }
 
       if self.clock_recv.update() {
         if let Some(ovl) = self.clock_recv.get() {
@@ -388,7 +406,11 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
                 sink
               };
 
-              let channel_opt = &mut socket.channels[channel_in_flow];
+              // Virgil patch: an out-of-range channel is skipped, not indexed
+              let Some(channel_opt) = socket.channels.get_mut(channel_in_flow) else {
+                error!("channel {channel_in_flow} out of range in receive flow {socket_index}");
+                break 'cmd;
+              };
 
               if channel_opt.is_none() {
                 let mut sinks = socket.empty_sinks_vecs.pop().expect("ran out of empty sinks");
@@ -502,6 +524,17 @@ impl<P: ProxyToSamplesBuffer> FlowsReceiverInternal<P> {
   }
 }
 
+// Virgil patch: dropping the receiver (without shutdown()) stops the receive
+// thread: it is sent Shutdown and woken (the sender is only dropped after this
+// runs, so a wakeup alone could find the channel still open). If the queue is
+// full, the thread drains it and then finds the channel closed.
+impl<P: ProxyToSamplesBuffer> Drop for FlowsReceiver<P> {
+  fn drop(&mut self) {
+    let _ = self.commands_sender.try_send(Command::Shutdown);
+    self.waker.wake().log_and_forget();
+  }
+}
+
 #[derive(Debug)]
 pub struct FlowInfo {
   pub rx_port: u16,
@@ -512,7 +545,7 @@ pub struct FlowInfo {
 
 pub struct FlowsReceiver<P: ProxyToSamplesBuffer> {
   commands_sender: mpsc::Sender<Command<P>>,
-  waker: mio::Waker,
+  waker: Arc<mio::Waker>, // Virgil patch: shared with the thread, see FlowsReceiverInternal
   max_channels: usize,
   pub flows_info: Arc<RwLock<Vec<Option<FlowInfo>>>>,
 }
@@ -528,6 +561,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
     on_transfer: Option<TransferNotifier>,
     current_timestamp: Arc<AtomicUsize>,
     max_channels: usize,
+    waker: Arc<mio::Waker>,
   ) {
     let mut internal = FlowsReceiverInternal {
       commands_receiver: rx,
@@ -540,6 +574,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       ref_instant,
       on_transfer,
       current_timestamp,
+      _waker: waker,
     };
     internal.run(start_time_rx);
   }
@@ -553,7 +588,8 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
   ) -> (Self, JoinHandle<()>) {
     let (tx, rx) = mpsc::channel(100);
     let poll = mio::Poll::new().unwrap();
-    let waker = mio::Waker::new(poll.registry(), WAKE_TOKEN).unwrap();
+    let waker = Arc::new(mio::Waker::new(poll.registry(), WAKE_TOKEN).unwrap());
+    let thread_waker = waker.clone();
     let srate = self_info.sample_rate;
     let max_channels = self_info.rx_channels.len();
     let thread_join = std::thread::Builder::new()
@@ -569,6 +605,7 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
           on_transfer,
           current_timestamp,
           max_channels,
+          thread_waker,
         );
       })
       .unwrap();
@@ -672,9 +709,14 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       // call and crashed the Dante engine).
       let mut flows_info = self.flows_info.write().unwrap_or_else(|e| e.into_inner());
       match flows_info.get_mut(local_flow_index).and_then(|f| f.as_mut()) {
-        Some(f) => {
-          f.channels_map[channel_in_flow].set(local_channel_index, true);
-        }
+        // Virgil patch: out-of-range channel indices are skipped, not indexed
+        Some(f) => match f.channels_map.get_mut(channel_in_flow).and_then(|m| m.set(local_channel_index, true)) {
+          Some(()) => {}
+          None => {
+            error!("channel {channel_in_flow}/{local_channel_index} out of range in receive flow {local_flow_index}");
+            return;
+          }
+        },
         None => {
           warn!("receive flow index={local_flow_index} is gone, not changing its channel {channel_in_flow}");
           return;
@@ -705,9 +747,14 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       // call and crashed the Dante engine).
       let mut flows_info = self.flows_info.write().unwrap_or_else(|e| e.into_inner());
       match flows_info.get_mut(local_flow_index).and_then(|f| f.as_mut()) {
-        Some(f) => {
-          f.channels_map[channel_in_flow].set(local_channel_index, false);
-        }
+        // Virgil patch: out-of-range channel indices are skipped, not indexed
+        Some(f) => match f.channels_map.get_mut(channel_in_flow).and_then(|m| m.set(local_channel_index, false)) {
+          Some(()) => {}
+          None => {
+            error!("channel {channel_in_flow}/{local_channel_index} out of range in receive flow {local_flow_index}");
+            return;
+          }
+        },
         None => {
           warn!("receive flow index={local_flow_index} is gone, not changing its channel {channel_in_flow}");
           return;
@@ -721,5 +768,63 @@ impl<P: ProxyToSamplesBuffer + Send + Sync + 'static> FlowsReceiver<P> {
       .await
       .log_and_forget();
     self.waker.wake().log_and_forget();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::ring_buffer::{new_owned, OwnedBuffer};
+
+  type P = OwnedBuffer<atomic::Atomic<Sample>>;
+
+  fn packet_at(ts: Clock, sample_rate: u32, frames: usize) -> Vec<u8> {
+    let mut p = vec![0u8; 9 + frames * 3];
+    p[1..5].copy_from_slice(&((ts / sample_rate as usize) as u32).to_be_bytes());
+    p[5..9].copy_from_slice(&((ts % sample_rate as usize) as u32).to_be_bytes());
+    p
+  }
+
+  // Virgil patch: packets stamped a second or more away from now are dropped
+  // (counted as receive errors) instead of moving the ring buffer.
+  #[test]
+  fn far_timestamps_are_dropped() {
+    let sr = 48000u32;
+    let mut clock = MediaClock::new(false);
+    clock.update_overlay(ClockOverlay { clock_id: 1, last_sync: 0, shift: 0, freq_scale: 0.0 });
+    let now = clock.wrapping_now_in_timebase(sr.into()).unwrap();
+    let (input, _output) = new_owned::<Sample>(4096, now, 0);
+    let socket = UdpSocket::bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    let addr = socket.local_addr().unwrap();
+    let mut sd: SocketData<P> = SocketData {
+      socket,
+      send_keepalives: false,
+      last_source: None,
+      last_packet_time: Arc::new(AtomicUsize::new(0)),
+      bytes_per_sample: 3,
+      latency_samples: 0,
+      channels: vec![Some(Channel { sinks: vec![input], timestamp_shift: 0, latency_samples: 0 })],
+      empty_sinks_vecs: vec![],
+      actual_latency_samples: Arc::new(AtomicI32::new(0)),
+      gaps: Default::default(),
+      error_log_quiet_until: None,
+      errors_suppressed: 0,
+    };
+    let sender = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    // Returns whether the packet was taken (only those set last_source).
+    // write=false: the drop check comes first, and the global rx_stats
+    // counters other tests read are left alone.
+    let send_and_receive = |sd: &mut SocketData<P>, clock: &mut MediaClock, ts: Clock| {
+      sd.last_source = None;
+      sender.send_to(&packet_at(ts, sr, 16), addr).unwrap();
+      let mut b = [0u8; 16];
+      let give_up = Instant::now() + Duration::from_secs(2);
+      while sd.socket.peek_from(&mut b).is_err() && Instant::now() < give_up {}
+      FlowsReceiverInternal::<P>::receive(sd, sr, clock, Instant::now(), false);
+      sd.last_source.is_some()
+    };
+    assert!(!send_and_receive(&mut sd, &mut clock, now.wrapping_add(10 * sr as usize)));
+    assert!(!send_and_receive(&mut sd, &mut clock, now.wrapping_sub(10 * sr as usize)));
+    assert!(send_and_receive(&mut sd, &mut clock, now));
   }
 }

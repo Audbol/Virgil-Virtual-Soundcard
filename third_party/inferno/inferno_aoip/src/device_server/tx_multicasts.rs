@@ -279,38 +279,41 @@ impl TransmitMulticasts {
   ) -> Result<(), std::io::Error> {
     let mut bundles = self.bundles.lock().await;
     if let Some(bundle) = bundles.get_mut(flow_index).and_then(|b| b.take()) {
+      // Virgil patch: the mDNS records and channel pointers are withdrawn even
+      // during shutdown (should_work is already false then, and returning
+      // early left the multicast advertised); only the flow removal itself
+      // is skipped when flows_tx is going away or gone.
       let mut flows_tx_opt = self.flows_tx.lock().await;
-      if let Some(flows_tx) = flows_tx_opt.as_mut() {
-        if !self.should_work.load(std::sync::atomic::Ordering::SeqCst) {
-          // flows_tx will be destroyed soon or was already changed
-          return Err(std::io::Error::from(std::io::ErrorKind::Interrupted));
-        }
-        let addr_int = bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst);
-        if addr_int != 0 {
-          self.mdns_server.remove_multicast_bundle(flow_index + 1);
-          self.mdns_server.remove_multicast_ip(Ipv4Addr::from_bits(addr_int));
-        }
-        let result = flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await;
-        {
-          let mut mcasts = self.multicasts_by_channel.write().unwrap();
-          for (_channel_in_bundle, chi_opt) in bundle.local_channel_indices.iter().enumerate() {
-            if let Some(chi) = chi_opt {
-              mcasts.remove(chi);
-            }
-          }
-        }
-        // refresh channels so that multicast will no longer be advertised
-        for index_opt in bundle.local_channel_indices {
-          if let Some(index) = index_opt {
-            self.mdns_server.remove_tx_channel(index);
-            self.mdns_server.add_tx_channel(index);
-          }
-        }
-        result
+      let addr_int = bundle.dst_addr.load(std::sync::atomic::Ordering::SeqCst);
+      if addr_int != 0 {
+        self.mdns_server.remove_multicast_bundle(flow_index + 1);
+        self.mdns_server.remove_multicast_ip(Ipv4Addr::from_bits(addr_int));
+      }
+      let result = if !self.should_work.load(std::sync::atomic::Ordering::SeqCst) {
+        // flows_tx will be destroyed soon or was already changed
+        Ok(())
+      } else if let Some(flows_tx) = flows_tx_opt.as_mut() {
+        flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await
       } else {
         // flows_tx has been destroyed
         Err(std::io::Error::from(std::io::ErrorKind::Interrupted))
+      };
+      {
+        let mut mcasts = self.multicasts_by_channel.write().unwrap_or_else(|e| e.into_inner());
+        for (_channel_in_bundle, chi_opt) in bundle.local_channel_indices.iter().enumerate() {
+          if let Some(chi) = chi_opt {
+            mcasts.remove(chi);
+          }
+        }
       }
+      // refresh channels so that multicast will no longer be advertised
+      for index_opt in bundle.local_channel_indices {
+        if let Some(index) = index_opt {
+          self.mdns_server.remove_tx_channel(index);
+          self.mdns_server.add_tx_channel(index);
+        }
+      }
+      result
     } else if !ignore_nonexisting {
       error!("BUG: trying to remove nonexisting multicast TX flow index {flow_index}");
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))

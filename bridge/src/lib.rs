@@ -11,7 +11,7 @@
 use std::collections::BTreeMap;
 use std::ffi::{c_char, CStr, CString};
 use std::net::Ipv4Addr;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{mpsc, Arc, RwLock};
 use std::thread::JoinHandle;
 
@@ -47,7 +47,50 @@ pub struct VgDanteConfig {
 struct Handle {
     stop: Option<tokio::sync::oneshot::Sender<()>>,
     thread: Option<JoinHandle<()>>,
-    valid: Arc<RwLock<bool>>,
+    // One flag per direction: the TX and RX real-time threads each lock
+    // theirs on every buffer access, and one shared flag made them contend
+    // on one cache line. See valid_flags().
+    valid_tx: Arc<RwLock<bool>>,
+    valid_rx: Arc<RwLock<bool>>,
+    _valid_spacers: Vec<Arc<RwLock<bool>>>,
+    // Set once the engine has started (its transmitter and receiver run).
+    ready: Arc<AtomicBool>,
+    // This instance's crash flag (see install_panic_hook).
+    panicked: Arc<AtomicBool>,
+}
+
+impl Handle {
+    fn invalidate(&self) {
+        invalidate(&self.valid_tx, &self.valid_rx);
+    }
+}
+
+fn invalidate(valid_tx: &RwLock<bool>, valid_rx: &RwLock<bool>) {
+    *valid_tx.write().unwrap_or_else(|e| e.into_inner()) = false;
+    *valid_rx.write().unwrap_or_else(|e| e.into_inner()) = false;
+}
+
+/// Two validity flags whose allocations do not share a 128-byte block (a
+/// cache line, or an adjacent-line prefetch pair). Allocations that would are
+/// kept aside (returned as spacers, to keep alive with the flags) and retried.
+fn valid_flags() -> (Arc<RwLock<bool>>, Arc<RwLock<bool>>, Vec<Arc<RwLock<bool>>>) {
+    // Arc's allocation: two counters, then the value.
+    let span = |a: &Arc<RwLock<bool>>| {
+        let p = Arc::as_ptr(a) as usize;
+        let start = p - 2 * std::mem::size_of::<usize>();
+        (start / 128, (p + std::mem::size_of::<RwLock<bool>>() - 1) / 128)
+    };
+    let tx = Arc::new(RwLock::new(true));
+    let (t0, t1) = span(&tx);
+    let mut spacers = Vec::new();
+    loop {
+        let rx = Arc::new(RwLock::new(true));
+        let (r0, r1) = span(&rx);
+        if r1 < t0 || r0 > t1 || spacers.len() >= 64 {
+            return (tx, rx, spacers);
+        }
+        spacers.push(rx);
+    }
 }
 
 // ---- logging ----------------------------------------------------------------
@@ -81,7 +124,11 @@ impl log::Log for BridgeLogger {
 
 static LOGGER: BridgeLogger = BridgeLogger;
 static TEST_CRASHED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
-static PANICKED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// The crash flag of the running instance. Each start installs a fresh one
+/// and stop detaches it, so a thread a stopped instance left behind that
+/// crashes later does not mark the next instance unhealthy (unless it crashes
+/// while that one runs: a panic cannot be traced to its instance).
+static PANICKED: RwLock<Option<Arc<AtomicBool>>> = RwLock::new(None);
 
 /// Inferno runs its audio on threads of its own: a panic there would end the
 /// thread silently. Log it (synchronously, it is the last word) and flag it
@@ -90,7 +137,9 @@ fn install_panic_hook() {
     static ONCE: std::sync::Once = std::sync::Once::new();
     ONCE.call_once(|| {
         std::panic::set_hook(Box::new(|info| {
-            PANICKED.store(true, std::sync::atomic::Ordering::SeqCst);
+            if let Some(flag) = PANICKED.read().unwrap_or_else(|e| e.into_inner()).as_ref() {
+                flag.store(true, Ordering::SeqCst);
+            }
             let thread = std::thread::current().name().unwrap_or("?").to_owned();
             let msg = info
                 .payload()
@@ -358,7 +407,8 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     *LAST_ERROR.lock().unwrap() = None;
     start_log_thread();
     install_panic_hook();
-    PANICKED.store(false, std::sync::atomic::Ordering::SeqCst);
+    let panicked = Arc::new(AtomicBool::new(false));
+    *PANICKED.write().unwrap_or_else(|e| e.into_inner()) = Some(panicked.clone());
     // Tests: simulate a crash in one of the Dante threads after N seconds.
     if let Some(secs) = std::env::var("VIRGIL_TEST_DANTE_CRASH_S").ok().and_then(|s| s.parse::<u64>().ok()) {
         if !TEST_CRASHED.swap(true, std::sync::atomic::Ordering::SeqCst) {
@@ -378,6 +428,11 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
     if !frames_ok(c.tx_ring_frames) || !frames_ok(c.rx_ring_frames) {
         log_line(0, "dante: ring sizes must be powers of two");
         set_last_error("ring sizes must be powers of two");
+        return std::ptr::null_mut();
+    }
+    if (c.tx_channels > 0 && c.tx_ring.is_null()) || (c.rx_channels > 0 && c.rx_ring.is_null()) {
+        log_line(0, "dante: a ring is NULL but has channels");
+        set_last_error("a ring is missing for its channels");
         return std::ptr::null_mut();
     }
     let ip: Option<Ipv4Addr> = cstr(c.bind_ip).and_then(|s| s.parse().ok());
@@ -406,9 +461,11 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         cfg.insert("ALT_PORT".to_owned(), c.alt_port.to_string());
     }
 
-    let valid = Arc::new(RwLock::new(true));
-    let tx_views = channel_views(c.tx_ring, c.tx_ring_frames as usize, c.tx_channels as usize, &valid);
-    let rx_views = channel_views(c.rx_ring, c.rx_ring_frames as usize, c.rx_channels as usize, &valid);
+    let (valid_tx, valid_rx, valid_spacers) = valid_flags();
+    let tx_views = channel_views(c.tx_ring, c.tx_ring_frames as usize, c.tx_channels as usize, &valid_tx);
+    let rx_views = channel_views(c.rx_ring, c.rx_ring_frames as usize, c.rx_channels as usize, &valid_rx);
+    let ready = Arc::new(AtomicBool::new(false));
+    let ready2 = ready.clone();
     let (tx_ch, rx_ch) = (c.tx_channels, c.rx_channels);
 
     let (stop_tx, stop_rx) = tokio::sync::oneshot::channel::<()>();
@@ -437,6 +494,7 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
                     let _ = t.send(0);
                     server.transmit_from_external_buffer(tx_views, r, Arc::new(AtomicUsize::new(usize::MAX)), None).await;
                 }
+                ready2.store(true, Ordering::SeqCst);
                 let _ = ready_tx2.send(Ok(()));
                 let _ = stop_rx.await;
                 if tx_ch > 0 {
@@ -462,21 +520,30 @@ pub unsafe extern "C" fn vg_dante_start(config: *const VgDanteConfig) -> *mut st
         Ok(t) => t,
         Err(_) => return std::ptr::null_mut(),
     };
+    let handle = |thread| Handle {
+        stop: Some(stop_tx),
+        thread: Some(thread),
+        valid_tx: valid_tx.clone(),
+        valid_rx: valid_rx.clone(),
+        _valid_spacers: valid_spacers,
+        ready,
+        panicked,
+    };
     match ready_rx.recv_timeout(std::time::Duration::from_secs(15)) {
-        Ok(Ok(())) => Box::into_raw(Box::new(Handle { stop: Some(stop_tx), thread: Some(thread), valid })) as *mut _,
+        Ok(Ok(())) => Box::into_raw(Box::new(handle(thread))) as *mut _,
         Ok(Err(e)) => {
             log_line(0, &format!("dante: start failed: {e}"));
             set_last_error(&e);
             let _ = thread.join();
             // Inferno threads that already took the ring views may outlive
             // this one: they must stop touching the rings the caller frees.
-            *valid.write().unwrap() = false;
+            invalidate(&valid_tx, &valid_rx);
             std::ptr::null_mut()
         }
         Err(_) => {
             log_line(0, "dante: start timed out");
             // Leave the thread; it owns nothing the caller frees until stop.
-            Box::into_raw(Box::new(Handle { stop: Some(stop_tx), thread: Some(thread), valid })) as *mut _
+            Box::into_raw(Box::new(handle(thread))) as *mut _
         }
     }
 }
@@ -507,11 +574,16 @@ pub unsafe extern "C" fn vg_dante_stop(handle: *mut std::ffi::c_void) {
     }
     // Inferno may still hold views until its threads are gone; past this
     // point none of them touches the rings.
-    *h.valid.write().unwrap() = false;
+    h.invalidate();
+    // Detach this instance's crash flag (unless a newer instance installed its own).
+    let mut cur = PANICKED.write().unwrap_or_else(|e| e.into_inner());
+    if cur.as_ref().is_some_and(|f| Arc::ptr_eq(f, &h.panicked)) {
+        *cur = None;
+    }
 }
 
-/// 1 while the Dante stack runs normally; 0 once any of its threads crashed
-/// or the main thread ended.
+/// 1 while the Dante stack runs normally; 0 before it has started (a start
+/// that timed out), once any of its threads crashed or the main thread ended.
 ///
 /// # Safety
 /// `handle` must come from vg_dante_start and not have been stopped.
@@ -522,5 +594,5 @@ pub unsafe extern "C" fn vg_dante_healthy(handle: *mut std::ffi::c_void) -> i32 
     }
     let h = &*(handle as *const Handle);
     let finished = h.thread.as_ref().map_or(true, |t| t.is_finished());
-    (!finished && !PANICKED.load(std::sync::atomic::Ordering::SeqCst)) as i32
+    (h.ready.load(Ordering::SeqCst) && !finished && !h.panicked.load(Ordering::SeqCst)) as i32
 }

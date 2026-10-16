@@ -165,7 +165,7 @@ pub async fn run_server(
                 tx_hostname_offset,
                 friendly_name_offset: write_0term_str_to_bytebuffer(
                   bytes,
-                  &ch.friendly_name.read().unwrap(),
+                  &ch.friendly_name.read().unwrap_or_else(|e| e.into_inner()),
                 ),
                 subscription_status: status_value,
                 unknown2_0: 0,
@@ -220,7 +220,7 @@ pub async fn run_server(
                 channel_id_2: channel_id,
                 friendly_name_offset: write_0term_str_to_bytebuffer(
                   bytes,
-                  &ch.friendly_name.read().unwrap(),
+                  &ch.friendly_name.read().unwrap_or_else(|e| e.into_inner()),
                 ),
               })
             },
@@ -536,7 +536,7 @@ pub async fn run_server(
               &mut conn,
               content,
               MAX_RX_FLOWS.min(16).try_into().unwrap(),
-              chsub.flows_info().read().unwrap().iter().enumerate(),
+              chsub.flows_info().read().unwrap_or_else(|e| e.into_inner()).iter().enumerate(),
               |(flow_index, flow_opt), bytes| -> Option<u16> {
                 flow_opt.as_ref().map(|flow_info| -> u16 {
                   align_wpos(bytes, 4);
@@ -748,7 +748,8 @@ pub async fn run_server(
         }
 
         x => {
-          if reported_unknown.insert((x, 0)) {
+          // Virgil patch: the set is bounded (a remote can send any opcodes)
+          if reported_unknown.len() < 256 && reported_unknown.insert((x, 0)) {
             info!("received unknown opcode1 {x:#04x} (further ones not logged), content {}", hex::encode(request.content()));
             info!("whole packet: {:?}", hex::encode(request.into_storage()));
           }
@@ -756,7 +757,7 @@ pub async fn run_server(
       }
     } else {
       let op2 = request.opcode2().read();
-      if reported_unknown.insert((request.opcode1().read(), op2)) {
+      if reported_unknown.len() < 256 && reported_unknown.insert((request.opcode1().read(), op2)) {
         info!(
           "received unknown opcode2 {:#04x} (further ones not logged), content {}",
           op2,
