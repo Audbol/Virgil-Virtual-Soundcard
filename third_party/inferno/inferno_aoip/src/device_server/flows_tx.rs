@@ -777,6 +777,7 @@ impl FlowsTransmitter {
         // Virgil patch: on Windows an ICMP "port unreachable" from a gone
         // receiver would otherwise fail later sends with WSAECONNRESET.
         crate::net_utils::tune_flow_socket(&socket, None);
+        crate::net_utils::mark_audio_socket(&socket);
         //socket.set_read_timeout(Some(Duration::from_micros(1)))?;
 
         self

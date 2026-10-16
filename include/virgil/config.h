@@ -8,6 +8,10 @@
 
 namespace virgil {
 
+// Largest receive / transmit latency (us). Past 40 ms is for Wi-Fi: the
+// receiving side has to buffer that much (see dante_*_ring_frames).
+constexpr uint32_t kMaxLatencyUs = 200000;
+
 struct Config {
   std::string device_name = "Virgil";  // name in Dante Controller (<= 31 chars)
   std::string interface;  // name or IPv4 of the Dante network NIC; empty = first active
@@ -35,6 +39,10 @@ struct Config {
   std::string clock = "ptp";          // ptp | free
   std::string ptp_subdomain = "_DFLT";
   bool ptp_master_capable = false;    // only for networks without Dante hardware
+  // Wi-Fi: clock packets arrive with milliseconds of jitter and in bunches;
+  // filter them over a longer window and tolerate larger errors before
+  // realigning (steadier, slower to settle).
+  bool ptp_wifi = false;
 
   uint32_t control_port = 8480;       // local web control panel; 0 = off
   // The web panel also on the network (all IPv4 addresses, control_port),
@@ -79,6 +87,11 @@ struct Config {
   uint32_t tx_lead_frames() const {
     return tx_lead_us ? us_to_frames(tx_lead_us) : 2 * period_frames();
   }
+  // Sizes of the rings shared with Inferno (frames, powers of two): at least
+  // ring_frames, and large enough for the receive / transmit latency, which
+  // can exceed what the drivers' shared-memory ring is sized for (40 ms).
+  uint32_t dante_rx_ring_frames() const;
+  uint32_t dante_tx_ring_frames() const;
 };
 
 // Parse INI text. On failure returns false and fills `error` ("line N: ...").

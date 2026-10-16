@@ -143,7 +143,7 @@ class Engine {
   void* dante_ = nullptr;
   uint16_t alt_port_ = 0;  // 0 = standard Dante ports
   std::vector<int32_t> dtx_, drx_;  // Dante-side rings (32-bit, interleaved)
-  uint32_t dring_ = 0;
+  uint32_t dtring_ = 0, drring_ = 0;  // Dante-side ring sizes (frames)
   std::vector<float> mix_;
   std::thread tick_thread_;
   std::atomic<bool> running_{false};

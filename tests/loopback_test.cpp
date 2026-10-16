@@ -23,8 +23,8 @@ using namespace virgil;
 static void wait_ms(int ms) { sleep_until_ns(mono_ns() + int64_t(ms) * 1000000); }
 
 // `C` channels each way (the shared memory layout has room for kMaxChannels),
-// mixing every `tick_us`.
-static void loopback(uint32_t C, uint32_t tick_us = 1000) {
+// mixing every `tick_us`, at the given receive and transmit latencies.
+static void loopback(uint32_t C, uint32_t tick_us = 1000, uint32_t latency_us = 20000, uint32_t tx_latency_us = 4000) {
   g_log_level = kLogWarn;
   Config c;
   c.device_name = "Loop Test";
@@ -42,9 +42,9 @@ static void loopback(uint32_t C, uint32_t tick_us = 1000) {
   c.rx_channels = C;
   // Generous receive latency: the simulator below is an ordinary thread that
   // a loaded CI machine may delay by several milliseconds.
-  c.latency_us = 20000;
-  c.tx_latency_us = 4000;
-  c.ring_frames = 16384;
+  c.latency_us = latency_us;
+  c.tx_latency_us = tx_latency_us;
+  c.ring_frames = latency_us > 40000 || tx_latency_us > 40000 ? 0 : 16384;
   c.tick_us = tick_us;
   std::string err;
   CHECK(validate_config(&c, &err));
@@ -58,7 +58,9 @@ static void loopback(uint32_t C, uint32_t tick_us = 1000) {
   // latency; the receiver writes it at stamp + its latency.
   const uint64_t L = c.us_to_frames(c.tx_send_delay_us()), RL = c.us_to_frames(c.latency_us);
   const uint64_t D = c.us_to_frames(c.tx_latency_us) + RL;
-  const uint64_t dmask = c.ring_frames - 1;
+  // Past 40 ms the Dante rings are larger than the drivers' ring.
+  const uint64_t txmask = c.dante_tx_ring_frames() - 1, rxmask = c.dante_rx_ring_frames() - 1;
+  CHECK(e.dante_tx_ring().size() == size_t(txmask + 1) * C && e.dante_rx_ring().size() == size_t(rxmask + 1) * C);
 
   // Network simulator: what Inferno + the wire + a receiving Inferno do.
   std::atomic<bool> sim_run{true};
@@ -78,7 +80,7 @@ static void loopback(uint32_t C, uint32_t tick_us = 1000) {
       const uint64_t sent_until = media > lag ? media - lag : 0;
       for (; done < sent_until; ++done)
         for (uint32_t ch = 0; ch < C; ++ch)
-          rx[size_t((done + D) & dmask) * C + ch] = tx[size_t(done & dmask) * C + ch];
+          rx[size_t((done + D) & rxmask) * C + ch] = tx[size_t(done & txmask) * C + ch];
     }
   });
 
@@ -174,5 +176,7 @@ TEST(soundcard_loopback_128_channels) { loopback(kMaxChannels); }
 // The 0.5 ms tick Virgil Control offers: 24-frame periods at 48 kHz.
 TEST(soundcard_loopback_half_ms_tick) { loopback(8, 500); }
 TEST(soundcard_loopback_half_ms_tick_128_channels) { loopback(kMaxChannels, 500); }
+// Wi-Fi latencies: 150 ms receive, 120 ms transmit, beyond the drivers' ring.
+TEST(soundcard_loopback_wifi_latencies) { loopback(8, 1000, 150000, 120000); }
 
 TEST_MAIN()

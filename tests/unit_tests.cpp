@@ -241,6 +241,43 @@ TEST(servo_ignores_single_late_timestamp) {
   }
 }
 
+TEST(servo_wifi_rides_through_jitter) {
+  // Simulated Wi-Fi: each 4 s window's best Sync (of 16) is ~0.1-1 ms late,
+  // and for three windows in every fifty all of them are 5+ ms late (power
+  // saving, retries); the local clock is 80 ppm off. The Wi-Fi servo never
+  // realigns, locks within minutes and stays within 2 ms of the master; the
+  // wired one realigns again and again on the same input.
+  auto run = [](bool wifi, int* steps, int* lock_s, double* max_err_ms) {
+    PiServo servo;
+    servo.set_wifi(wifi);
+    std::mt19937 g(2);
+    std::exponential_distribution<double> late_ms(1.0 / 2.0);
+    *steps = 0, *lock_s = -1, *max_err_ms = 0;
+    for (int i = 0; i < 900; ++i) {
+      const double t = 4.0 * (i + 1);
+      const int64_t master = 1700000000000000000LL + int64_t(t * 1e9);
+      const int64_t local_true = 1000000000LL + int64_t(t * 1e9 * (1 - 80e-6));
+      double best = 1e9;
+      for (int k = 0; k < 16; ++k) best = std::min(best, late_ms(g) + (i % 50 < 3 ? 5 + 2 * late_ms(g) : 0));
+      if (servo.sample(local_true + int64_t(best * 1e6), master) == PiServo::kStep && i > 2) ++*steps;
+      if (servo.locked() && *lock_s < 0) *lock_s = int(t);
+      if (t > 600) *max_err_ms = std::max(*max_err_ms, std::fabs(double(servo.model().ptp_at(local_true) - master)) / 1e6);
+    }
+  };
+  int steps, lock_s;
+  double max_err;
+  run(true, &steps, &lock_s, &max_err);
+  CHECK(steps == 0);
+  CHECK(lock_s > 0 && lock_s < 600);
+  CHECK(max_err < 2.0);
+  run(false, &steps, &lock_s, &max_err);
+  CHECK(steps > 5);
+  PiServo wired;
+  wired.set_wifi(true);
+  wired.set_wifi(false);
+  CHECK(wired.step_threshold_ns == PiServo{}.step_threshold_ns && wired.seed_after_ns == PiServo{}.seed_after_ns);
+}
+
 TEST(servo_rides_through_transient_ms_offset) {
   // Three windows see the master 1.1 ms off (path-delay or timestamp
   // disturbance), then it is back: no step either way (each would be a
@@ -675,6 +712,37 @@ TEST(config_latency_errors_in_ms) {
   Config t;
   parse_config("[device]\ntx_latency_us = 1000\n", &t, &err);
   CHECK(!validate_config(&t, &err) && err.find("3.5 ms") != std::string::npos);
+}
+
+TEST(config_wifi_latencies) {
+  std::string err;
+  Config ok;
+  CHECK(parse_config("[device]\nsample_rate = 96000\nrx_channels = 128\ntx_channels = 128\n"
+                     "latency_us = 200000\ntx_latency_us = 200000\n[ptp]\nwifi = true\n",
+                     &ok, &err));
+  CHECK(validate_config(&ok, &err));
+  CHECK(ok.ptp_wifi);
+  // The drivers' shared ring stays the size of a 40 ms configuration...
+  Config forty;
+  parse_config("[device]\nsample_rate = 96000\nlatency_us = 40000\ntx_latency_us = 40000\n", &forty, &err);
+  CHECK(validate_config(&forty, &err));
+  CHECK(ok.ring_frames == forty.ring_frames);
+  CHECK(forty.dante_rx_ring_frames() == forty.ring_frames && forty.dante_tx_ring_frames() == forty.ring_frames);
+  // ...while the Dante rings hold the latency with room to spare.
+  for (uint32_t r : {ok.dante_rx_ring_frames(), ok.dante_tx_ring_frames()}) {
+    CHECK((r & (r - 1)) == 0 && r >= ok.ring_frames);
+    CHECK(r / 2 > ok.us_to_frames(200000));
+  }
+  CHECK(ok.dante_rx_ring_frames() <= (1u << 17) && ok.dante_tx_ring_frames() <= (1u << 17));
+  Config over;
+  parse_config("[device]\nlatency_us = 200001\n", &over, &err);
+  CHECK(!validate_config(&over, &err) && err.find("200 ms") != std::string::npos);
+  Config tover;
+  parse_config("[device]\ntx_latency_us = 250000\n", &tover, &err);
+  CHECK(!validate_config(&tover, &err) && err.find("200 ms") != std::string::npos);
+  // Written back only when on.
+  CHECK(format_config(ok).find("wifi = true") != std::string::npos);
+  CHECK(format_config(forty).find("wifi") == std::string::npos);
 }
 
 TEST(control_no_clock_leader_notice) {

@@ -447,14 +447,20 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
                     "Receive latency in Settings.",
                     rx_latency_ms_));
   if (net_late && age > 0) {
-    static const double steps[] = {1, 2, 4, 5, 10, 20};
+    static const double steps[] = {1, 2, 4, 5, 10, 20, 40, 50, 100, 150, 200};
     double want = 0;
     for (double s : steps)
       if (s > rx_latency_ms_ && s >= age * 1.2 + 0.5) {
         want = s;
         break;
       }
-    if (want > 0)
+    if (want > 40)
+      h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old; receive "
+                      "latency %.1f ms). Packets that late come from Wi-Fi or an overloaded network path: use "
+                      "wired Ethernet if you can, otherwise raise Receive latency to %g ms and turn on Wi-Fi "
+                      "network in Settings.",
+                      age, rx_latency_ms_, want));
+    else if (want > 0)
       h.push_back(fmt("Audio from the network arrived too late and was lost (packets up to %.1f ms old; receive "
                       "latency %.1f ms). Raise Receive latency to %g ms in Settings.",
                       age, rx_latency_ms_, want));
@@ -469,7 +475,7 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
   const TxLatencySuggestion sug = tx_suggestion_locked();
   const bool sug_ready = sug.state == TxLatencySuggestion::State::Ready;
   if (send_lag > 0) {
-    static const double steps[] = {1, 2, 4, 5, 10, 20, 40};
+    static const double steps[] = {1, 2, 4, 5, 10, 20, 40};  // past 40 ms only for Wi-Fi (receivers must buffer it)
     double want = 0;
     if (sug_ready && sug.direction == TxLatencySuggestion::Direction::Raise && sug.suggested_ms > tx_latency_ms_) {
       want = sug.suggested_ms;

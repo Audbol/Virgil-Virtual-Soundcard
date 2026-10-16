@@ -127,8 +127,19 @@ mod sockopt {
   const SOL_SOCKET: c_int = 0xffff;
   #[cfg(not(any(target_os = "linux", target_os = "android")))]
   const SO_RCVBUF: c_int = 0x1002;
+  const IPPROTO_IP: c_int = 0;
+  #[cfg(any(target_os = "linux", target_os = "android"))]
+  const IP_TOS: c_int = 1;
+  #[cfg(not(any(target_os = "linux", target_os = "android")))]
+  const IP_TOS: c_int = 3;
   extern "C" {
     fn setsockopt(fd: c_int, level: c_int, name: c_int, value: *const c_void, len: u32) -> c_int;
+  }
+  pub fn set_tos(fd: c_int, tos: u8) -> bool {
+    let v: c_int = tos as c_int;
+    unsafe {
+      setsockopt(fd, IPPROTO_IP, IP_TOS, &v as *const c_int as *const c_void, std::mem::size_of::<c_int>() as u32) == 0
+    }
   }
   pub fn set_rcvbuf(fd: c_int, bytes: usize) -> bool {
     let v: c_int = bytes.min(c_int::MAX as usize) as c_int;
@@ -167,6 +178,16 @@ mod sockopt {
     unsafe {
       setsockopt(s, SOL_SOCKET, SO_RCVBUF, &v as *const c_int as *const c_char, std::mem::size_of::<c_int>() as c_int)
         == 0
+    }
+  }
+  const IPPROTO_IP: c_int = 0;
+  const IP_TOS: c_int = 3;
+  /// Windows only applies it where a QoS policy allows it (otherwise the
+  /// call succeeds and the packets go out unmarked).
+  pub fn set_tos(s: usize, tos: u8) -> bool {
+    let v: c_int = tos as c_int;
+    unsafe {
+      setsockopt(s, IPPROTO_IP, IP_TOS, &v as *const c_int as *const c_char, std::mem::size_of::<c_int>() as c_int) == 0
     }
   }
   /// Without this, an ICMP "port unreachable" (e.g. answering a keepalive
@@ -224,6 +245,27 @@ pub fn tune_flow_socket<S: std::os::windows::io::AsRawSocket>(socket: &S, rcvbuf
   }
 }
 
+/// DSCP of audio packets: EF (46), as Dante devices mark them. Wi-Fi (WMM)
+/// then sends them from the voice queue and QoS switches ahead of other
+/// traffic; unmarked they waited behind everything else.
+pub const AUDIO_DSCP: u8 = 46;
+
+/// Marks a socket that sends audio with AUDIO_DSCP (best effort).
+#[cfg(unix)]
+pub fn mark_audio_socket<S: std::os::fd::AsRawFd>(socket: &S) {
+  if !sockopt::set_tos(socket.as_raw_fd(), AUDIO_DSCP << 2) {
+    log::debug!("could not set the DSCP of an audio socket");
+  }
+}
+
+/// Marks a socket that sends audio with AUDIO_DSCP (best effort).
+#[cfg(windows)]
+pub fn mark_audio_socket<S: std::os::windows::io::AsRawSocket>(socket: &S) {
+  if !sockopt::set_tos(socket.as_raw_socket() as usize, AUDIO_DSCP << 2) {
+    log::debug!("could not set the DSCP of an audio socket");
+  }
+}
+
 #[cfg(test)]
 mod tests {
   use super::*;
@@ -233,5 +275,23 @@ mod tests {
     let (socket, _) = create_mio_udp_socket(Ipv4Addr::LOCALHOST).unwrap();
     // just must not fail or panic; the size actually granted depends on the OS
     tune_flow_socket(&socket, Some(FLOW_RX_SOCKET_BUFFER_BYTES));
+  }
+
+  #[test]
+  fn audio_socket_gets_marked() {
+    let socket = std::net::UdpSocket::bind("127.0.0.1:0").unwrap();
+    mark_audio_socket(&socket);
+    #[cfg(unix)]
+    {
+      use std::os::fd::AsRawFd;
+      extern "C" {
+        fn getsockopt(fd: i32, level: i32, name: i32, value: *mut std::os::raw::c_void, len: *mut u32) -> i32;
+      }
+      let (mut v, mut len) = (0i32, 4u32);
+      let ip_tos = if cfg!(any(target_os = "linux", target_os = "android")) { 1 } else { 3 };
+      let r = unsafe { getsockopt(socket.as_raw_fd(), 0, ip_tos, &mut v as *mut i32 as *mut _, &mut len) };
+      assert_eq!(r, 0);
+      assert_eq!(v & 0xfc, (AUDIO_DSCP as i32) << 2);
+    }
   }
 }

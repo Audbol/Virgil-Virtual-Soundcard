@@ -163,9 +163,10 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
   mix_.assign(size_t(hdr_->period_frames) * std::max(1u, cfg_.tx_channels), 0.f);
 
   // --- Dante-side rings ---
-  dring_ = cfg_.ring_frames;
-  dtx_.assign(size_t(dring_) * std::max(1u, cfg_.tx_channels), 0);
-  drx_.assign(size_t(dring_) * std::max(1u, cfg_.rx_channels), 0);
+  dtring_ = cfg_.dante_tx_ring_frames();
+  drring_ = cfg_.dante_rx_ring_frames();
+  dtx_.assign(size_t(dtring_) * std::max(1u, cfg_.tx_channels), 0);
+  drx_.assign(size_t(drring_) * std::max(1u, cfg_.rx_channels), 0);
 
   // --- clock ---
   if (clock) {
@@ -176,6 +177,7 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     o.interface_addr = iface_;
     o.subdomain = cfg_.ptp_subdomain;
     o.master_capable = cfg_.ptp_master_capable;
+    o.wifi = cfg_.ptp_wifi;
     p->set_listener(&Engine::on_clock, this);
     if (!p->start(o)) {
       VIRGIL_LOG_WARN("falling back to a free-running clock; Dante devices will not lock to it");
@@ -203,9 +205,9 @@ bool Engine::start(std::unique_ptr<ClockSource> clock) {
     dc.tx_send_delay_ns = cfg_.tx_send_delay_us() * 1000;
     dc.rx_latency_ns = cfg_.latency_us * 1000;
     dc.tx_ring = dtx_.data();
-    dc.tx_ring_frames = dring_;
+    dc.tx_ring_frames = dtring_;
     dc.rx_ring = drx_.data();
-    dc.rx_ring_frames = dring_;
+    dc.rx_ring_frames = drring_;
     dc.mono_ns = &bridge_mono_ns;
     dc.log = &bridge_log;
     // Without configured names the device keeps its own; with any, every
@@ -395,7 +397,7 @@ void Engine::tick_loop() {
 
   const uint32_t ring = cfg_.ring_frames;
   const uint64_t mask = ring - 1;
-  const uint64_t dmask = dring_ - 1;
+  const uint64_t dtmask = dtring_ - 1, drmask = drring_ - 1;
   const uint32_t txch = cfg_.tx_channels;
   const uint32_t rxch = cfg_.rx_channels;
   float* rx = rx_ring_at(hdr_, ring, txch);
@@ -463,10 +465,10 @@ void Engine::tick_loop() {
         if (rxch) zero_before(rx, mask, rxch, to + ring / 2 - P, skipped + ring / 2 + 2 * P);
         // Transmit ring: [o-P, to-P) never written, half a ring ahead not
         // silenced. Inferno is reading it: silence goes out.
-        if (txch) zero_before(dtx_.data(), dmask, txch, to + dring_ / 2 - P, skipped + dring_ / 2);
+        if (txch) zero_before(dtx_.data(), dtmask, txch, to + dtring_ / 2 - P, skipped + dtring_ / 2);
         // Receive ring: [o-4P, to-3P) would have been cleared; frames from
         // to-3P on are still to be copied.
-        if (rxch) zero_before(drx_.data(), dmask, rxch, to - 3 * P, std::min<uint64_t>(skipped + P, dring_ / 2));
+        if (rxch) zero_before(drx_.data(), drmask, rxch, to - 3 * P, std::min<uint64_t>(skipped + P, drring_ / 2));
         next = to;
       }
       scan_late = false;
@@ -542,7 +544,7 @@ void Engine::tick_loop() {
       float peaks[kMaxChannels] = {};
       for (uint32_t f = 0; f < P; ++f) {
         const float* src = mix_.data() + size_t(f) * txch;
-        int32_t* dst = dtx_.data() + size_t((start + f) & dmask) * txch;
+        int32_t* dst = dtx_.data() + size_t((start + f) & dtmask) * txch;
         for (uint32_t c = 0; c < txch; ++c) {
           dst[c] = float_to_s32(src[c]);
           peaks[c] = std::max(peaks[c], std::fabs(src[c]));
@@ -560,7 +562,7 @@ void Engine::tick_loop() {
         uint64_t lost = 0;
         const uint64_t old = next - 4 * P;
         for (uint32_t f = 0; f < P; ++f) {
-          int32_t* src = drx_.data() + size_t((old + f) & dmask) * rxch;
+          int32_t* src = drx_.data() + size_t((old + f) & drmask) * rxch;
           int32_t any = 0;
           for (uint32_t c = 0; c < rxch; ++c) any |= src[c];
           if (any) {
@@ -574,14 +576,14 @@ void Engine::tick_loop() {
       const uint64_t start = next - 3 * P;
       float peaks[kMaxChannels] = {};
       for (uint32_t f = 0; f < 2 * P; ++f) {
-        const int32_t* src = drx_.data() + size_t((start + f) & dmask) * rxch;
+        const int32_t* src = drx_.data() + size_t((start + f) & drmask) * rxch;
         float* dst = rx + size_t((start + f) & mask) * rxch;
         for (uint32_t c = 0; c < rxch; ++c) dst[c] = s32_to_float(src[c]);
         if (f < P)  // final copy: meter it once
           for (uint32_t c = 0; c < rxch; ++c) peaks[c] = std::max(peaks[c], std::fabs(dst[c]));
       }
       // Consumed: a stopped stream must not replay a ring later.
-      zero_frames(drx_.data(), dmask, rxch, start, P);
+      zero_frames(drx_.data(), drmask, rxch, start, P);
       for (uint32_t c = 0; c < rxch; ++c)
         if (peaks[c] > 0) peak_max(rx_peak_[c], peaks[c]);
       // Silence the capture slot half a ring ahead (== half a ring behind).
@@ -591,7 +593,7 @@ void Engine::tick_loop() {
       // Inferno reads the transmit ring by media time and never clears it:
       // silence the slots half a ring ahead, so a stalled tick sends
       // silence, not audio from a ring ago.
-      zero_frames(dtx_.data(), dmask, txch, next + dring_ / 2 - P, P);
+      zero_frames(dtx_.data(), dtmask, txch, next + dtring_ / 2 - P, P);
     }
 
     next += P;

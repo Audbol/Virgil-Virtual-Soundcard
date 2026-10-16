@@ -20,12 +20,15 @@ sample_rate = 48000
 tx_channels = 8
 rx_channels = 8
 # Receive latency, like Dante's device latency setting: how long received
-# audio is buffered. 1000-2000 us on a clean gigabit LAN, more otherwise.
+# audio is buffered. 1000-2000 us on a clean gigabit LAN, more otherwise,
+# up to 200000 (200 ms, for Wi-Fi).
 latency_us = 4000
 # Transmit latency: how far ahead of the media clock playback is handed to
 # the network; at least two engine ticks + 1.5 ms (3.5 ms at tick_us = 1000,
 # 2.5 ms at tick_us = 500). Dropouts and diagnostics suggests a value for
-# this computer after 30 minutes of sending.
+# this computer after 30 minutes of sending. Up to 200000; above 40000 is
+# experimental (for Wi-Fi): the receiving devices must buffer audio that
+# arrives that early, and some drop it.
 tx_latency_us = 4000
 # Engine tick: how often the daemon moves audio between apps and the
 # network (125-4000 us; Virgil Control offers 1000 and 500). Smaller = lower
@@ -80,3 +83,7 @@ subdomain = _DFLT
 # provides one" in Virgil Control. Real Dante hardware normally wins the
 # election.
 master_capable = false
+# Wi-Fi network: filter the clock for Wi-Fi's jitter (over 4 s instead of
+# 1 s, realigning only for errors above 10 ms). Steadier over Wi-Fi, slower
+# to show as locked. "Wi-Fi network" in Virgil Control.
+# wifi = false

@@ -147,7 +147,7 @@ installer and a portable archive:
 | Raspberry Pi (64-bit Raspberry Pi OS 12+, other arm64 Linux) | `Virgil-<ver>-raspberry-pi-installer.sh` (one step), or `virgil_<ver>_arm64.deb` | `Virgil-<ver>-linux-arm64.tar.gz` |
 
 **Raspberry Pi:** a Pi 4 or 5 on wired Ethernet works best; a Pi 3 or Zero 2 W
-needs a USB Ethernet adapter, and Wi-Fi is not suitable for Dante. Use the
+needs a USB Ethernet adapter: Wi-Fi only works with the [Wi-Fi settings](#dante-over-wi-fi), and much less reliably. Use the
 64-bit Raspberry Pi OS (32-bit is not supported).
 
 The easiest way is the one-file installer. Download
@@ -293,6 +293,39 @@ The cost:
 Changing the tick restarts the audio engine; apps reconnect (the soundcard
 layout changes). Other values from 125 to 4000 us can still be set in the
 configuration file.
+
+### Dante over Wi-Fi
+
+Dante is made for wired Ethernet, and Audinate does not support it over
+Wi-Fi. Virgil can still be used over Wi-Fi, for monitoring and playback
+rather than a show, with three settings:
+
+- **Receive latency up to 200 ms** (Settings › *Receive latency*). Over
+  Wi-Fi packets often arrive tens of milliseconds late; audio received by
+  Virgil plays without gaps as long as the latency covers that. *Dropouts
+  and diagnostics* suggests a value when audio arrived too late.
+- **Wi-Fi network** (Settings, `[ptp] wifi = true`): a clock filter for Wi-Fi.
+  It judges the clock over 16 messages (4 s) instead of 4, and realigns only
+  for errors above 10 ms that 8 windows in a row agree on, instead of 1 ms
+  and 5 windows. Over Wi-Fi the wired filter realigns again and again (each
+  time a short gap); this one rides through the jitter. It takes a few
+  minutes to show the clock as locked, and waits 10 s instead of 4 before
+  deciding the leader is gone.
+- **Transmit latency above 40 ms** (experimental, up to 200 ms): Virgil sends
+  audio that far ahead, so Wi-Fi delays up to the latency don't drop audio
+  sent by Virgil. The receiving Dante device has to buffer audio that
+  arrives that early, and some hardware only buffers a few milliseconds and
+  drops it: test with your devices.
+
+Virgil marks its audio packets with DSCP EF (46), as Dante devices do, so
+Wi-Fi sends them from its voice queue and switches with QoS forward them
+first. (Windows ignores the marking unless a QoS policy allows it.)
+
+What helps most outside Virgil: a 5 GHz access point used only for this and
+wired to the Dante switch (no phone hotspot, no mesh); unicast flows only
+(multicast over Wi-Fi is sent slowly and unreliably, unless the access point
+converts multicast to unicast); Wi-Fi power saving off on the computer; and
+the clock leader on the wired side.
 
 ### Channel names
 

@@ -157,6 +157,12 @@ class PiServo {
   double lock_error_ns = 100000;
   double lock_drift_ppb = 1000;
   double lock_hold_s = 5;
+  // The frequency is seeded from a raw measurement over this long, and
+  // refined once over 4x as long.
+  int64_t seed_after_ns = 8000000000LL;
+  // Thresholds for a Wi-Fi network (see PtpClock::Options::wifi), or back
+  // to the defaults.
+  void set_wifi(bool wifi);
 
  private:
   void hold(int64_t local, int64_t est);
@@ -198,6 +204,12 @@ class PtpClock : public ClockSource {
     // used. Software receive timestamps are only ever late, never early, so
     // this drops the scheduling hiccups (1 s at Dante's 4 Sync/s).
     int sync_window = 4;
+    // Wi-Fi network: Sync messages arrive milliseconds late and in bunches
+    // (power saving, retries), and some are lost. Use the least-delayed of
+    // 16 (4 s), realign only for errors above 10 ms that 8 windows agree on,
+    // count the clock as locked within 2 ms, and wait 10 s (not 4) before
+    // declaring the leader lost.
+    bool wifi = false;
   };
 
   ~PtpClock() override { stop(); }
@@ -260,6 +272,7 @@ class PtpClock : public ClockSource {
   std::atomic<int64_t> offset_ns_{0};
   ClockModelCell cell_;
   PiServo servo_;
+  int64_t master_timeout_ns_ = 4000000000LL;  // no Sync for this long: leader lost
   ptp1::PortId self_;
   void (*listener_)(const ClockModel&, void*) = nullptr;
   void* listener_ctx_ = nullptr;

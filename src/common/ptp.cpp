@@ -167,6 +167,20 @@ std::string format_uuid(const Uuid& u) {
 
 // ---- Servo ----------------------------------------------------------------
 
+void PiServo::set_wifi(bool wifi) {
+  const PiServo d;
+  step_threshold_ns = wifi ? 10000000 : d.step_threshold_ns;
+  confirm_windows = wifi ? 8 : d.confirm_windows;
+  lock_error_ns = wifi ? 2000000 : d.lock_error_ns;
+  // Milliseconds of noise per window: the frequency estimate moves more
+  // while settled, and the seed needs a longer baseline (2 ms over 8 s
+  // would be 250 ppm off). The gains stay: with 16-Sync windows they keep
+  // the error within about 0.5 ms in simulation, where gentler gains let
+  // the bursts pull it several ms off.
+  lock_drift_ppb = wifi ? 3000 : d.lock_drift_ppb;
+  seed_after_ns = wifi ? 30000000000LL : d.seed_after_ns;
+}
+
 // While samples are being rejected, keep the phase and run at the estimated
 // frequency only: the proportional term was meant for one interval.
 void PiServo::hold(int64_t local, int64_t est) {
@@ -277,7 +291,7 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master, int64_t delay) {
     KP = std::exp(std::log(kp_fast) * (1 - x) + std::log(kp) * x);
     KI = std::exp(std::log(ki_fast) * (1 - x) + std::log(ki) * x);
   }
-  if (seeded_ && !reseeded_ && local - first_local_ > 32000000000LL) {
+  if (seeded_ && !reseeded_ && local - first_local_ > 4 * seed_after_ns) {
     // Once more over a 4x longer baseline: on a noisy machine (Windows user
     // space, busy Pi) the 8 s seed can be several ppm off, and the integral
     // term then needed a minute to work it out. Only replace the running
@@ -287,7 +301,7 @@ PiServo::Result PiServo::sample(int64_t local, int64_t master, int64_t delay) {
                        double(local - first_local_);
     if (std::fabs((raw - 1.0) * 1e9 - drift_ppb_) > 1000.0) drift_ppb_ = (raw - 1.0) * 1e9;
     else drift_ppb_ -= KI * double(err) / dt;
-  } else if (!seeded_ && count_ >= 4 && local - first_local_ > 8000000000LL) {
+  } else if (!seeded_ && count_ >= 4 && local - first_local_ > seed_after_ns) {
     // Seed the integrator with the raw frequency offset so the first lock
     // does not have to wait for the slow integral term (only once: after
     // that the running estimate is better). By elapsed time, not a window
@@ -353,6 +367,9 @@ void PiServo::update_lock(int64_t local, int64_t err, double dt) {
 bool PtpClock::start(const Options& o) {
   stop();
   opt_ = o;
+  if (o.wifi) opt_.sync_window = std::max(opt_.sync_window, 16);
+  servo_.set_wifi(o.wifi);
+  master_timeout_ns_ = o.wifi ? 10000000000LL : 4000000000LL;
   if (!event_.open(ptp1::kEventPort) || !general_.open(ptp1::kGeneralPort)) {
     VIRGIL_LOG_ERROR("ptp: cannot bind UDP 319/320 (needs administrator/root, or another PTP "
                   "program uses them)");
@@ -424,10 +441,10 @@ bool PtpClock::start(const Options& o) {
   no_master_since_ns_ = start_ns_;
   running_ = true;
   thread_ = std::thread([this] { run(); });
-  VIRGIL_LOG_INFO("ptp: PTPv1 on %s subdomain %s, clock id %s%s",
+  VIRGIL_LOG_INFO("ptp: PTPv1 on %s subdomain %s, clock id %s%s%s",
                ipv4_to_string(o.interface_addr).c_str(), o.subdomain.c_str(),
                ptp1::format_uuid(self_.uuid).c_str(),
-               o.master_capable ? " (may act as master)" : "");
+               o.master_capable ? " (may act as master)" : "", o.wifi ? ", Wi-Fi clock filter" : "");
   return true;
 }
 
@@ -469,7 +486,7 @@ void PtpClock::run() {
     }
     const int64_t now = mono_ns();
 
-    if (have_master_ && !is_master_ && now - master_seen_ns_ > 4000000000LL) {
+    if (have_master_ && !is_master_ && now - master_seen_ns_ > master_timeout_ns_) {
       VIRGIL_LOG_WARN("ptp: lost master %s, holding over", ptp1::format_uuid(master_.uuid).c_str());
       have_master_ = false;
       state_ = kStateFreeRun;
@@ -487,7 +504,7 @@ void PtpClock::run() {
                       "interface and the firewall allows UDP 319/320",
                       sender_count_);
     }
-    if (!have_master_ && !is_master_ && opt_.master_capable && now - master_seen_ns_ > 4000000000LL) {
+    if (!have_master_ && !is_master_ && opt_.master_capable && now - master_seen_ns_ > master_timeout_ns_) {
       VIRGIL_LOG_INFO("ptp: no master found, acting as PTPv1 master (stratum %u)", opt_.stratum);
       is_master_ = true;
       state_ = kStatePtpMaster;
@@ -553,7 +570,7 @@ void PtpClock::consider_master(const ptp1::PortId& src, const ptp1::ClockProps& 
     servo_.reset_to(cell_.load());
   }
   const bool same = have_master_ && src == master_;
-  if (!same && have_master_ && now - master_seen_ns_ < 4000000000LL &&
+  if (!same && have_master_ && now - master_seen_ns_ < master_timeout_ns_ &&
       ptp1::compare_masters(props, src, master_props_, master_) >= 0)
     return;  // keep the current, better master
   if (!same) {

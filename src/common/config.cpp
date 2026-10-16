@@ -160,6 +160,7 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
     } else if (section == "ptp") {
       if (key == "subdomain") c->ptp_subdomain = val;
       else if (key == "master_capable") { if (!need_bool(&c->ptp_master_capable)) return false; }
+      else if (key == "wifi") { if (!need_bool(&c->ptp_wifi)) return false; }
       else if (key == "domain" || key == "priority1") legacy();
       else return fail("unknown key '" + key + "'");
     } else {
@@ -203,10 +204,10 @@ bool validate_config(Config* c, std::string* error) {
     std::snprintf(b, sizeof b, "%g ms", us / 1000.0);
     return std::string(b);
   };
-  if (c->latency_us < 500 || c->latency_us > 40000)
-    return fail("receive latency (latency_us) must be between 0.5 ms and 40 ms");
-  if (c->tx_latency_us < 500 || c->tx_latency_us > 40000)
-    return fail("transmit latency (tx_latency_us) must be between 0.5 ms and 40 ms");
+  if (c->latency_us < 500 || c->latency_us > kMaxLatencyUs)
+    return fail("receive latency (latency_us) must be between 0.5 ms and 200 ms");
+  if (c->tx_latency_us < 500 || c->tx_latency_us > kMaxLatencyUs)
+    return fail("transmit latency (tx_latency_us) must be between 0.5 ms and 200 ms");
   if (c->tx_latency_us < c->min_tx_latency_us())
     return fail("transmit latency (tx_latency_us) must be at least " + ms(c->min_tx_latency_us()) +
                 " (two ticks + 1.5 ms)");
@@ -249,9 +250,13 @@ bool validate_config(Config* c, std::string* error) {
   if (c->spin_us >= c->tick_us) return fail("spin_us must be smaller than tick_us");
 
   // Ring: comfortably larger than every latency in play (all bounded above,
-  // so this stays far below 2^20 frames).
-  const uint64_t need = 8ull * (uint64_t(c->us_to_frames(c->latency_us)) + c->us_to_frames(c->tx_latency_us) +
-                                c->tx_lead_frames() + 4ull * c->period_frames());
+  // so this stays far below 2^20 frames). The drivers' shared ring does not
+  // hold the Dante latencies themselves (Inferno applies them in its own
+  // rings, see dante_*_ring_frames), so latencies past 40 ms (Wi-Fi) count
+  // as 40 ms here: the shared memory stays the size it was.
+  const auto capped = [c](uint32_t us) { return uint64_t(c->us_to_frames(std::min<uint32_t>(us, 40000))); };
+  const uint64_t need = 8ull * (capped(c->latency_us) + capped(c->tx_latency_us) + c->tx_lead_frames() +
+                                4ull * c->period_frames());
   const uint32_t kMaxRing = 1u << 20;
   if (c->ring_frames == 0) {
     uint32_t r = 8192;
@@ -263,6 +268,32 @@ bool validate_config(Config* c, std::string* error) {
     return fail("ring_frames must be a power of two between " + std::to_string(need) + " and " +
                 std::to_string(kMaxRing));
   return true;
+}
+
+namespace {
+uint32_t pow2_at_least(uint64_t n, uint32_t floor) {
+  uint32_t r = floor;
+  while (r < n && r < (1u << 24)) r <<= 1;
+  return r;
+}
+}  // namespace
+
+// Inferno writes received audio at its media time + the receive latency, up
+// to that far ahead of the engine reading it, plus however early senders
+// stamp their packets (another Virgil: up to its transmit latency, counted
+// as 40 ms). The engine silences half a ring ahead, so the ring is 4x that.
+uint32_t Config::dante_rx_ring_frames() const {
+  if (latency_us <= 40000) return ring_frames;  // ring_frames covers it
+  return pow2_at_least(4ull * (uint64_t(us_to_frames(latency_us)) + us_to_frames(40000) + 4ull * period_frames()),
+                       ring_frames);
+}
+
+// Inferno sends samples up to the transmit latency late (after a stall) and
+// reads them by media time; the engine writes a tick ahead.
+uint32_t Config::dante_tx_ring_frames() const {
+  if (tx_latency_us <= 40000) return ring_frames;
+  return pow2_at_least(4ull * (uint64_t(us_to_frames(tx_latency_us)) + tx_lead_frames() + 4ull * period_frames()),
+                       ring_frames);
 }
 
 std::vector<std::string> device_channel_names(const Config& c, bool tx) {
@@ -494,6 +525,7 @@ std::string format_config(const Config& c) {
   o << "lock_memory = " << (c.lock_memory ? "true" : "false") << "\n";
   o << "\n[ptp]\nsubdomain = " << c.ptp_subdomain << "\n";
   o << "master_capable = " << (c.ptp_master_capable ? "true" : "false") << "\n";
+  if (c.ptp_wifi) o << "wifi = true\n";
   bool names = false;
   for (int dir = 0; dir < 2; ++dir) {
     const auto& v = dir == 0 ? c.tx_names : c.rx_names;
