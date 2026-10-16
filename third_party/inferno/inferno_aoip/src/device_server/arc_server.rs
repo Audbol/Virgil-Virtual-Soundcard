@@ -45,6 +45,10 @@ pub async fn run_server(
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.arc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = net_utils::ReceiveBuffer::new();
+  // Virgil patch: some devices (Yamaha consoles and Tio stage boxes) repeat
+  // requests we don't know every few seconds; log each kind once, not
+  // thousands of times.
+  let mut reported_unknown = std::collections::HashSet::<(u16, u16)>::new();
   while conn.should_work() {
     let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
@@ -744,17 +748,22 @@ pub async fn run_server(
         }
 
         x => {
-          error!("received unknown opcode1 {x:#04x}, content {}", hex::encode(request.content()));
-          error!("whole packet: {:?}", hex::encode(request.into_storage()));
+          if reported_unknown.insert((x, 0)) {
+            info!("received unknown opcode1 {x:#04x} (further ones not logged), content {}", hex::encode(request.content()));
+            info!("whole packet: {:?}", hex::encode(request.into_storage()));
+          }
         }
       }
     } else {
-      error!(
-        "received unknown opcode2 {:#04x}, content {}",
-        request.opcode2().read(),
-        hex::encode(request.content())
-      );
-      error!("whole packet: {:?}", hex::encode(request.into_storage()));
+      let op2 = request.opcode2().read();
+      if reported_unknown.insert((request.opcode1().read(), op2)) {
+        info!(
+          "received unknown opcode2 {:#04x} (further ones not logged), content {}",
+          op2,
+          hex::encode(request.content())
+        );
+        info!("whole packet: {:?}", hex::encode(request.into_storage()));
+      }
     }
   }
 }

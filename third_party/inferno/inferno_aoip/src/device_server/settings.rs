@@ -53,7 +53,20 @@ fn create_self_info(
       hex::decode_to_slice(idstr, &mut devid).expect("invalid DEVICE_ID, should contain hex data");
     })
     .unwrap_or_else(|| {
-      devid[2..6].copy_from_slice(&my_ipv4.octets());
+      // Virgil patch: derive the id from the adapter's MAC address, not its
+      // IP. Link-local (169.254.x.x) addresses change when a cable or USB
+      // adapter reconnects; an IP-based id then made this a new device that
+      // had lost its saved receive subscriptions and channel names.
+      let mac = interfaces
+        .iter()
+        .find(|iface| iface.ipv4.iter().any(|n| n.addr() == my_ipv4))
+        .and_then(|iface| iface.mac_addr)
+        .map(|m| m.octets())
+        .filter(|m| m.iter().any(|&b| b != 0));
+      match mac {
+        Some(m) => devid[0..6].copy_from_slice(&m),
+        None => devid[2..6].copy_from_slice(&my_ipv4.octets()),
+      }
       devid[6..8].copy_from_slice(&process_id.to_be_bytes());
     });
 

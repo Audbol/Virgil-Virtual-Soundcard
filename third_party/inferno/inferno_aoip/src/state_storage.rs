@@ -25,9 +25,20 @@ impl StateStorage {
     let base = AppDirs::new(Some("inferno_aoip"), false)
       .map(|d| d.state_dir)
       .unwrap_or_else(|| std::env::temp_dir().join("inferno_aoip"));
-    let dir = base.to_string_lossy().into_owned()
-      + MAIN_SEPARATOR_STR
-      + &hex::encode(self_info.factory_device_id);
+    let dir_for = |id: &[u8]| base.to_string_lossy().into_owned() + MAIN_SEPARATOR_STR + &hex::encode(id);
+    let dir = dir_for(&self_info.factory_device_id);
+    // Virgil patch: device ids used to be built from the IP address; carry
+    // the state saved under that id over to the MAC-based one.
+    let mut legacy = [0u8; 8];
+    legacy[2..6].copy_from_slice(&self_info.ip_address.octets());
+    legacy[6..8].copy_from_slice(&self_info.process_id.to_be_bytes());
+    let legacy_dir = dir_for(&legacy);
+    if legacy_dir != dir && !std::path::Path::new(&dir).exists() && std::path::Path::new(&legacy_dir).is_dir() {
+      match std::fs::rename(&legacy_dir, &dir) {
+        Ok(()) => info!("moved saved state from {legacy_dir}"),
+        Err(e) => warn!("could not move saved state from {legacy_dir}: {e}"),
+      }
+    }
     create_dir_all(&dir).log_and_forget();
     info!("using state directory: {dir}");
     Self { path_prefix: dir + MAIN_SEPARATOR_STR }
