@@ -1,6 +1,6 @@
 # Changelog
 
-## Unreleased
+## 0.8.2
 - **macOS: no more dropouts when playing through the Virgil device** (music from Apple Music, Spotify and so on, with Virgil chosen in Sound settings). macOS writes playback in whole buffers (often about 10 ms) only as far ahead as the driver asks, and Virgil asked for 3 ms (two ticks plus one). Whenever macOS's audio thread was held up for longer than that, a tick found no audio and sent 3-7 ms of silence; in one report this happened every few minutes. The driver now asks for at least 10 ms; macOS reports it as output latency, so apps keep picture and sound in sync. `tx_lead_us` still raises it further.
 - The hint for an app that did not keep up no longer suggests raising the transmit latency (that only stamps packets and does not help); it points to the drivers' playback margin (`tx_lead_us`), and for macOS explains the above.
 
