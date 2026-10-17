@@ -8,7 +8,7 @@
 // rate conversion or drift correction is needed anywhere.
 //
 // Latency: input safety offset = virgild rx latency, output safety offset =
-// virgild tx lead + one tick; both directions add one engine tick of device
+// virgild tx lead + one tick, at least 10 ms (output_safety_frames); both directions add one engine tick of device
 // latency. Driver latency only, as Dante Virtual Soundcard reports it: the
 // Dante network latency (the receiver's latency setting, our transmit
 // latency) is not included, so a recording made through the network lands
@@ -152,6 +152,17 @@ void apply_format(const Format& f) {
 }
 // Zero time stamp period; the HAL never uses an IO buffer larger than this.
 UInt32 zero_ts_period() { return std::max<UInt32>(g.ring_frames / 4, 1); }
+// How far ahead of its output time the HAL must have written a cycle:
+// virgild's playback margin plus the tick that mixes it, and never under
+// 10 ms. The HAL writes whole IO buffers (often ~10 ms) only this far ahead,
+// so its IO thread waking late by more than the offset (busy Mac, a
+// periodic system task) left the tick without audio: 3 ms (two ticks + one)
+// gave dropouts of 3-7 ms every few minutes while playing music. The HAL
+// reports the offset as latency, so apps compensate; tx_lead_us raises it.
+UInt32 output_safety_frames() {
+  const UInt32 min_frames = UInt32(std::lround(g.sample_rate * 0.010));
+  return std::max<UInt32>(g.tx_lead_frames + g.period_frames, min_frames);
+}
 void load_format_from_daemon() {
   Format f;
   if (daemon_format(&f)) apply_format(f);
@@ -633,7 +644,7 @@ OSStatus GetPropertyData(AudioServerPlugInDriverRef inDriver, AudioObjectID id, 
         return put<UInt32>(inDataSize, outDataSize, outData,
                            a->mScope == kAudioObjectPropertyScopeInput
                                ? g.rx_latency_frames
-                               : g.tx_lead_frames + g.period_frames);
+                               : output_safety_frames());
       case kAudioDevicePropertyNominalSampleRate:
         return put<Float64>(inDataSize, outDataSize, outData, g.sample_rate);
       case kAudioDevicePropertyAvailableNominalSampleRates: {

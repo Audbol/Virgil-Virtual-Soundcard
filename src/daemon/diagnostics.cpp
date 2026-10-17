@@ -505,9 +505,16 @@ std::vector<std::string> Diagnostics::hints_locked(int64_t now) const {
   if (lost)
     h.push_back("Audio packets are being lost on the way. Use wired Ethernet (not Wi-Fi), check cables, and turn "
                 "off Energy-Efficient Ethernet (EEE, \"green Ethernet\") on the switch ports.");
+  // The transmit latency does not help here (it only stamps packets): the
+  // margin drivers write ahead with (tx_lead_us) does.
   for (const auto& a : apps)
-    h.push_back(a + fmt(" did not keep up. Raise its buffer size, or raise Virgil's transmit latency (now %.1f ms).",
-                        tx_latency_ms_));
+    if (a == "coreaudio")
+      h.push_back("macOS delivered playback audio late (its audio system was held up, e.g. by a busy Mac). If it keeps "
+                  "happening, give the driver more margin than its 10 ms: tx_lead_us = 15000 under [device] in Edit "
+                  "configuration\xE2\x80\xA6 (playback through Virgil then has that much latency).");
+    else
+      h.push_back(a + " did not keep up. Raise its buffer size, or the drivers' playback margin (tx_lead_us under "
+                      "[device] in Edit configuration\xE2\x80\xA6, e.g. 5000).");
   if (engine)
 #if defined(_WIN32)
     h.push_back("The computer kept Virgil's audio engine waiting. Close heavy programs, choose the High "
