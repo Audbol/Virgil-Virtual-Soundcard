@@ -105,7 +105,13 @@ impl ChannelsSubscriber {
     start_time_rx: Option<tokio::sync::oneshot::Receiver<Clock>>,
     ref_instant: Instant,
   ) -> (Self, Pin<Box<dyn Future<Output = ()> + Send + 'static>>) {
-    let (tx, rx) = mpsc::channel(100);
+    // Virgil patch: room for many batches of every channel. The ARC server
+    // answers Dante Controller only once its commands are queued; with 100
+    // a (un)subscribe of 64 channels right after another batch filled the
+    // queue, the answer waited for the worker (which can spend seconds
+    // resolving transmitters), Dante Controller's request timed out, and
+    // Dante Controller 4.18 crashed cancelling it.
+    let (tx, rx) = mpsc::channel(4096);
     let r = Self {
       commands_sender: tx,
       subscriptions_info: Arc::new(RwLock::new(vec![None; self_info.rx_channels.len()])),
@@ -144,6 +150,11 @@ impl ChannelsSubscriber {
       .log_and_forget();
   }
   pub async fn unsubscribe(&self, local_channel_index: usize) {
+    // Virgil patch: as for subscribe, the list Dante Controller asks for
+    // right after the answer must already show the channel unsubscribed.
+    if let Some(info) = self.subscriptions_info.write().unwrap_or_else(|e| e.into_inner()).get_mut(local_channel_index) {
+      *info = None;
+    }
     self.commands_sender.send(Command::Unsubscribe { local_channel_index }).await.log_and_forget();
   }
   pub async fn save_state(&self) {

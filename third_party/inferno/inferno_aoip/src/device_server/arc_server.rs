@@ -722,6 +722,9 @@ pub async fn run_server(
               }
             }
             conn.respond(&[]).await;
+          } else {
+            // Virgil patch: receiving not up (yet): answer anyway.
+            conn.respond(&[]).await;
           }
         }
 
@@ -729,22 +732,31 @@ pub async fn run_server(
           // netaudio subscription remove (used by network-audio-controller)
           // received unknown opcode1 0x3014, content 000100000002
           // whole packet: "27ff00104a1c30140000000100000002"
+          // Virgil patch: a count, then that many channels (one u16 each
+          // after a u16 0, or a 0/channel u16 pair each: the same for one
+          // channel), and always answered: an unanswered request times out
+          // in Dante Controller.
           if let Some(channels_recv) = &subscriber {
             let content = request.content();
-            if content.len() < 6 {
-              error!("subscription remove request too short: {}", hex::encode(content));
-              continue;
+            let count = if content.len() >= 2 { make_u16(content[0], content[1]) as usize } else { 0 };
+            let channels: Vec<u16> = if count > 0 && content.len() == 4 + 2 * count {
+              (0..count).map(|i| make_u16(content[4 + 2 * i], content[5 + 2 * i])).collect()
+            } else if count > 0 && content.len() == 2 + 4 * count {
+              (0..count).map(|i| make_u16(content[4 + 4 * i], content[5 + 4 * i])).collect()
+            } else {
+              error!("subscription remove request not understood: {}", hex::encode(content));
+              vec![]
+            };
+            for local_channel in channels {
+              if local_channel == 0 || local_channel as usize > self_info.rx_channels.len() {
+                error!("got disconnect request for nonexisting channel {local_channel}");
+                continue;
+              }
+              info!("disconnect requested: local channel {}", local_channel);
+              channels_recv.unsubscribe((local_channel - 1) as usize).await;
             }
-            let local_channel = make_u16(content[4], content[5]);
-            if local_channel == 0 || local_channel as usize > self_info.rx_channels.len() {
-              error!("got disconnect request for nonexisting channel {local_channel}");
-              continue;
-            }
-            let local_channel_index = (local_channel - 1) as usize;
-            info!("disconnect requested: local channel {}", local_channel);
-            channels_recv.unsubscribe(local_channel_index).await;
-            conn.respond(&[]).await;
           }
+          conn.respond(&[]).await;
         }
 
         x => {

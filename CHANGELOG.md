@@ -1,5 +1,8 @@
 # Changelog
 
+## Unreleased
+- **Dante Controller no longer times out (and crashes) subscribing or clearing many of Virgil's receive channels at once.** Virgil answered a subscription request only once its commands were queued for the subscription worker; with a batch of 64 channels arriving while the worker was resolving transmitters (looking up a device takes seconds), the answer took 3-3.5 s, Dante Controller's request timed out, and Dante Controller 4.18 crashed cancelling it. The queue now holds thousands of commands and answers come at once (under 1 ms for 64 channels, tested). A channel cleared shows as unsubscribed in the list Dante Controller asks for right after, a "remove subscriptions" request may list several channels, and malformed requests are still answered.
+
 ## 0.8.2
 - **macOS: no more dropouts when playing through the Virgil device** (music from Apple Music, Spotify and so on, with Virgil chosen in Sound settings). macOS writes playback in whole buffers (often about 10 ms) only as far ahead as the driver asks, and Virgil asked for 3 ms (two ticks plus one). Whenever macOS's audio thread was held up for longer than that, a tick found no audio and sent 3-7 ms of silence; in one report this happened every few minutes. The driver now asks for at least 10 ms; macOS reports it as output latency, so apps keep picture and sound in sync. `tx_lead_us` still raises it further.
 - The hint for an app that did not keep up no longer suggests raising the transmit latency (that only stamps packets and does not help); it points to the drivers' playback margin (`tx_lead_us`), and for macOS explains the above.
