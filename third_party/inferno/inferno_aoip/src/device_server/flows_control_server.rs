@@ -24,6 +24,10 @@ pub async fn run_server(
     UdpSocketWrapper::new(Some(self_info.ip_address), self_info.flows_control_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
+  // Virgil patch: some devices (Yamaha Tio stage boxes, consoles) send a
+  // request we don't know every few seconds; log each kind once (and at
+  // most 256 kinds), not twice per request.
+  let mut reported_unknown = std::collections::HashSet::<(u16, u16)>::new();
   while conn.should_work() {
     let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
@@ -195,17 +199,18 @@ pub async fn run_server(
         }
 
         x => {
-          error!("received unknown opcode1 {x:#04x}, content {}", hex::encode(request.content()));
-          error!("whole packet: {:?}", hex::encode(request.into_storage()));
+          if reported_unknown.len() < 256 && reported_unknown.insert((x, 0)) {
+            info!("received unknown opcode1 {x:#04x} (further ones not logged), content {}", hex::encode(request.content()));
+            info!("whole packet: {:?}", hex::encode(request.into_storage()));
+          }
         }
       }
     } else {
-      error!(
-        "received unknown opcode2 {:#04x}, content {}",
-        request.opcode2().read(),
-        hex::encode(request.content())
-      );
-      error!("whole packet: {:?}", hex::encode(request.into_storage()));
+      let op2 = request.opcode2().read();
+      if reported_unknown.len() < 256 && reported_unknown.insert((request.opcode1().read(), op2)) {
+        info!("received unknown opcode2 {:#04x} (further ones not logged), content {}", op2, hex::encode(request.content()));
+        info!("whole packet: {:?}", hex::encode(request.into_storage()));
+      }
     }
   }
   flows_tx.lock().await.as_mut().unwrap().shutdown().await;

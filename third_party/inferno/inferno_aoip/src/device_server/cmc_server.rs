@@ -13,6 +13,10 @@ pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<
   let server = UdpSocketWrapper::new(Some(self_info.ip_address), self_info.cmc_port, shutdown).await;
   let mut conn = req_resp::Connection::new(server);
   let mut recv_buff = crate::net_utils::ReceiveBuffer::new();
+  // Virgil patch: some devices (Yamaha Tio stage boxes, consoles) send a
+  // request we don't know every few seconds; log each kind once (and at
+  // most 256 kinds), not twice per request.
+  let mut reported_unknown = std::collections::HashSet::<(u16, u16)>::new();
   while conn.should_work() {
     let request = match conn.recv(&mut recv_buff).await {
       Some(v) => v,
@@ -34,8 +38,10 @@ pub async fn run_server(self_info: Arc<DeviceInfo>, shutdown: BroadcastReceiver<
           conn.respond_with_struct(CODE_OK, adv).await;
         }
         other => {
-          error!("received unknown opcode1 {other:#04x}, content {}", hex::encode(request.content()));
-          error!("whole packet: {:?}", hex::encode(request.into_storage()));
+          if reported_unknown.len() < 256 && reported_unknown.insert((other, 0)) {
+            info!("received unknown opcode1 {other:#04x} (further ones not logged), content {}", hex::encode(request.content()));
+            info!("whole packet: {:?}", hex::encode(request.into_storage()));
+          }
         }
       }
     } else {

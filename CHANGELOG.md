@@ -1,6 +1,7 @@
 # Changelog
 
 ## Unreleased
+- Requests Virgil doesn't know (a Yamaha Tio1608 sends one every 5 s) are now logged once, as information, on every network port; 0.7.1 did this only for the main control port, so these still filled the log with errors.
 - **Dante Controller no longer times out (and crashes) subscribing or clearing many of Virgil's receive channels at once.** Virgil answered a subscription request only once its commands were queued for the subscription worker; with a batch of 64 channels arriving while the worker was resolving transmitters (looking up a device takes seconds), the answer took 3-3.5 s, Dante Controller's request timed out, and Dante Controller 4.18 crashed cancelling it. The queue now holds thousands of commands and answers come at once (under 1 ms for 64 channels, tested). A channel cleared shows as unsubscribed in the list Dante Controller asks for right after, a "remove subscriptions" request may list several channels, and malformed requests are still answered.
 
 ## 0.8.2
