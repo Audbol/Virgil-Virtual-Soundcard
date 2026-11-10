@@ -46,7 +46,8 @@ class HttpServer {
 
  private:
   void run();
-  void serve(intptr_t client, uint32_t peer);
+  // limit_ns: overall deadline (0 = 3 s from this computer, 6 s otherwise).
+  void serve(intptr_t client, uint32_t peer, int64_t limit_ns = 0);
 
   intptr_t listen_fd_ = -1;
   Handler handler_;

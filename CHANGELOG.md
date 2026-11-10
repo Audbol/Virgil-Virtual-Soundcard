@@ -1,6 +1,11 @@
 # Changelog
 
 ## Unreleased
+- **Security: the diagnostics report no longer contains the remote-access password.** *Save report…* and `/api/diagnostics/report` included the configuration file as it is, password and all (also for remote viewers, and reports get attached to bug reports). It is masked now, as in the configuration view.
+- Virgil Control and the web panel read quoted values as the service does: a password or device name with spaces at its start or end inside the quotes (`remote_password = " pass..."`) is no longer changed by an unrelated Settings save (remote users could no longer log in).
+- The control panel answers this computer quickly even while other local connections stall: this computer gets up to 32 connection threads (other computers 8), and one served past that gets 300 ms instead of 3 s (`/api/status` took up to 8 s under a slow-client test, now under 0.25 s).
+- A configuration save resolves the masked password, checks and writes under one lock, so a remote save can no longer write back a password changed on this computer at the same moment.
+- `rt_priority` above 99 is refused (a huge value turned negative and the saved file could not be read back); `shm_name` and the PTP subdomain are quoted when written, like the other text values.
 - Requests Virgil doesn't know (a Yamaha Tio1608 sends one every 5 s) are now logged once, as information, on every network port; 0.7.1 did this only for the main control port, so these still filled the log with errors.
 - **Dante Controller no longer times out (and crashes) subscribing or clearing many of Virgil's receive channels at once.** Virgil answered a subscription request only once its commands were queued for the subscription worker; with a batch of 64 channels arriving while the worker was resolving transmitters (looking up a device takes seconds), the answer took 3-3.5 s, Dante Controller's request timed out, and Dante Controller 4.18 crashed cancelling it. The queue now holds thousands of commands and answers come at once (under 1 ms for 64 channels, tested). A channel cleared shows as unsubscribed in the list Dante Controller asks for right after, a "remove subscriptions" request may list several channels, and malformed requests are still answered.
 

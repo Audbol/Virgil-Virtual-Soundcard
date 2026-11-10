@@ -110,7 +110,7 @@ bool HttpServer::start(uint32_t addr, uint16_t port, Handler handler) {
   sa.sin_family = AF_INET;
   sa.sin_port = htons(port);
   sa.sin_addr.s_addr = htonl(addr);
-  if (bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0 || listen(fd, 16) != 0) {
+  if (bind(fd, reinterpret_cast<sockaddr*>(&sa), sizeof sa) != 0 || listen(fd, 64) != 0) {
     VIRGIL_CLOSE(fd);
     return false;
   }
@@ -144,9 +144,12 @@ void HttpServer::run() {
     if (c == decltype(c)(-1)) continue;
     const uint32_t from = ntohl(peer.sin_addr.s_addr);
     // A thread per connection (bounded): one that sends nothing yet does
-    // not delay the next. At the bound, serve here (this computer only).
-    constexpr int kMaxWorkers = 8;
-    if (workers_.fetch_add(1) < kMaxWorkers) {
+    // not delay the next. Other computers get at most 8 threads, this
+    // computer up to 32 (the apps poll several windows at once); at the
+    // bound, this computer is served here with a short deadline.
+    const bool local = (from >> 24) == 127;
+    const int max_workers = local ? 32 : 8;
+    if (workers_.fetch_add(1) < max_workers) {
       try {
         std::thread([this, c, from] {
           serve(intptr_t(c), from);
@@ -161,24 +164,26 @@ void HttpServer::run() {
     // At the bound, only this computer is served here: other computers
     // could otherwise stall the panel with a few connections that trickle
     // their request (before they have even logged in).
-    if ((from >> 24) == 127) serve(intptr_t(c), from);
+    // A slow client served here holds up every later connection, so it gets
+    // 300 ms instead of 3 s (requests from this computer arrive at once).
+    if (local) serve(intptr_t(c), from, 300000000LL);
     VIRGIL_CLOSE(c);
   }
 }
 
-void HttpServer::serve(intptr_t fd, uint32_t peer) {
+void HttpServer::serve(intptr_t fd, uint32_t peer, int64_t limit_ns) {
   // Short receive timeout: requests from this computer arrive at once; an
   // idle connection is dropped quickly. Other computers (remote access) get
   // a little longer.
   const bool local = (peer >> 24) == 127;
-  set_timeout(fd, local ? 500 : 2000);
+  set_timeout(fd, limit_ns ? int(limit_ns / 1000000) : local ? 500 : 2000);
   const auto sfd = decltype(socket(0, 0, 0))(fd);
   std::string buf;
   char chunk[4096];
   size_t header_end = std::string::npos;
   // One overall deadline per connection: a client trickling bytes must not
   // hold a server thread, or stop() waiting for it, for long.
-  const int64_t deadline = mono_ns() + (local ? 3000000000LL : 6000000000LL);
+  const int64_t deadline = mono_ns() + (limit_ns ? limit_ns : local ? 3000000000LL : 6000000000LL);
   auto expired = [&] { return mono_ns() > deadline || !running_; };
   while (header_end == std::string::npos) {
     if (expired()) return;

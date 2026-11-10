@@ -270,10 +270,13 @@ const ALIASES = { playback_channels: "tx_channels", capture_channels: "rx_channe
 const canonSec = s => s === "network" ? "device" : s;
 const canonKey = (sec, k) => sec === "device" ? (ALIASES[k] || k) : k;
 function headerOf(l) { const m = l.match(/^\s*\[([^\]]+)\]\s*(?:[;#].*)?$/); return m ? m[1].trim().toLowerCase() : null; }
+// As the service reads a value: the comment cut off (outside quotes), trimmed,
+// then one enclosing pair of quotes removed (spaces inside them are kept).
 function parseVal(v) {
   let q = false, out = "";
-  for (const ch of v) { if (ch === '"') { q = !q; continue; } if (!q && (ch === ";" || ch === "#")) break; out += ch; }
-  return out.trim();
+  for (const ch of v) { if (ch === '"') q = !q; else if (!q && (ch === ";" || ch === "#")) break; out += ch; }
+  out = out.trim();
+  return out.length >= 2 && out[0] === '"' && out[out.length - 1] === '"' ? out.slice(1, -1) : out;
 }
 // Calls fn(lineIndex, section, key, value, match) for every key line.
 function eachKey(lines, fn) {

@@ -392,7 +392,8 @@ HttpResponse ControlServer::diagnostics_report() {
     if (f) {
       std::stringstream ss;
       ss << f.rdbuf();
-      r += "\nConfiguration (" + cfg_path + ")\n" + ss.str();
+      // Reports get attached to bug reports: never with the remote password.
+      r += "\nConfiguration (" + cfg_path + ")\n" + mask_remote_password(ss.str());
       if (!r.empty() && r.back() != '\n') r += "\n";
     }
   }
@@ -492,15 +493,7 @@ HttpResponse ControlServer::save_config(const HttpRequest& r, bool local) {
   // A password sent back masked keeps the current one; other computers may
   // not change the remote access settings.
   std::string body, err;
-  {
-    std::lock_guard<std::mutex> lock(config_file_mutex());
-    if (!resolve_posted_config(r.body, current_config_text(), local, &body, &err)) return json_error(403, err);
-  }
-  Config parsed;
-  if (!parse_config(body, &parsed, &err)) return json_error(400, err);
-  Config check = parsed;
-  if (!validate_config(&check, &err)) return json_error(400, err);
-
+  Config check;
   std::string path, running_iface;
   {
     std::lock_guard<std::mutex> l(ctx_->mutex);
@@ -511,10 +504,17 @@ HttpResponse ControlServer::save_config(const HttpRequest& r, bool local) {
   make_parent_dirs(path);
   const std::string base = r.header("x-virgil-config-version");
   {
+    // Resolve, check and write under one lock: resolved against an older
+    // text, a remote save could write back a password changed meanwhile.
     std::lock_guard<std::mutex> lock(config_file_mutex());
     const std::string current = current_config_text();
     if (!base.empty() && base != config_version(current))
       return json_error(409, "the configuration was changed elsewhere meanwhile; reload it and try again");
+    if (!resolve_posted_config(r.body, current, local, &body, &err)) return json_error(403, err);
+    Config parsed;
+    if (!parse_config(body, &parsed, &err)) return json_error(400, err);
+    check = parsed;
+    if (!validate_config(&check, &err)) return json_error(400, err);
     // A missing network adapter is only refused when this save chooses it:
     // the daemon waits for a configured one that is not there (yet), so
     // other settings can still be saved meanwhile.

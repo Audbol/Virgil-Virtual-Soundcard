@@ -137,7 +137,12 @@ bool parse_config(const std::string& text, Config* c, std::string* error) {
       else if (key == "tick_us") { if (!need_u32(&c->tick_us)) return false; }
       else if (key == "tx_lead_us") { if (!need_u32(&c->tx_lead_us)) return false; }
       else if (key == "ring_frames") { if (!need_u32(&c->ring_frames)) return false; }
-      else if (key == "rt_priority") { uint32_t p; if (!need_u32(&p)) return false; c->rt_priority = int(p); }
+      else if (key == "rt_priority") {
+        uint32_t p;
+        if (!need_u32(&p)) return false;
+        if (p > 99) return fail("'rt_priority' must be between 0 and 99");
+        c->rt_priority = int(p);
+      }
       else if (key == "spin_us") { if (!need_u32(&c->spin_us)) return false; }
       else if (key == "lock_memory") { if (!need_bool(&c->lock_memory)) return false; }
       else if (key == "remote_access") { if (!need_bool(&c->remote_access)) return false; }
@@ -521,7 +526,7 @@ std::string format_config(const Config& c) {
   o << "# Virgil configuration\n\n[device]\n";
   o << "name = " << quoted(c.device_name) << "\n";
   o << "interface = " << quoted(c.interface) << "\n";
-  if (!c.shm_name.empty()) o << "shm_name = " << c.shm_name << "\n";
+  if (!c.shm_name.empty()) o << "shm_name = " << quoted(c.shm_name) << "\n";
   o << "sample_rate = " << c.sample_rate << "\n";
   o << "tx_channels = " << c.tx_channels << "\n";
   o << "rx_channels = " << c.rx_channels << "\n";
@@ -538,7 +543,7 @@ std::string format_config(const Config& c) {
   o << "rt_priority = " << c.rt_priority << "\n";
   o << "spin_us = " << c.spin_us << "\n";
   o << "lock_memory = " << (c.lock_memory ? "true" : "false") << "\n";
-  o << "\n[ptp]\nsubdomain = " << c.ptp_subdomain << "\n";
+  o << "\n[ptp]\nsubdomain = " << quoted(c.ptp_subdomain) << "\n";
   o << "master_capable = " << (c.ptp_master_capable ? "true" : "false") << "\n";
   if (c.ptp_wifi) o << "wifi = true\n";
   bool names = false;

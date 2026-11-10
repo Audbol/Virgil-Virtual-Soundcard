@@ -386,14 +386,13 @@ std::string conf_get(const std::string& text, const std::string& section, const 
     if (!h.empty()) { cur = h; continue; }
     size_t eq = 0;
     if (section_matches(section, cur) && key_matches(key, key_of(line, &eq), section)) {
-      std::string v, raw = line.substr(eq + 1);
-      bool q = false;
-      for (char c : raw) {
-        if (c == '"') { q = !q; continue; }
-        if (!q && (c == ';' || c == '#')) break;
-        v += c;
-      }
-      found = trim(v);
+      // As the daemon reads it: the comment cut off (outside quotes), then
+      // trimmed, then one enclosing pair of quotes removed; spaces inside the
+      // quotes are kept (they were trimmed away, so a password " pass..."
+      // changed on an unrelated Settings save).
+      std::string v = trim(strip_comment(line.substr(eq + 1)));
+      if (v.size() >= 2 && v.front() == '"' && v.back() == '"') v = v.substr(1, v.size() - 2);
+      found = v;
     }
   }
   return found;
