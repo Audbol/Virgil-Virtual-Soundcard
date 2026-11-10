@@ -974,7 +974,11 @@ impl<P: ProxyToSamplesBuffer + Sync + Send + 'static, B: ChannelsBuffering<P>>
                 let mut subinfos = subscription_info.write().unwrap_or_else(|e| e.into_inner());
                 for update in updates {
                   for chi in update.local_channel_indices {
-                    subinfos[chi].as_mut().unwrap().status = SubscriptionStatus::TxFail;
+                    // Virgil patch: the channel may have been unsubscribed
+                    // meanwhile (the ARC server clears its entry at once).
+                    if let Some(info) = subinfos.get_mut(chi).and_then(|i| i.as_mut()) {
+                      info.status = SubscriptionStatus::TxFail;
+                    }
                   }
                 }
                 flows.lock().unwrap_or_else(|e| e.into_inner())[flow_index] = None;

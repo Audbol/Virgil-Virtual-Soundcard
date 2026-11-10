@@ -1,6 +1,10 @@
 # Changelog
 
-## Unreleased
+## 0.8.3
+From network fuzzing (9.2 million packets on every Dante port and PTP, also under AddressSanitizer: no memory-safety problems) and monkey testing of the control panel, its API, the configuration and the web panel (no crashes, hangs or leaks); these are their fixes, together with the ones since 0.8.2.
+- **No more engine restart from a failed flow request after an unsubscribe.** If a receive channel was unsubscribed while Virgil was still asking the transmitter for its audio, and that request then failed, the Dante stack crashed and restarted (2-3 s without audio on every channel). Found by network fuzzing; the exact sequence no longer crashes it.
+- **A multicast flow deleted right after it was created is really deleted.** While Virgil checks that a new multicast address is free (a few seconds), a delete was undone when the check finished: the flow kept sending and stayed advertised but could never be deleted, and its id stayed busy. It now stops when it finds itself deleted, and releases a reserved address it does not use.
+- A request to delete hundreds of nonexistent multicast flows no longer writes two log lines per id (about 1400 lines and seconds of delay for the control port per packet): ids that cannot exist are ignored and failures are summed up in one line.
 - **Security: the diagnostics report no longer contains the remote-access password.** *Save report…* and `/api/diagnostics/report` included the configuration file as it is, password and all (also for remote viewers, and reports get attached to bug reports). It is masked now, as in the configuration view.
 - Virgil Control and the web panel read quoted values as the service does: a password or device name with spaces at its start or end inside the quotes (`remote_password = " pass..."`) is no longer changed by an unrelated Settings save (remote users could no longer log in).
 - The control panel answers this computer quickly even while other local connections stall: this computer gets up to 32 connection threads (other computers 8), and one served past that gets 300 ms instead of 3 s (`/api/status` took up to 8 s under a slow-client test, now under 0.25 s).

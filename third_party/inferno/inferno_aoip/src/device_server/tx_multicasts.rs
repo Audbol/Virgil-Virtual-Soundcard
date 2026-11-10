@@ -179,17 +179,34 @@ impl TransmitMulticasts {
       let flows_tx = self.flows_tx.clone();
       let should_work = self.should_work.clone();
       let multicasts_by_channel = self.multicasts_by_channel.clone();
+      let bundles = self.bundles.clone();
       tokio::spawn(async move {
         let mut dst_addr = dst.0;
         let mut dst_port = dst.1;
         loop {
           let mut ok = true;
+          let mut reserved = false;
           ok &= !mdns_client.is_multicast_ip_already_used(dst_addr).await.unwrap_or(true);
           if ok {
             mdns_server.reserve_multicast_ip(dst_addr);
+            reserved = true;
             ok &= !mdns_client.is_multicast_ip_already_used(dst_addr).await.unwrap_or(true);
           }
           {
+            // Virgil patch: the flow may have been deleted during the grace
+            // period (the checks above take seconds). Activating or re-adding
+            // it then left a flow that kept sending and stayed advertised but
+            // could never be deleted. Checked under the bundles lock, taken
+            // before flows_tx as remove_flow_internal does.
+            let bundles_locked = bundles.lock().await;
+            let still_wanted = matches!(bundles_locked.get(flow_index), Some(Some(b)) if Arc::ptr_eq(&b.dst_addr, &dst_addr_arc));
+            if !still_wanted {
+              info!("multicast flow index {flow_index} was removed during its grace period; not activating it");
+              if reserved {
+                mdns_server.remove_multicast_ip(dst_addr);
+              }
+              break;
+            }
             let mut flows_tx_opt = flows_tx.lock().await;
             if let Some(flows_tx) = flows_tx_opt.as_mut() {
               if !should_work.load(std::sync::atomic::Ordering::SeqCst) {
@@ -239,6 +256,9 @@ impl TransmitMulticasts {
                 break;
               } else {
                 warn!("multicast address conflict detected: {dst_addr:?}, retrying");
+                if reserved {
+                  mdns_server.remove_multicast_ip(dst_addr);  // Virgil patch: not ours after all
+                }
                 flows_tx.remove_multicast_flow(flow_index.try_into().unwrap()).await.log_and_forget();
                 (dst_addr, dst_port) = flows_tx.random_multicast_destination();
 
@@ -315,7 +335,9 @@ impl TransmitMulticasts {
       }
       result
     } else if !ignore_nonexisting {
-      error!("BUG: trying to remove nonexisting multicast TX flow index {flow_index}");
+      // Virgil patch: a delete request for a flow that does not exist (any
+      // device can send one) is not a bug here; the caller sums them up.
+      log::debug!("no multicast TX flow index {flow_index} to remove");
       Err(std::io::Error::from(std::io::ErrorKind::NotFound))
     } else {
       Ok(())

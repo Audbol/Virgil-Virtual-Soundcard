@@ -497,24 +497,32 @@ pub async fn run_server(
             .chunks_exact(2)
             .map(|chunk| u16::from_be_bytes(chunk.try_into().unwrap()))
             .take(count)
-            .filter_map(|id| if id > 0 { Some((id as usize) - 1) } else { None });
+            // Virgil patch: only ids that can exist, each once. A request
+            // listing hundreds of bogus ids logged two lines per id (with a
+            // backtrace each under RUST_BACKTRACE) and held this server for
+            // seconds; failures are now summed up in one line.
+            .filter_map(|id| if id > 0 && (id as u32) <= MAX_TX_FLOWS { Some((id as usize) - 1) } else { None })
+            .collect::<std::collections::BTreeSet<usize>>();
 
           let mut deleted_any = false;
+          let mut failed = 0usize;
 
           for flow_index in flow_indices {
             if let Some(txm) = tx_multicasts.lock().await.as_ref() {
-              txm
-                .remove_flow(flow_index)
-                .await
-                .map(|()| {
+              match txm.remove_flow(flow_index).await {
+                Ok(()) => {
                   deleted_any = true;
                   info!("deleted multicast tx flow id {}", flow_index + 1);
-                })
-                .log_and_forget();
+                }
+                Err(_) => failed += 1,
+              }
             } else {
               error!("tx_multicasts None but got delete multicast request");
               continue;
             }
+          }
+          if failed > 0 {
+            warn!("delete multicast tx flow: {failed} of the requested flows did not exist or could not be removed");
           }
           if deleted_any {
             conn.respond(&[]).await;
